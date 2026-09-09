@@ -1,0 +1,28 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: recut
+      POSTGRES_PASSWORD: recut_pass
+      POSTGRES_DB: recut
+    ports:
+      - "5432:5432"
+    volumes:
+      - recut_db:/var/lib/postgresql/data
+
+  bot:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://recut:recut_pass@db:5432/recut
+    depends_on:
+      - db
+    volumes:
+      - /tmp/recut:/tmp/recut
+
+volumes:
+  recut_db:
