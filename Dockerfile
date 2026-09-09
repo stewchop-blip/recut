@@ -4,9 +4,13 @@ FROM python:3.12-slim
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    libffmpeg-dev \
     gcc \
     libc-dev \
+    libavcodec-dev \
+    libavformat-dev \
+    libavutil-dev \
+    libswscale-dev \
+    libswresample-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
