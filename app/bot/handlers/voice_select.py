@@ -23,8 +23,8 @@ async def on_voice_select(call: CallbackQuery) -> None:
     job_id = str(uuid.uuid4())
 
     await call.answer(f"Генерирую голос: {voice}")
-
-    text = call.message.text or "Привет! Это тестовый текст для озвучки."
+    # Use message text for synthesis
+    text = call.message.text or "Привет! Тестовое озвучивание."
 
     limits = get_limits_manager()
     quota = limits.check_daily_generations(user_id)

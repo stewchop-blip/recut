@@ -39,10 +39,13 @@ async def on_startup(bot: Bot) -> None:
         BotCommand(command="cancel", description="Отменить"),
     ])
 
-    # Set webhook only if domain configured; else polling for local test
-    if settings.webhook_url and settings.environment == "production":
+    # Startup (polling for local test; webhook for prod)
+    await on_startup(bot)
+    if settings.environment == "production" and settings.webhook_url:
         await bot.set_webhook(url=settings.webhook_url, secret_token=settings.webhook_secret)
         logger.info("webhook_set", url=settings.webhook_url)
+    else:
+        logger.info("polling_mode_enabled")
 
 
 async def on_shutdown(bot: Bot) -> None:
