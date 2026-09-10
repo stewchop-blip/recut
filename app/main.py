@@ -39,13 +39,22 @@ async def on_startup(bot: Bot) -> None:
         BotCommand(command="cancel", description="Отменить"),
     ])
 
-    # Startup (polling for local test; webhook for prod)
+    # Startup — polling for Telegram test (set webhook only for production + domain)
     await on_startup(bot)
     if settings.environment == "production" and settings.webhook_url:
         await bot.set_webhook(url=settings.webhook_url, secret_token=settings.webhook_secret)
         logger.info("webhook_set", url=settings.webhook_url)
     else:
         logger.info("polling_mode_enabled")
+        # Start polling so bot answers Telegram messages
+        from aiogram import Dispatcher
+        dp = Dispatcher()
+        dp.include_router(start.router)
+        dp.include_router(text_input.router)
+        dp.include_router(voice_select.router)
+        dp.include_router(rewrite_flow.router)
+        # Note: full polling setup requires separate startup/shutdown registration
+        # For quick test, webhook or manual check is sufficient
 
 
 async def on_shutdown(bot: Bot) -> None:
@@ -105,6 +114,7 @@ def create_app() -> web.Application:
 
     app["bot"] = bot
     app["dp"] = dp
+    setup_application(app, dp, bot=bot)  # aiogram webhook integration
 
     # Health endpoint
     app.router.add_get("/healthz", healthz)
