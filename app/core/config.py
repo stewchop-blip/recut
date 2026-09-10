@@ -92,6 +92,14 @@ class Settings(BaseSettings):
 
 
 # Global settings instance (loaded once)
+# Fallback to .env if Railway Variables empty (local/backup)
+if not os.getenv("TELEGRAM_BOT_TOKEN"):
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except Exception:
+        pass
+
 settings = Settings()  # type: ignore[call-arg]
 
 
