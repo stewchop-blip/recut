@@ -33,11 +33,15 @@ async def on_startup(bot: Bot) -> None:
         logger.info("startup_cleanup_done", removed=cleaned)
 
     # Set bot commands
-    await bot.set_my_commands([
-        BotCommand(command="start", description="Начать"),
-        BotCommand(command="help", description="Помощь"),
-        BotCommand(command="cancel", description="Отменить"),
-    ])
+    # Set bot commands — protected against Telegram flood limits
+    try:
+        await bot.set_my_commands([
+            BotCommand(command="start", description="Начать"),
+            BotCommand(command="help", description="Помощь"),
+            BotCommand(command="cancel", description="Отменить"),
+        ])
+    except Exception as e:
+        logger.warning("telegram_commands_skipped", error=str(e)[:60])
 
     # Startup — polling for Telegram test (set webhook only for production + domain)
     await on_startup(bot)
