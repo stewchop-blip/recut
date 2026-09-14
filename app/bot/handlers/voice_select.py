@@ -1,8 +1,8 @@
 """Callback for voice selection — triggers TTS synthesis."""
 
 import uuid
-from aiogram import F, Router
-from aiogram.types import CallbackQuery, InputFile
+from aiogram import F, Router, types
+from aiogram.types import CallbackQuery
 
 from app.core.config import get_settings
 from app.core.limits import get_limits_manager
@@ -64,6 +64,3 @@ async def on_voice_select(call: CallbackQuery) -> None:
     finally:
         await tts.close()
         # Cleanup handled by job_context finally
-
-
-from aiogram.types import InputFile  # import for usage above
