@@ -10,6 +10,7 @@ from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
 from app.core.config import get_settings
@@ -33,7 +34,8 @@ async def _safe_set_my_commands(bot: Bot) -> None:
 
 
 def _build_dispatcher() -> Dispatcher:
-    dp = Dispatcher()
+    # In-memory FSM storage — fine for single-instance polling mode on Railway.
+    dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(start.router)
     dp.include_router(text_input.router)
     dp.include_router(voice_select.router)

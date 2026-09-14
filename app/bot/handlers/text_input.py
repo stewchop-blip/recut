@@ -1,11 +1,11 @@
-"""Text message handler — validates input, shows voice keyboard."""
-
+"""Text message handler — validates input, shows voice keyboard, stores text in FSM."""
 from aiogram import F, Router, types
-from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 
 from app.core.config import get_settings
 from app.core.limits import LimitsManager, get_limits_manager
 from app.bot.keyboards.inline import get_voice_keyboard
+from app.bot.states import RecutStates
 from app.core.logging import get_logger
 
 router = Router()
@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 
 
 @router.message(F.text)
-async def handle_text(message: types.Message) -> None:
+async def handle_text(message: types.Message, state: FSMContext) -> None:
     text = message.text or ""
     settings = get_settings()
     limits = get_limits_manager()
@@ -25,6 +25,7 @@ async def handle_text(message: types.Message) -> None:
         await message.answer(
             f"❌ {check.reason}\n\nПопробуй короче или разбей текст на части."
         )
+        await state.clear()
         return
 
     # Check quota
@@ -33,10 +34,18 @@ async def handle_text(message: types.Message) -> None:
         await message.answer(
             f"❌ {quota.reason}\nОсталось: {quota.current_count}/{quota.limit}"
         )
+        await state.clear()
         return
 
-    # Save to temporary state (using message_id + user_id as job key)
-    # For MVP: just show voice selection — no persistent state yet
+    # Persist the actual user text + message_id so the voice callback can find it
+    await state.set_state(RecutStates.awaiting_voice)
+    await state.update_data(
+        text=text,
+        prompt_message_id=message.message_id,
+        prompt_chat_id=message.chat.id,
+    )
+
+    # Show voice selection
     await message.answer(
         f"✅ Текст получен ({len(text)} симв.).\n\nВыбери голос:",
         reply_markup=get_voice_keyboard(),
