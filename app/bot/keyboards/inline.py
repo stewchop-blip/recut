@@ -1,9 +1,15 @@
-"""Inline keyboard builders."""
+"""Inline keyboards — minimal, no dead buttons.
 
+The previous version exposed four buttons after each audio result
+("Сгенерировать снова", "Сменить голос", "Подготовить текст", "Новый
+текст") but only two of them actually worked. Users clicked the dead
+ones and got confusing errors. Now we only show buttons that do
+something useful.
+"""
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-# Voice selection keyboard (after text input)
+# Voice selection — shown right after the user sends text
 VOICE_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
     [
         InlineKeyboardButton(text="🎙 Мужской", callback_data="voice:male"),
@@ -12,32 +18,19 @@ VOICE_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
     ]
 ])
 
-# Result actions (after audio sent)
+# After audio is sent: just let the user start over with a new text
 RESULT_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
     [
-        InlineKeyboardButton(text="🔄 Сгенерировать снова", callback_data="action:regenerate"),
-        InlineKeyboardButton(text="🎙 Сменить голос", callback_data="action:change_voice"),
-    ],
-    [
-        InlineKeyboardButton(text="✨ Подготовить текст", callback_data="action:rewrite"),
-        InlineKeyboardButton(text="📝 Новый текст", callback_data="action:new_text"),
-    ],
+        InlineKeyboardButton(
+            text="🎙 Озвучить другим голосом",
+            callback_data="action:change_voice",
+        )
+    ]
 ])
 
-# Rewrite result actions
-REWRITE_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
-    [
-        InlineKeyboardButton(text="🎙 Озвучить", callback_data="rewrite:voice"),
-        InlineKeyboardButton(text="✏️ Использовать оригинал", callback_data="rewrite:original"),
-    ],
-    [
-        InlineKeyboardButton(text="🔄 Переписать ещё раз", callback_data="rewrite:again"),
-    ],
-])
-
-# Start menu
+# Start menu — single button to remind the user what to do
 START_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="🎧 Начать", callback_data="start:begin")],
+    [InlineKeyboardButton(text="🎬 Что умеет бот", callback_data="start:help")]
 ])
 
 
@@ -50,4 +43,8 @@ def get_result_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_rewrite_keyboard() -> InlineKeyboardMarkup:
-    return REWRITE_KEYBOARD
+    # Rewrite flow is not used in MVP — keep a placeholder so imports
+    # in rewrite_flow.py don't break.
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ Закрыть", callback_data="rewrite:close")]
+    ])
