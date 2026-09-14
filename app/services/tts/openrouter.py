@@ -31,9 +31,11 @@ class OpenRouterTTSProvider(TTSProvider):
         timeout_seconds: int = 30,
     ) -> None:
         self._api_key = api_key or get_settings().openrouter_api_key
+        # Default to verified Gemini TTS if no override is provided
         self._model = model or get_settings().openrouter_tts_model
         self._timeout = timeout_seconds
         self._client: httpx.AsyncClient | None = None
+        logger.info("tts_provider_init", model=self._model)
 
     @property
     def name(self) -> str:
