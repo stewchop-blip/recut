@@ -59,8 +59,15 @@ class MediaService:
         output_path: Path,
         format: str = "mp3",
         bitrate: str = "128k",
+        input_format: Optional[str] = None,
+        sample_rate: Optional[int] = None,
+        channels: Optional[int] = None,
     ) -> Path:
-        """Convert audio to target format."""
+        """Convert audio to target format.
+
+        For raw PCM input, set input_format="s16le" plus sample_rate and channels
+        so ffmpeg can interpret the bytes correctly.
+        """
         if not input_path.exists():
             raise FileNotFoundError(f"Input not found: {input_path}")
 
@@ -69,6 +76,15 @@ class MediaService:
         cmd = [
             self._ffmpeg_path,
             "-y",  # overwrite
+        ]
+        # Raw input hints (PCM only)
+        if input_format:
+            cmd += ["-f", input_format]
+        if sample_rate:
+            cmd += ["-ar", str(sample_rate)]
+        if channels:
+            cmd += ["-ac", str(channels)]
+        cmd += [
             "-i", str(input_path),
             "-c:a", "libmp3lame" if format == "mp3" else "copy",
             "-b:a", bitrate,
@@ -83,7 +99,11 @@ class MediaService:
         stdout, stderr = await proc.communicate()
 
         if proc.returncode != 0:
-            logger.error("ffmpeg_convert_failed", input=str(input_path), error=stderr.decode())
+            logger.error(
+                "ffmpeg_convert_failed",
+                input=str(input_path),
+                error=stderr.decode()[:500],
+            )
             raise RuntimeError(f"FFmpeg conversion failed: {stderr.decode()}")
 
         logger.info("ffmpeg_convert_done", input=str(input_path), output=str(output_path))

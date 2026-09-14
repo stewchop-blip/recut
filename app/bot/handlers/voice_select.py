@@ -61,12 +61,30 @@ async def on_voice_select(call: CallbackQuery) -> None:
         async with temp.job_context(job_id) as job_dir:
             mp3_path = job_dir / "out.mp3"
             try:
-                await media.convert_audio(Path(raw_path), mp3_path, format="mp3", bitrate="128k")
+                if final_ext == ".pcm":
+                    # Raw PCM16 from OpenAI gpt-audio — 24 kHz, mono
+                    await media.convert_audio(
+                        Path(raw_path),
+                        mp3_path,
+                        format="mp3",
+                        bitrate="128k",
+                        input_format="s16le",
+                        sample_rate=24_000,
+                        channels=1,
+                    )
+                else:
+                    # Already a compressed format (e.g. mp3 from non-gpt-audio model)
+                    await media.convert_audio(
+                        Path(raw_path),
+                        mp3_path,
+                        format="mp3",
+                        bitrate="128k",
+                    )
                 final_path = mp3_path
                 final_ext = ".mp3"
             except Exception as conv_err:
-                # ffmpeg failed → fall back to raw bytes if mp3 already
-                logger.warning("ffmpeg_convert_failed", error=str(conv_err)[:100], using="raw")
+                # ffmpeg failed → fall back to raw bytes
+                logger.warning("ffmpeg_convert_failed", error=str(conv_err)[:200], using="raw")
                 final_path = Path(raw_path)
                 final_ext = raw_ext
 
