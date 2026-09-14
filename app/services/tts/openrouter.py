@@ -160,10 +160,11 @@ class OpenRouterTTSProvider(TTSProvider):
                 generation_id=generation_id,
             )
 
+            response_format = payload["response_format"]
             return AudioResult(
                 audio_bytes=audio_bytes,
-                content_type="audio/pcm" if "pcm" == result.content_type else "audio/mpeg",
-                extension=".pcm" if "pcm" == result.content_type else ".mp3",
+                content_type="audio/wav" if response_format == "wav" else f"audio/{response_format}",
+                extension=f".{response_format}",
                 provider=self.name,
                 model=self._model,
             )

@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     # --- OpenRouter ---
     openrouter_api_key: str = Field(..., description="OpenRouter API key (dedicated for Recut)")
     openrouter_tts_model: str = Field(
-        default="openai/tts-1",
-        description="OpenRouter model ID for TTS",
+        default="google/gemini-2.5-flash-preview-tts",
+        description="OpenRouter model ID for TTS (Gemini TTS, free tier)",
     )
     openrouter_rewrite_model: str = Field(
         default="anthropic/claude-3-haiku",
