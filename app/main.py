@@ -1,12 +1,16 @@
-"""Recut bot entrypoint with webhook mode (production) and polling (dev)."""
+"""Recut bot entrypoint — polling mode (primary), webhook fallback.
+
+Polling is the default for Railway: it works without a public domain,
+doesn't fight Telegram Flood limits on setWebhook, and survives redeploys.
+Webhook mode is only used if WEBHOOK_MODE=true is explicitly set.
+"""
 import asyncio
+import os
 from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import BotCommand
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler
-from aiohttp import web
 
 from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
@@ -25,7 +29,6 @@ async def _safe_set_my_commands(bot: Bot) -> None:
             BotCommand(command="cancel", description="Отменить"),
         ])
     except Exception as e:
-        # TelegramRetryAfter / Flood control — non-fatal
         logger.warning("telegram_commands_skipped", error=str(e)[:80])
 
 
@@ -38,19 +41,14 @@ def _build_dispatcher() -> Dispatcher:
     return dp
 
 
-# ============================================================================
-# Webhook (production) — aiohttp app
-# ============================================================================
-
-async def _on_webhook_startup(app: web.Application) -> None:
-    """aiohttp startup hook — runs once."""
+async def _on_startup(bot: Bot) -> None:
+    """Common startup: DB init, cleanup, commands."""
     settings = get_settings()
-    bot: Bot = app["bot"]
 
-    # 1. Initialize DB
+    # Initialize DB
     db_manager.initialize()
 
-    # 2. Clean stale temp files
+    # Clean stale temp files
     try:
         from app.utils.temp import get_temp_manager
         cleaned = get_temp_manager().cleanup_stale(max_age_hours=1)
@@ -59,38 +57,26 @@ async def _on_webhook_startup(app: web.Application) -> None:
     except Exception as e:
         logger.warning("startup_cleanup_failed", error=str(e)[:80])
 
-    # 3. Set bot commands (non-fatal)
+    # Set bot commands (non-fatal — Telegram floods us otherwise)
     await _safe_set_my_commands(bot)
 
-    # 4. Register webhook with Telegram
-    if settings.webhook_url:
-        await bot.set_webhook(
-            url=settings.webhook_url,
-            secret_token=settings.webhook_secret,
-            drop_pending_updates=True,  # drop old updates to avoid reprocessing
-        )
-        logger.info("webhook_set", url=settings.webhook_url)
-    else:
-        logger.warning("webhook_url_empty_check_RAILWAY_PUBLIC_DOMAIN")
 
-
-async def _on_webhook_shutdown(app: web.Application) -> None:
-    """aiohttp shutdown hook — runs once."""
-    bot: Bot = app["bot"]
-    with suppress(Exception):
-        await bot.delete_webhook()
+async def _on_shutdown(bot: Bot) -> None:
+    """Common shutdown: close DB, close bot session."""
     with suppress(Exception):
         await db_manager.close()
     with suppress(Exception):
         await bot.session.close()
 
 
-def create_webhook_app() -> web.Application:
-    """Build aiohttp app for production webhook mode."""
+# ============================================================================
+# Polling mode (default — robust, no domain required)
+# ============================================================================
+
+async def run_polling() -> None:
+    """Long-polling mode. Works on any host."""
     settings = get_settings()
     setup_logging()
-
-    app = web.Application()
 
     bot = Bot(
         token=settings.telegram_bot_token,
@@ -98,10 +84,43 @@ def create_webhook_app() -> web.Application:
     )
     dp = _build_dispatcher()
 
+    # CRITICAL: clear any leftover webhook from previous deployment
+    # (otherwise Telegram returns Conflict and bot stays silent)
+    with suppress(Exception):
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("webhook_cleared_for_polling")
+
+    await _on_startup(bot)
+
+    try:
+        logger.info("polling_started", bot_id=bot.id)
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    finally:
+        await _on_shutdown(bot)
+
+
+# ============================================================================
+# Webhook mode (optional — only if WEBHOOK_MODE=true)
+# ============================================================================
+
+async def run_webhook() -> None:
+    """Webhook mode — requires WEBHOOK_URL env var."""
+    from aiogram.webhook.aiohttp_server import SimpleRequestHandler
+    from aiohttp import web
+
+    settings = get_settings()
+    setup_logging()
+
+    bot = Bot(
+        token=settings.telegram_bot_token,
+        default=DefaultBotProperties(parse_mode="HTML"),
+    )
+    dp = _build_dispatcher()
+
+    app = web.Application()
     app["bot"] = bot
     app["dp"] = dp
 
-    # Webhook handler
     handler = SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
@@ -109,58 +128,24 @@ def create_webhook_app() -> web.Application:
     )
     handler.register(app, path=settings.webhook_path)
 
-    # Health check (Railway)
     async def healthz(_: web.Request) -> web.Response:
         return web.Response(status=200, text="OK")
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/", healthz)
 
-    # Lifecycle — single hook each
-    app.on_startup.append(_on_webhook_startup)
-    app.on_shutdown.append(_on_webhook_shutdown)
+    app.on_startup.append(lambda _: _on_startup(bot))
+    app.on_shutdown.append(lambda _: _on_shutdown(bot))
 
-    return app
-
-
-def run_webhook() -> None:
-    """Run production webhook server."""
-    settings = get_settings()
-    app = create_webhook_app()
+    logger.info("webhook_started", url=settings.webhook_url, port=settings.port)
     web.run_app(app, host="0.0.0.0", port=settings.port)
 
 
-# ============================================================================
-# Polling (development)
-# ============================================================================
-
-async def run_polling() -> None:
-    """Run in polling mode (no public domain required)."""
-    settings = get_settings()
-    setup_logging()
-
-    bot = Bot(
-        token=settings.telegram_bot_token,
-        default=DefaultBotProperties(parse_mode="HTML"),
-    )
-    dp = _build_dispatcher()
-
-    db_manager.initialize()
-    await _safe_set_my_commands(bot)
-
-    try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-    finally:
-        with suppress(Exception):
-            await db_manager.close()
-        with suppress(Exception):
-            await bot.session.close()
-
-
-# ============================================================================
-
 def main() -> None:
-    settings = get_settings()
-    if settings.environment == "production" and settings.railway_public_domain:
+    """Decide webhook vs polling from env."""
+    # WEBHOOK_MODE flag overrides everything; otherwise default to polling
+    use_webhook = os.getenv("WEBHOOK_MODE", "").lower() in ("1", "true", "yes")
+
+    if use_webhook:
         run_webhook()
     else:
         asyncio.run(run_polling())
