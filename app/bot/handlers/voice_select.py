@@ -65,7 +65,7 @@ async def on_voice_select(call: CallbackQuery) -> None:
         async with temp.job_context(job_id) as job_dir:
             wav_path = job_dir / "out.wav"
             try:
-                if final_ext == ".pcm":
+                if raw_ext == ".pcm":
                     # Raw PCM16 from OpenAI gpt-audio — 24 kHz, mono
                     await media.convert_audio(
                         Path(raw_path),
