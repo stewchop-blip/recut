@@ -86,7 +86,8 @@ class MediaService:
             cmd += ["-ac", str(channels)]
         cmd += [
             "-i", str(input_path),
-            "-c:a", "libmp3lame" if format == "mp3" else "copy",
+            # WAV: just remux into container (PCM stays PCM, no re-encode)
+            "-c:a", "copy" if format == "wav" else ("libmp3lame" if format == "mp3" else "copy"),
             "-b:a", bitrate,
             str(output_path),
         ]

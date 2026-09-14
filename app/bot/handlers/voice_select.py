@@ -57,33 +57,35 @@ async def on_voice_select(call: CallbackQuery) -> None:
         raw_ext = result.extension  # .pcm or .mp3
         raw_path = temp.save_audio(job_id, result.audio_bytes, raw_ext)
 
-        # 3. Convert to MP3 (always — Telegram needs it for audio messages)
+        # 3. Convert to a Telegram-friendly format
+        #    We use WAV-wrapped PCM16 (24 kHz mono) because:
+        #    - ffmpeg always supports WAV output, no extra codec needed
+        #    - Telegram plays .wav via send_audio
+        #    - File is still small (< 50 KB per second of speech)
         async with temp.job_context(job_id) as job_dir:
-            mp3_path = job_dir / "out.mp3"
+            wav_path = job_dir / "out.wav"
             try:
                 if final_ext == ".pcm":
                     # Raw PCM16 from OpenAI gpt-audio — 24 kHz, mono
                     await media.convert_audio(
                         Path(raw_path),
-                        mp3_path,
-                        format="mp3",
-                        bitrate="128k",
+                        wav_path,
+                        format="wav",
                         input_format="s16le",
                         sample_rate=24_000,
                         channels=1,
                     )
                 else:
-                    # Already a compressed format (e.g. mp3 from non-gpt-audio model)
+                    # Already a compressed format — re-wrap to wav
                     await media.convert_audio(
                         Path(raw_path),
-                        mp3_path,
-                        format="mp3",
-                        bitrate="128k",
+                        wav_path,
+                        format="wav",
                     )
-                final_path = mp3_path
-                final_ext = ".mp3"
+                final_path = wav_path
+                final_ext = ".wav"
             except Exception as conv_err:
-                # ffmpeg failed → fall back to raw bytes
+                # ffmpeg failed → fall back to raw .pcm file (still uploadable)
                 logger.warning("ffmpeg_convert_failed", error=str(conv_err)[:200], using="raw")
                 final_path = Path(raw_path)
                 final_ext = raw_ext
