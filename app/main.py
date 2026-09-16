@@ -1,8 +1,7 @@
-"""Recut bot entrypoint — polling mode (primary), webhook fallback.
+"""Recut bot entrypoint — Telegram-only video-repurpose bot.
 
-Polling is the default for Railway: it works without a public domain,
-doesn't fight Telegram Flood limits on setWebhook, and survives redeploys.
-Webhook mode is only used if WEBHOOK_MODE=true is explicitly set.
+Polling is the default (works on any Railway plan). Webhook mode is
+available by setting WEBHOOK_MODE=true with a public domain.
 """
 import asyncio
 import os
@@ -10,19 +9,38 @@ from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import BotCommand
 
+from app.bot.handlers import start
 from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
 from app.database.session import db_manager
-from app.bot.handlers import start, text_input, voice_select, rewrite_flow
 
 logger = get_logger(__name__)
 
 
-async def _safe_set_my_commands(bot: Bot) -> None:
-    """Set bot menu commands; ignore Flood control limits."""
+def _build_dispatcher() -> Dispatcher:
+    dp = Dispatcher()
+    dp.include_router(start.router)
+    return dp
+
+
+async def _on_startup(bot: Bot) -> None:
+    # Initialize DB (creates tables on first run)
+    db_manager.initialize()
+
+    # Clean stale job directories from previous runs
     try:
+        from app.utils.temp import get_temp_manager
+        cleaned = get_temp_manager().cleanup_stale(max_age_hours=2)
+        if cleaned:
+            logger.info("startup_cleanup_done", removed=cleaned)
+    except Exception as e:
+        logger.warning("startup_cleanup_failed", error=str(e)[:80])
+
+    # Best-effort: register bot commands with Telegram. Wrapped because
+    # redeploys trigger Flood control warnings if called too quickly.
+    try:
+        from aiogram.types import BotCommand
         await bot.set_my_commands([
             BotCommand(command="start", description="Начать"),
             BotCommand(command="help", description="Помощь"),
@@ -32,40 +50,7 @@ async def _safe_set_my_commands(bot: Bot) -> None:
         logger.warning("telegram_commands_skipped", error=str(e)[:80])
 
 
-def _build_dispatcher() -> Dispatcher:
-    # Plain Dispatcher — we keep cross-handler state in an in-memory
-    # UserTextStore (see app.bot.user_text_store) instead of FSM, because
-    # MemoryStorage was dropping state between updates.
-    dp = Dispatcher()
-    dp.include_router(start.router)
-    dp.include_router(text_input.router)
-    dp.include_router(voice_select.router)
-    dp.include_router(rewrite_flow.router)
-    return dp
-
-
-async def _on_startup(bot: Bot) -> None:
-    """Common startup: DB init, cleanup, commands."""
-    settings = get_settings()
-
-    # Initialize DB
-    db_manager.initialize()
-
-    # Clean stale temp files
-    try:
-        from app.utils.temp import get_temp_manager
-        cleaned = get_temp_manager().cleanup_stale(max_age_hours=1)
-        if cleaned:
-            logger.info("startup_cleanup_done", removed=cleaned)
-    except Exception as e:
-        logger.warning("startup_cleanup_failed", error=str(e)[:80])
-
-    # Set bot commands (non-fatal — Telegram floods us otherwise)
-    await _safe_set_my_commands(bot)
-
-
 async def _on_shutdown(bot: Bot) -> None:
-    """Common shutdown: close DB, close bot session."""
     with suppress(Exception):
         await db_manager.close()
     with suppress(Exception):
@@ -73,11 +58,10 @@ async def _on_shutdown(bot: Bot) -> None:
 
 
 # ============================================================================
-# Polling mode (default — robust, no domain required)
+# Polling (default — works without public domain)
 # ============================================================================
 
 async def run_polling() -> None:
-    """Long-polling mode. Works on any host."""
     settings = get_settings()
     setup_logging()
 
@@ -87,8 +71,7 @@ async def run_polling() -> None:
     )
     dp = _build_dispatcher()
 
-    # CRITICAL: clear any leftover webhook from previous deployment
-    # (otherwise Telegram returns Conflict and bot stays silent)
+    # Clear any leftover webhook from previous deployment
     with suppress(Exception):
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("webhook_cleared_for_polling")
@@ -103,11 +86,10 @@ async def run_polling() -> None:
 
 
 # ============================================================================
-# Webhook mode (optional — only if WEBHOOK_MODE=true)
+# Webhook (optional — only if WEBHOOK_MODE=true)
 # ============================================================================
 
 async def run_webhook() -> None:
-    """Webhook mode — requires WEBHOOK_URL env var."""
     from aiogram.webhook.aiohttp_server import SimpleRequestHandler
     from aiohttp import web
 
@@ -124,11 +106,8 @@ async def run_webhook() -> None:
     app["bot"] = bot
     app["dp"] = dp
 
-    handler = SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot,
-        secret_token=settings.webhook_secret,
-    )
+    secret = settings.webhook_secret or None
+    handler = SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=secret)
     handler.register(app, path=settings.webhook_path)
 
     async def healthz(_: web.Request) -> web.Response:
@@ -144,10 +123,7 @@ async def run_webhook() -> None:
 
 
 def main() -> None:
-    """Decide webhook vs polling from env."""
-    # WEBHOOK_MODE flag overrides everything; otherwise default to polling
     use_webhook = os.getenv("WEBHOOK_MODE", "").lower() in ("1", "true", "yes")
-
     if use_webhook:
         run_webhook()
     else:

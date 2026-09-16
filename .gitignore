@@ -49,3 +49,5 @@ dmypy.json
 
 # Ruff
 .ruff_cache/
+# Legacy backups
+*.bak

@@ -1,1 +1,2 @@
-"""Text services package."""
+"""Text services package (legacy — deprecated, see .bak files)."""
+
