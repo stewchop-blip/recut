@@ -1,40 +1,45 @@
-"""Temporary file management for processing jobs."""
+"""Temporary file management for processing jobs.
 
-import os
+`BASE_DIR` comes from `settings.temp_dir` (default `/tmp/recut`) so we
+can override it on Railway by mounting a volume if needed.
+
+Path-traversal hardening: every job_id is sanitized through
+`_safe_id()` before being used in a filesystem path.
+"""
 import shutil
-import tempfile
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator, BinaryIO, Optional
+from typing import AsyncGenerator, Optional
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
-
 
 logger = get_logger(__name__)
 
 
 class TempFileManager:
-    """Manages temporary files for processing jobs."""
-
-    BASE_DIR = Path("/tmp/recut")
+    """Manages temporary directories for processing jobs."""
 
     def __init__(self) -> None:
+        self.BASE_DIR = Path(get_settings().temp_dir)
         self.BASE_DIR.mkdir(parents=True, exist_ok=True)
-        # Cleanup stale files on startup
-        self.cleanup_stale(max_age_hours=1)
+        # Cleanup stale files on startup (settings-driven TTL)
+        self.cleanup_stale(max_age_hours=2)
+
+    @staticmethod
+    def _safe_id(job_id: str) -> str:
+        """Sanitize a job_id to a safe filesystem component."""
+        cleaned = "".join(c for c in job_id if c.isalnum() or c in "-_")
+        return cleaned or uuid.uuid4().hex
 
     def _job_dir(self, job_id: str) -> Path:
-        """Get job-specific directory."""
-        # Validate job_id to prevent path traversal
-        safe_id = "".join(c for c in job_id if c.isalnum() or c in "-_")
-        if not safe_id:
-            safe_id = str(uuid.uuid4())
-        return self.BASE_DIR / safe_id
+        return self.BASE_DIR / self._safe_id(job_id)
 
     @asynccontextmanager
     async def job_context(self, job_id: str) -> AsyncGenerator[Path, None]:
-        """Context manager for a job's temporary directory."""
+        """Context manager: yield a fresh job_dir, clean it up on exit."""
         job_dir = self._job_dir(job_id)
         job_dir.mkdir(parents=True, exist_ok=True)
         logger.debug("temp_job_start", job_id=job_id, path=str(job_dir))
@@ -43,52 +48,6 @@ class TempFileManager:
         finally:
             self.cleanup_job(job_id)
             logger.debug("temp_job_cleanup", job_id=job_id)
-
-    def save_audio(
-        self,
-        job_id: str,
-        audio_bytes: bytes,
-        extension: str = ".mp3",
-    ) -> Path:
-        """Save audio bytes to job directory."""
-        job_dir = self._job_dir(job_id)
-        job_dir.mkdir(parents=True, exist_ok=True)
-
-        # Safe filename
-        safe_ext = extension if extension.startswith(".") else f".{extension}"
-        filename = f"audio{safe_ext}"
-        filepath = job_dir / filename
-
-        filepath.write_bytes(audio_bytes)
-        logger.debug("temp_audio_saved", job_id=job_id, path=str(filepath), size=len(audio_bytes))
-        return filepath
-
-    def save_text(self, job_id: str, text: str, filename: str = "text.txt") -> Path:
-        """Save text to job directory."""
-        job_dir = self._job_dir(job_id)
-        job_dir.mkdir(parents=True, exist_ok=True)
-
-        # Sanitize filename
-        safe_name = "".join(c for c in filename if c.isalnum() or c in "._-")
-        if not safe_name:
-            safe_name = "text.txt"
-        filepath = job_dir / safe_name
-
-        filepath.write_text(text, encoding="utf-8")
-        return filepath
-
-    def read_file(self, job_id: str, filename: str) -> Optional[bytes]:
-        """Read file from job directory."""
-        filepath = self._job_dir(job_id) / filename
-        if filepath.exists():
-            return filepath.read_bytes()
-        return None
-
-    def get_audio_path(self, job_id: str, extension: str = ".mp3") -> Optional[Path]:
-        """Get path to audio file if exists."""
-        safe_ext = extension if extension.startswith(".") else f".{extension}"
-        filepath = self._job_dir(job_id) / f"audio{safe_ext}"
-        return filepath if filepath.exists() else None
 
     def cleanup_job(self, job_id: str) -> bool:
         """Remove job directory and all contents."""
@@ -103,9 +62,8 @@ class TempFileManager:
                 return False
         return False
 
-    def cleanup_stale(self, max_age_hours: int = 1) -> int:
+    def cleanup_stale(self, max_age_hours: float = 2.0) -> int:
         """Remove job directories older than max_age_hours."""
-        import time
         now = time.time()
         max_age_seconds = max_age_hours * 3600
         removed = 0
@@ -130,15 +88,20 @@ class TempFileManager:
         return removed
 
     def list_jobs(self) -> list[str]:
-        """List active job IDs."""
+        """List active job directory names."""
         if not self.BASE_DIR.exists():
             return []
         return [d.name for d in self.BASE_DIR.iterdir() if d.is_dir()]
 
 
-# Global instance
-temp_manager = TempFileManager()
+# Global instance (re-instantiated lazily so tests can override Settings)
+_temp: Optional[TempFileManager] = None
 
 
 def get_temp_manager() -> TempFileManager:
-    return temp_manager
+    """Lazy singleton — recreated if Settings.temp_dir has changed."""
+    global _temp
+    expected = Path(get_settings().temp_dir).resolve()
+    if _temp is None or _temp.BASE_DIR.resolve() != expected:
+        _temp = TempFileManager()
+    return _temp

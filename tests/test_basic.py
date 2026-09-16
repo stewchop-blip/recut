@@ -70,7 +70,16 @@ def test_temp_dir_default():
 
 def test_temp_manager_init():
     """The job workspace directory should exist after first init."""
-    from app.utils.temp import TempFileManager
-    tm = TempFileManager()
+    from app.utils.temp import get_temp_manager
+    tm = get_temp_manager()
     assert tm.BASE_DIR.exists()
     assert tm.BASE_DIR.is_dir()
+    # Second call should return the same singleton.
+    assert get_temp_manager() is tm
+
+
+def test_temp_manager_safe_id_strips_path_traversal():
+    from app.utils.temp import TempFileManager
+    safe = TempFileManager._safe_id("../../etc/passwd")
+    assert "/" not in safe
+    assert ".." not in safe

@@ -10,7 +10,8 @@ from contextlib import suppress
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 
-from app.bot.handlers import start
+from app.bot.handlers import start, video
+from app.bot.middlewares.access import AccessMiddleware
 from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
 from app.database.session import db_manager
@@ -20,6 +21,11 @@ logger = get_logger(__name__)
 
 def _build_dispatcher() -> Dispatcher:
     dp = Dispatcher()
+    # Whitelist gate runs before any router logic.
+    dp.message.middleware.register(AccessMiddleware())
+    dp.callback_query.middleware.register(AccessMiddleware())
+    # Routers — start must be last so /start works even from a video-like message
+    dp.include_router(video.router)
     dp.include_router(start.router)
     return dp
 
