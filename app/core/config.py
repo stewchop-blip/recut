@@ -76,8 +76,8 @@ class Settings(BaseSettings):
     port: int = Field(default=8080, ge=1, le=65535)
 
     # === Video pipeline limits ===
-    max_video_size_mb: int = Field(default=1500, ge=1, le=10000, description="Max upload MB")
-    max_video_duration_minutes: int = Field(default=60, ge=1, le=600, description="Max duration")
+    max_video_size_mb: int = Field(default=500, ge=1, le=10000, description="Max upload MB")
+    max_video_duration_minutes: int = Field(default=10, ge=1, le=600, description="Max duration")
     default_clip_count: int = Field(default=3, ge=1, le=10)
     max_clip_count: int = Field(default=5, ge=1, le=20)
     max_concurrent_jobs: int = Field(default=1, ge=1, le=4)
