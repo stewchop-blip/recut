@@ -29,6 +29,7 @@ from app.database.models import Job, JobStatus
 from app.database.repositories import JobRepository
 from app.database.session import db_manager
 from app.pipeline.downloader import VideoDownloader
+from app.pipeline.extractor import AudioExtractionError, AudioExtractor
 from app.pipeline.validator import VideoValidationError, VideoValidator
 from app.services.media import get_probe_service
 from app.utils.temp import get_temp_manager
@@ -150,15 +151,50 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
             source_height=probe.height,
         )
 
-    # ---- 8. Acknowledge and signal next stage (placeholder for now) ----
+    # ---- 7b. Extract audio track (Stage C) ----
+    wav_path = job_dir / "audio.wav"
+    if not probe.has_audio:
+        # Mark job failed: speech-to-text needs audio.
+        await _mark_failed(job_id, code="NO_AUDIO", detail="Source has no audio track")
+        await status_msg.edit_text(
+            f"❌ Видео без звука — не могу распознать речь.\n\n"
+            f"🆔 Job #{job_id}"
+        )
+        temp.cleanup_job(job_dir.name)
+        return
+
+    try:
+        extracted = await AudioExtractor().extract(
+            video_path=input_path,
+            output_wav=wav_path,
+            has_audio=True,
+        )
+    except AudioExtractionError as e:
+        logger.error("audio_extract_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
+        await _mark_failed(job_id, code="AUDIO_EXTRACT_FAILED", detail=str(e)[:200])
+        await status_msg.edit_text(
+            f"❌ Не удалось извлечь звук.\n\n🆔 Job #{job_id}"
+        )
+        temp.cleanup_job(job_dir.name)
+        return
+
+    logger.info(
+        "audio_extracted",
+        job_id=job_id,
+        path=str(extracted.path),
+        duration_s=round(extracted.duration_seconds, 1),
+        bytes=extracted.path.stat().st_size,
+    )
+
+    # ---- 8. Acknowledge and signal next stage ----
     duration_str = _format_duration(probe.duration_seconds)
     summary = (
         f"✅ Видео принято.\n\n"
         f"⏱ Длительность: {duration_str}\n"
         f"📐 Размер: {probe.width}×{probe.height}\n"
         f"🎞 FPS: {probe.fps:.1f}\n"
-        f"🔊 Звук: {'да' if probe.has_audio else 'нет'}\n\n"
-        f"⏳ Этап B завершён — пайплайн нарезки будет добавлен позже.\n\n"
+        f"🔊 Звук: {extracted.duration_seconds:.1f}с извлечено\n\n"
+        f"⏳ Этап C завершён — следующий шаг: распознавание речи.\n\n"
         f"🆔 Job #{job_id}"
     )
     await status_msg.edit_text(summary)

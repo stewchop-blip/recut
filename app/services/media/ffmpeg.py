@@ -26,6 +26,73 @@ class MediaService:
         logger.info("ffmpeg_found", path=ffmpeg)
         return ffmpeg
 
+    async def extract_audio(
+        self,
+        input_path: Path,
+        output_path: Path,
+        *,
+        sample_rate: int = 16_000,
+        channels: int = 1,
+        sample_format: str = "s16",
+        timeout_seconds: float = 300.0,
+    ) -> Path:
+        """Extract a mono PCM track from `input_path` to `output_path`.
+
+        Default format matches faster-whisper's expectations:
+        16 kHz, 1 channel, signed 16-bit PCM WAV. Other downstream
+        consumers (subtitle stage, normalization) can re-encode.
+
+        Uses `asyncio.create_subprocess_exec` (shell=False) so the
+        user-controlled `input_path` is passed as a literal argv token.
+        """
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input not found: {input_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            self._ffmpeg_path,
+            "-y",                     # overwrite output
+            "-v", "error",            # quiet, only errors
+            "-i", str(input_path),
+            "-vn",                    # strip video stream
+            "-ac", str(channels),
+            "-ar", str(sample_rate),
+            "-acodec", "pcm_s16le" if sample_format == "s16" else sample_format,
+            str(output_path),
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError as e:
+            raise RuntimeError(f"FFmpeg extract_audio timed out after {timeout_seconds}s") from e
+
+        if proc.returncode != 0:
+            err = stderr.decode(errors="ignore")[:500]
+            logger.error(
+                "ffmpeg_extract_audio_failed",
+                input=str(input_path),
+                error=err,
+            )
+            raise RuntimeError(f"FFmpeg extract_audio failed: {err}")
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise RuntimeError(f"FFmpeg produced empty output at {output_path}")
+
+        logger.info(
+            "ffmpeg_extract_audio_done",
+            input=str(input_path),
+            output=str(output_path),
+            bytes=output_path.stat().st_size,
+        )
+        return output_path
+
     async def probe(self, filepath: Path) -> dict:
         """Probe media file for info (duration, format, etc.)."""
         if not filepath.exists():
