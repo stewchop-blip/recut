@@ -32,6 +32,7 @@ from app.pipeline.downloader import VideoDownloader
 from app.pipeline.extractor import AudioExtractionError, AudioExtractor
 from app.pipeline.transcriber import Transcriber, TranscriberError
 from app.pipeline.analyser import Analyser, AnalyserError
+from app.pipeline.clip_cutter import ClipCutter, ClipCutterError
 from app.pipeline.validator import VideoValidationError, VideoValidator
 from app.services.media import get_probe_service
 from app.utils.temp import get_temp_manager
@@ -288,21 +289,49 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         model=analysed.model,
     )
 
+    # ---- 7e. Cut source video into N MP4 clips (Stage F) ----
+    await status_msg.edit_text(
+        f"✂️ Нарезаю клипы…\n\n🆔 Job #{job_id}"
+    )
+
+    try:
+        cut_job = await ClipCutter().cut(
+            analysed=analysed,
+            transcribed=transcribed,
+            source_video=input_path,
+            output_dir=job_dir,
+        )
+    except ClipCutterError as e:
+        logger.error("clip_cut_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
+        await _mark_failed(job_id, code="CUT_FAILED", detail=str(e)[:200])
+        await status_msg.edit_text(
+            f"❌ Не удалось нарезать клипы.\n\n🆔 Job #{job_id}"
+        )
+        temp.cleanup_job(job_dir.name)
+        return
+
+    logger.info(
+        "clips_cut",
+        job_id=job_id,
+        count=len(cut_job.clips),
+        dir=str(job_dir),
+    )
+
     # ---- 8. Acknowledge and signal next stage ----
     duration_str = _format_duration(probe.duration_seconds)
     clips_preview = "\n".join(
-        f"  {i+1}. [{_format_duration(c.start)}–{_format_duration(c.end)}] {c.title}"
-        for i, c in enumerate(analysed.clips[:5])
+        f"  {c.index}. [{_format_duration(c.source_start)}–{_format_duration(c.source_end)}] "
+        f"{c.candidate.title} ({_format_duration(c.source_end - c.source_start)})"
+        for c in cut_job.clips
     )
     summary = (
         f"✅ Видео принято.\n\n"
         f"⏱ Длительность: {duration_str}\n"
         f"📐 Размер: {probe.width}×{probe.height}\n"
-        f"🎤 Речь: {len(transcribed.segments)} сегментов, "
-        f"{transcribed.language}\n"
-        f"🧠 Найдено моментов: {len(analysed.clips)}\n\n"
+        f"🎤 Речь: {len(transcribed.segments)} сегментов\n"
+        f"✂️ Нарезано клипов: {len(cut_job.clips)}\n\n"
         f"{clips_preview}\n\n"
-        f"⏳ Этап E завершён — следующий шаг: нарезка клипов.\n\n"
+        f"⏳ Этап F завершён — следующий шаг: вертикальный формат 9:16.\n\n"
         f"🆔 Job #{job_id}"
     )
     await status_msg.edit_text(summary)

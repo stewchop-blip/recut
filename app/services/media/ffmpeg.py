@@ -93,6 +93,78 @@ class MediaService:
         )
         return output_path
 
+    async def cut_clip(
+        self,
+        input_path: Path,
+        output_path: Path,
+        start_seconds: float,
+        end_seconds: float,
+        *,
+        timeout_seconds: float = 180.0,
+    ) -> Path:
+        """Cut a [start, end] segment out of `input_path` to `output_path`.
+
+        Uses `-c copy` so the bitstream is re-muxed without re-encoding —
+        fast (sub-second) and lossless. Frame-accurate cuts aren't guaranteed
+        with copy mode (keyframes only); for cleaner cuts use the re-encode
+        path in Stage G.
+
+        Validation lives in the caller (ClipCutter); here we just run ffmpeg.
+        """
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input not found: {input_path}")
+        if end_seconds <= start_seconds:
+            raise ValueError(f"end ({end_seconds}) must be > start ({start_seconds})")
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            self._ffmpeg_path,
+            "-y",
+            "-v", "error",
+            "-ss", f"{start_seconds:.3f}",
+            "-to", f"{end_seconds:.3f}",
+            "-i", str(input_path),
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            "-movflags", "+faststart",     # web-friendly MP4 header
+            str(output_path),
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError as e:
+            raise RuntimeError(f"FFmpeg cut timed out after {timeout_seconds}s") from e
+
+        if proc.returncode != 0:
+            err = stderr.decode(errors="ignore")[:500]
+            logger.error(
+                "ffmpeg_cut_failed",
+                input=str(input_path),
+                start=start_seconds, end=end_seconds,
+                error=err,
+            )
+            raise RuntimeError(f"FFmpeg cut failed: {err}")
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise RuntimeError(f"FFmpeg cut produced empty output at {output_path}")
+
+        logger.info(
+            "ffmpeg_cut_done",
+            input=str(input_path),
+            output=str(output_path),
+            start=start_seconds, end=end_seconds,
+            bytes=output_path.stat().st_size,
+        )
+        return output_path
+
     async def probe(self, filepath: Path) -> dict:
         """Probe media file for info (duration, format, etc.)."""
         if not filepath.exists():
