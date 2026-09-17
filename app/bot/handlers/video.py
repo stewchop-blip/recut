@@ -31,6 +31,7 @@ from app.database.session import db_manager
 from app.pipeline.downloader import VideoDownloader
 from app.pipeline.extractor import AudioExtractionError, AudioExtractor
 from app.pipeline.transcriber import Transcriber, TranscriberError
+from app.pipeline.analyser import Analyser, AnalyserError
 from app.pipeline.validator import VideoValidationError, VideoValidator
 from app.services.media import get_probe_service
 from app.utils.temp import get_temp_manager
@@ -245,18 +246,63 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         chars=len(transcribed.raw_text),
     )
 
+    # ---- 7d. Pick interesting moments via LLM (Stage E) ----
+    await status_msg.edit_text(
+        f"🧠 Ищу интересные моменты…\n\n🆔 Job #{job_id}"
+    )
+
+    try:
+        analysed = await Analyser().analyse(transcribed)
+    except AnalyserError as e:
+        logger.error("analyse_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
+        await _mark_failed(job_id, code="ANALYSE_FAILED", detail=str(e)[:200])
+        await status_msg.edit_text(
+            f"❌ Не удалось подобрать моменты.\n\n🆔 Job #{job_id}"
+        )
+        temp.cleanup_job(job_dir.name)
+        return
+
+    # Persist chosen clips next to transcript.
+    clips_path = job_dir / "clips.json"
+    clips_path.write_text(
+        json.dumps(
+            {
+                "model": analysed.model,
+                "language": analysed.language,
+                "clips": [
+                    {"start": c.start, "end": c.end, "title": c.title,
+                     "hook": c.hook, "reason": c.reason}
+                    for c in analysed.clips
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    logger.info(
+        "clips_selected",
+        job_id=job_id,
+        count=len(analysed.clips),
+        model=analysed.model,
+    )
+
     # ---- 8. Acknowledge and signal next stage ----
     duration_str = _format_duration(probe.duration_seconds)
+    clips_preview = "\n".join(
+        f"  {i+1}. [{_format_duration(c.start)}–{_format_duration(c.end)}] {c.title}"
+        for i, c in enumerate(analysed.clips[:5])
+    )
     summary = (
         f"✅ Видео принято.\n\n"
         f"⏱ Длительность: {duration_str}\n"
         f"📐 Размер: {probe.width}×{probe.height}\n"
-        f"🎞 FPS: {probe.fps:.1f}\n"
-        f"🔊 Звук: {extracted.duration_seconds:.1f}с\n"
         f"🎤 Речь: {len(transcribed.segments)} сегментов, "
-        f"язык {transcribed.language}, "
-        f"{len(transcribed.raw_text)} симв.\n\n"
-        f"⏳ Этап D завершён — следующий шаг: выбор моментов через LLM.\n\n"
+        f"{transcribed.language}\n"
+        f"🧠 Найдено моментов: {len(analysed.clips)}\n\n"
+        f"{clips_preview}\n\n"
+        f"⏳ Этап E завершён — следующий шаг: нарезка клипов.\n\n"
         f"🆔 Job #{job_id}"
     )
     await status_msg.edit_text(summary)
