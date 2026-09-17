@@ -25,9 +25,13 @@ dependencies = [
     # Logging
     "structlog>=24.1,<25",
     # Utilities
-    "python-ulid>=2.3,<3",
+    "python-ulid>=2.3,<4",
     "tenacity>=8.3,<9",
     "pytz>=2024.1,<2025",
+    # Speech-to-text (stage D)
+    "faster-whisper>=1.0,<2",
+    # Memory guard (stage D)
+    "psutil>=5.9,<7",
 ]
 
 [project.optional-dependencies]
@@ -69,9 +73,10 @@ strict = false
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
+pythonpath = ["."]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -11,6 +11,7 @@ in later stages. This module stays small.
 from app.pipeline.validator import VideoValidator, VideoValidationError
 from app.pipeline.downloader import VideoDownloader
 from app.pipeline.extractor import AudioExtractor, AudioExtractionError
+from app.pipeline.transcriber import Transcriber, TranscriberError
 
 __all__ = [
     "VideoValidator",
@@ -18,4 +19,6 @@ __all__ = [
     "VideoDownloader",
     "AudioExtractor",
     "AudioExtractionError",
+    "Transcriber",
+    "TranscriberError",
 ]

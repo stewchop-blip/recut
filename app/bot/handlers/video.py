@@ -30,6 +30,7 @@ from app.database.repositories import JobRepository
 from app.database.session import db_manager
 from app.pipeline.downloader import VideoDownloader
 from app.pipeline.extractor import AudioExtractionError, AudioExtractor
+from app.pipeline.transcriber import Transcriber, TranscriberError
 from app.pipeline.validator import VideoValidationError, VideoValidator
 from app.services.media import get_probe_service
 from app.utils.temp import get_temp_manager
@@ -186,6 +187,64 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         bytes=extracted.path.stat().st_size,
     )
 
+    # ---- 7c. Transcribe audio (Stage D) ----
+    await status_msg.edit_text(
+        f"🎧 Распознаю речь…\n\n🆔 Job #{job_id}"
+    )
+
+    try:
+        transcribed = await Transcriber().transcribe(
+            audio_path=extracted.path,
+            language="ru",
+            beam_size=1,
+            word_timestamps=False,
+        )
+    except TranscriberError as e:
+        logger.error("transcribe_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
+        await _mark_failed(job_id, code="TRANSCRIBE_FAILED", detail=str(e)[:200])
+        await status_msg.edit_text(
+            f"❌ Не удалось распознать речь.\n\n🆔 Job #{job_id}"
+        )
+        temp.cleanup_job(job_dir.name)
+        return
+
+    if not transcribed.segments:
+        await _mark_failed(job_id, code="NO_SPEECH", detail="Whisper found no speech segments")
+        await status_msg.edit_text(
+            f"❌ В видео не нашлось речи. Попробуй другое видео.\n\n🆔 Job #{job_id}"
+        )
+        temp.cleanup_job(job_dir.name)
+        return
+
+    # Persist transcript JSON next to audio for Stage E
+    import json
+    transcript_path = job_dir / "transcript.json"
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "language": transcribed.language,
+                "duration_seconds": transcribed.duration_seconds,
+                "model": transcribed.model,
+                "segments": [
+                    {"start": s.start, "end": s.end, "text": s.text}
+                    for s in transcribed.segments
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    logger.info(
+        "transcribed",
+        job_id=job_id,
+        segments=len(transcribed.segments),
+        language=transcribed.language,
+        duration_s=round(transcribed.duration_seconds, 1),
+        chars=len(transcribed.raw_text),
+    )
+
     # ---- 8. Acknowledge and signal next stage ----
     duration_str = _format_duration(probe.duration_seconds)
     summary = (
@@ -193,8 +252,11 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         f"⏱ Длительность: {duration_str}\n"
         f"📐 Размер: {probe.width}×{probe.height}\n"
         f"🎞 FPS: {probe.fps:.1f}\n"
-        f"🔊 Звук: {extracted.duration_seconds:.1f}с извлечено\n\n"
-        f"⏳ Этап C завершён — следующий шаг: распознавание речи.\n\n"
+        f"🔊 Звук: {extracted.duration_seconds:.1f}с\n"
+        f"🎤 Речь: {len(transcribed.segments)} сегментов, "
+        f"язык {transcribed.language}, "
+        f"{len(transcribed.raw_text)} симв.\n\n"
+        f"⏳ Этап D завершён — следующий шаг: выбор моментов через LLM.\n\n"
         f"🆔 Job #{job_id}"
     )
     await status_msg.edit_text(summary)
