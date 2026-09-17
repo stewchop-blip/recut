@@ -165,6 +165,115 @@ class MediaService:
         )
         return output_path
 
+    async def make_vertical(
+        self,
+        input_path: Path,
+        output_path: Path,
+        *,
+        target_width: int = 1080,
+        target_height: int = 1920,
+        target_fps: int = 30,
+        video_bitrate: str = "4M",
+        audio_bitrate: str = "128k",
+        blur_strength: int = 30,
+        timeout_seconds: float = 600.0,
+    ) -> Path:
+        """Convert source video to 9:16 vertical with a blurred background.
+
+        Strategy (single ffmpeg filter_complex pass):
+        - If source is already portrait (height >= width * (target_h/target_w)):
+          just scale the source to target resolution (no crop, no blur).
+        - Otherwise (landscape or square wider than portrait):
+          1. background: scale source so it fully covers target_width×target_height
+             AND blur it heavily (gblur sigma=blur_strength).
+          2. foreground: scale source to fit target_height (keeping aspect),
+             centered.
+          3. overlay foreground on top of background.
+
+        Audio is passed through with light normalization to mono AAC.
+
+        Output codec: H.264 + AAC, yuv420p (mobile-safe), +faststart.
+        """
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input not found: {input_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Filter graph:
+        # - split source into [bg][fg]
+        # - bg: scale to fully cover target (increase), crop, heavy blur
+        # - fg: scale to fit inside target (decrease, never exceed)
+        # - overlay fg over bg (centred)
+        filter_complex = (
+            "[0:v]split=2[bg_src][fg_src];"
+            # Background: cover (scale up if needed) target area + heavy blur
+            f"[bg_src]scale=w={target_width}:h={target_height}:"
+            f"force_original_aspect_ratio=increase:flags=fast_bilinear,"
+            f"crop={target_width}:{target_height},"
+            f"gblur=sigma={blur_strength}[bg];"
+            # Foreground: fit inside target (no upscaling past source res),
+            # pad to exact target size with black bars.
+            f"[fg_src]scale=w={target_width}:h={target_height}:"
+            f"force_original_aspect_ratio=decrease:flags=fast_bilinear,"
+            f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:color=black[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=0[v]"
+        )
+
+        cmd = [
+            self._ffmpeg_path,
+            "-y",
+            "-v", "error",
+            "-i", str(input_path),
+            "-filter_complex", filter_complex,
+            "-map", "[v]",
+            "-map", "0:a?",
+            "-r", str(target_fps),
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-b:v", video_bitrate,
+            "-c:a", "aac",
+            "-b:a", audio_bitrate,
+            "-ac", "2",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError as e:
+            raise RuntimeError(
+                f"FFmpeg make_vertical timed out after {timeout_seconds}s"
+            ) from e
+
+        if proc.returncode != 0:
+            err = stderr.decode(errors="ignore")[:500]
+            logger.error(
+                "ffmpeg_make_vertical_failed",
+                input=str(input_path), error=err,
+            )
+            raise RuntimeError(f"FFmpeg make_vertical failed: {err}")
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise RuntimeError(
+                f"FFmpeg make_vertical produced empty output at {output_path}"
+            )
+
+        logger.info(
+            "ffmpeg_make_vertical_done",
+            input=str(input_path),
+            output=str(output_path),
+            target=f"{target_width}x{target_height}",
+            bytes=output_path.stat().st_size,
+        )
+        return output_path
+
     async def probe(self, filepath: Path) -> dict:
         """Probe media file for info (duration, format, etc.)."""
         if not filepath.exists():

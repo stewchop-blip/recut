@@ -33,6 +33,7 @@ from app.pipeline.extractor import AudioExtractionError, AudioExtractor
 from app.pipeline.transcriber import Transcriber, TranscriberError
 from app.pipeline.analyser import Analyser, AnalyserError
 from app.pipeline.clip_cutter import ClipCutter, ClipCutterError
+from app.pipeline.vertical_renderer import VerticalRenderer, VerticalRenderError
 from app.pipeline.validator import VideoValidationError, VideoValidator
 from app.services.media import get_probe_service
 from app.utils.temp import get_temp_manager
@@ -317,11 +318,34 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         dir=str(job_dir),
     )
 
+    # ---- 7f. Render vertical (Stage G) ----
+    await status_msg.edit_text(
+        f"📱 Конвертирую в вертикальный формат…\n\n🆔 Job #{job_id}"
+    )
+
+    vertical_dir = job_dir / "vertical"
+    try:
+        vertical_job = await VerticalRenderer().render(cut_job, vertical_dir)
+    except VerticalRenderError as e:
+        logger.error("vertical_render_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
+        await _mark_failed(job_id, code="VERTICAL_FAILED", detail=str(e)[:200])
+        await status_msg.edit_text(
+            f"❌ Не удалось сделать вертикальный формат.\n\n🆔 Job #{job_id}"
+        )
+        temp.cleanup_job(job_dir.name)
+        return
+
+    logger.info(
+        "vertical_clips_ready",
+        job_id=job_id,
+        count=len(vertical_job.clips),
+    )
+
     # ---- 8. Acknowledge and signal next stage ----
     duration_str = _format_duration(probe.duration_seconds)
     clips_preview = "\n".join(
-        f"  {c.index}. [{_format_duration(c.source_start)}–{_format_duration(c.source_end)}] "
-        f"{c.candidate.title} ({_format_duration(c.source_end - c.source_start)})"
+        f"  {c.index}. {_format_duration(c.source_start)}–{_format_duration(c.source_end)} "
+        f"({_format_duration(c.source_end - c.source_start)})"
         for c in cut_job.clips
     )
     summary = (
@@ -329,9 +353,9 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         f"⏱ Длительность: {duration_str}\n"
         f"📐 Размер: {probe.width}×{probe.height}\n"
         f"🎤 Речь: {len(transcribed.segments)} сегментов\n"
-        f"✂️ Нарезано клипов: {len(cut_job.clips)}\n\n"
+        f"📱 Вертикальных клипов: {len(vertical_job.clips)}\n\n"
         f"{clips_preview}\n\n"
-        f"⏳ Этап F завершён — следующий шаг: вертикальный формат 9:16.\n\n"
+        f"⏳ Этап G завершён — следующий шаг: субтитры.\n\n"
         f"🆔 Job #{job_id}"
     )
     await status_msg.edit_text(summary)

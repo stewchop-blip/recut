@@ -14,6 +14,7 @@ from app.pipeline.extractor import AudioExtractor, AudioExtractionError
 from app.pipeline.transcriber import Transcriber, TranscriberError
 from app.pipeline.analyser import Analyser, AnalyserError
 from app.pipeline.clip_cutter import ClipCutter, ClipCutterError
+from app.pipeline.vertical_renderer import VerticalRenderer, VerticalRenderError
 
 __all__ = [
     "VideoValidator",
@@ -27,4 +28,6 @@ __all__ = [
     "AnalyserError",
     "ClipCutter",
     "ClipCutterError",
+    "VerticalRenderer",
+    "VerticalRenderError",
 ]
