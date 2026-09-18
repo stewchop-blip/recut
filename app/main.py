@@ -31,8 +31,19 @@ def _build_dispatcher() -> Dispatcher:
 
 
 async def _on_startup(bot: Bot) -> None:
-    # Initialize DB (creates tables on first run)
+    """Common startup: DB init + table creation, cleanup, commands."""
     db_manager.initialize()
+
+    # Create tables if they don't exist (idempotent).
+    # Without this the new `jobs` table is never created on Railway
+    # and the first video crashes with UndefinedTableError.
+    try:
+        from app.database.models import Base
+        async with db_manager.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("db_schema_ready")
+    except Exception as e:
+        logger.error("db_schema_init_failed", error=str(e)[:200])
 
     # Clean stale job directories from previous runs
     try:
