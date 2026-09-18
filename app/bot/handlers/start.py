@@ -2,7 +2,12 @@
 from aiogram import Router, types
 from aiogram.filters import Command
 
+from app.core.logging import get_logger
+from app.database.repositories import JobRepository
+from app.database.session import db_manager
+
 router = Router()
+logger = get_logger(__name__)
 
 
 WELCOME = (
@@ -36,4 +41,45 @@ async def cmd_help(message: types.Message) -> None:
 
 @router.message(Command("cancel"))
 async def cmd_cancel(message: types.Message) -> None:
-    await message.answer("❌ Ок. Отправь видео, когда будешь готов.")
+    """Cancel any in-flight Job for this user.
+
+    Marks active jobs as CANCELLED so has_active_job() stops blocking
+    new videos. Also deletes the corresponding /tmp/recut/* workdir.
+    """
+    user_id = message.from_user.id if message.from_user else 0
+    if not user_id:
+        return
+
+    try:
+        async with db_manager.session() as session:
+            repo = JobRepository(session)
+            n = await repo.cancel_active_jobs(user_id, max_age_minutes=10)
+    except Exception as e:
+        logger.error("cancel_db_failed", user_id=user_id, error=str(e)[:200])
+        await message.answer("❌ Не удалось отменить задачу. Попробуй ещё раз.")
+        return
+
+    # Best-effort cleanup of any leftover job workspaces.
+    import shutil
+    from pathlib import Path
+    base = Path("/tmp/recut")
+    if base.exists():
+        for entry in base.iterdir():
+            try:
+                # only remove directories that look like job dirs and aren't
+                # currently active (avoid racing with another in-flight job).
+                if entry.is_dir() and entry.name.startswith("job_"):
+                    shutil.rmtree(entry, ignore_errors=True)
+            except Exception:
+                pass
+
+    if n:
+        await message.answer(
+            f"✅ Отменил {n} задач(у).\n"
+            "Можешь отправлять новое видео."
+        )
+    else:
+        await message.answer(
+            "ℹ️ Не было активных задач.\n"
+            "Можешь отправлять видео когда будешь готов."
+        )

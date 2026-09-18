@@ -225,7 +225,7 @@ class JobRepository:
             )
         )
 
-    async def has_active_job(self, telegram_user_id: int, *, max_age_minutes: int = 30) -> bool:
+    async def has_active_job(self, telegram_user_id: int, *, max_age_minutes: int = 10) -> bool:
         """Return True if the user has an unfinished job that's not stale.
 
         A job is considered "active" only if:
@@ -234,6 +234,9 @@ class JobRepository:
 
         Stale jobs (e.g. left in PENDING/CUTTING after a previous process
         crashed) are ignored so they don't block the user forever.
+
+        Default window is 10 min — Quick Prep typically takes < 1 min,
+        so anything older than 10 min is almost certainly a zombie.
         """
         from datetime import datetime, timedelta, timezone
         active = {
@@ -249,6 +252,36 @@ class JobRepository:
             .where(Job.created_at >= cutoff)
         )
         return (result.scalar_one() or 0) > 0
+
+    async def cancel_active_jobs(
+        self, telegram_user_id: int, *, max_age_minutes: int = 10,
+    ) -> int:
+        """Mark any in-flight job for this user as CANCELLED.
+
+        Returns the number of rows updated. Used by /cancel command so
+        users aren't stuck waiting for a zombie Job to disappear on its
+        own (after max_age_minutes).
+        """
+        from datetime import datetime, timedelta, timezone
+        from sqlalchemy import update as _upd
+
+        active = {
+            JobStatus.PENDING, JobStatus.DOWNLOADING, JobStatus.PROBING,
+            JobStatus.TRANSCRIBING, JobStatus.ANALYZING,
+            JobStatus.CUTTING, JobStatus.RENDERING,
+        }
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        result = await self.session.execute(
+            _upd(Job)
+            .where(Job.telegram_user_id == telegram_user_id)
+            .where(Job.status.in_(active))
+            .where(Job.created_at >= cutoff)
+            .values(
+                status=JobStatus.CANCELLED,
+                processing_completed_at=datetime.now(timezone.utc),
+            )
+        )
+        return result.rowcount or 0
 
     async def cleanup_stale_jobs(self, *, max_age_minutes: int = 30) -> int:
         """Mark any non-terminal job older than `max_age_minutes` as FAILED.

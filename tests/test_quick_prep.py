@@ -326,3 +326,43 @@ def test_old_completed_jobs_dont_count_as_active():
         await engine.dispose()
 
     asyncio.run(_run())
+
+
+def test_cancel_active_jobs_marks_them_cancelled():
+    """cancel_active_jobs() turns in-flight rows into CANCELLED,
+    so has_active_job() immediately returns False.
+    """
+    from datetime import datetime, timezone
+
+    from app.database.models import Base, Job, JobStatus
+    from app.database.repositories import JobRepository
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    import asyncio
+
+    async def _run():
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        async with Session() as session:
+            job = Job(
+                telegram_user_id=7, telegram_chat_id=7, source_message_id=1,
+                status=JobStatus.CUTTING, created_at=datetime.now(timezone.utc),
+            )
+            session.add(job)
+            await session.commit()
+
+            repo = JobRepository(session)
+            assert await repo.has_active_job(7) is True
+
+            n = await repo.cancel_active_jobs(7, max_age_minutes=10)
+            assert n == 1
+            await session.commit()
+
+            assert await repo.has_active_job(7) is False
+
+        await engine.dispose()
+
+    asyncio.run(_run())
