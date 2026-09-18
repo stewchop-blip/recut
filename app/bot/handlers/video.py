@@ -264,6 +264,14 @@ async def on_quick_prep(call: CallbackQuery) -> None:
                 if p.exists():
                     cta_asset = p
 
+        # If the user enabled CTA but never uploaded a PNG (or the file
+        # got lost between deploys), fall back to a default banner so
+        # they still see something on the video.
+        if cta_enabled and cta_asset is None:
+            from app.services.overlays.cta_generator import ensure_cta_asset
+            cta_asset, _ = ensure_cta_asset("", job_dir)
+            logger.info("cta_default_asset_generated", path=str(cta_asset))
+
     # Run QuickPrep
     pipeline = QuickPrepPipeline()
     try:
@@ -570,7 +578,28 @@ async def _show_settings(message: types.Message, user_id: int) -> None:
         f"Субтитры: {'✅ ВКЛ' if s.subtitles_enabled else '❌ ВЫКЛ'}\n\n"
         f"Формат вывода: 9:16 ({get_settings().output_width}×{get_settings().output_height})"
     )
-    await message.edit_text(text, reply_markup=SETTINGS_MENU, parse_mode="HTML")
+    await _safe_edit_text(message, text, reply_markup=SETTINGS_MENU, parse_mode="HTML")
+
+
+async def _safe_edit_text(
+    message: types.Message, text: str, reply_markup=None, parse_mode: str | None = None,
+) -> None:
+    """Edit a message, silently ignoring Telegram's "not modified" error.
+
+    Telegram rejects edit_text() when the new content is identical to the
+    current one. That happens legitimately when the user taps a button
+    multiple times — the second tap is a no-op for them, but our handler
+    must not crash.
+    """
+    try:
+        await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception as e:
+        # Best-effort: log and move on. TelegramBadRequest("not modified")
+        # is the common case; we don't want to spam logs with it.
+        err = str(e)
+        if "not modified" in err:
+            return  # benign — user tapped the same button twice
+        logger.warning("edit_text_failed", error=err[:120])
 
 
 async def _edit_status(message: types.Message, text: str) -> None:

@@ -118,7 +118,19 @@ class QuickPrepPipeline:
 
         # 3. CTA overlay.
         has_cta = False
+        # cta_asset may be:
+        # - a user-uploaded PNG path (from DB) — pass through
+        # - empty/None but CTA_ENABLED=true — fall back to ensure_cta_asset
+        #   which generates a default "Recut" PNG on the fly
+        effective_cta_asset: Path | None = None
         if cta_asset is not None and cta_asset.exists():
+            effective_cta_asset = cta_asset
+        elif cta_asset is not None:
+            # DB has a path but file is gone — generate a default in the
+            # job_dir so the user still gets an overlay.
+            from app.services.overlays.cta_generator import ensure_cta_asset
+            effective_cta_asset, _ = ensure_cta_asset("", job_dir)
+        if effective_cta_asset is not None and effective_cta_asset.exists():
             from app.services.overlays.cta import CTAService, CTAOverlaySpec
             spec = CTAService()._make_spec(
                 clip_duration=meta.duration_seconds,
@@ -129,7 +141,7 @@ class QuickPrepPipeline:
                 margin=cta_min_margin_px,
                 output_w=output_width,
                 output_h=output_height,
-                asset=cta_asset,
+                asset=effective_cta_asset,
             )
             if spec is not None:
                 cta_path = job_dir / "with_cta.mp4"
