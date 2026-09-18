@@ -237,3 +237,92 @@ def test_user_settings_defaults():
         assert s.cta_start_seconds == 0.0
         assert s.subtitles_enabled is False
         assert s.output_mode == "universal_9_16"
+
+
+# ---------------------------------------------------------------------------
+# Stale Job cleanup (regression for "stuck PENDING blocks new video" bug)
+# ---------------------------------------------------------------------------
+
+def test_stale_jobs_are_cleaned_up():
+    """A PENDING Job older than max_age_minutes must be marked FAILED
+    by cleanup_stale_jobs so it stops blocking has_active_job.
+
+    Note: JobRepository methods are async, so we test against an
+    AsyncSession backed by aiosqlite (in-memory).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.database.models import Base, Job, JobStatus
+    from app.database.repositories import JobRepository
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    import asyncio
+
+    async def _run():
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        async with Session() as session:
+            fresh = Job(
+                telegram_user_id=42, telegram_chat_id=42, source_message_id=1,
+                status=JobStatus.PENDING, created_at=datetime.now(timezone.utc),
+            )
+            stale = Job(
+                telegram_user_id=42, telegram_chat_id=42, source_message_id=2,
+                status=JobStatus.CUTTING,
+                created_at=datetime.now(timezone.utc) - timedelta(hours=2),
+            )
+            session.add_all([fresh, stale])
+            await session.commit()
+
+            repo = JobRepository(session)
+            assert await repo.has_active_job(42, max_age_minutes=30) is True
+
+            n = await repo.cleanup_stale_jobs(max_age_minutes=30)
+            assert n == 1
+            await session.commit()
+
+            assert await repo.has_active_job(42, max_age_minutes=30) is True
+            from sqlalchemy import update as _u
+            await session.execute(
+                _u(Job).where(Job.id == fresh.id).values(status=JobStatus.COMPLETED)
+            )
+            await session.commit()
+            assert await repo.has_active_job(42, max_age_minutes=30) is False
+
+        await engine.dispose()
+
+    asyncio.run(_run())
+
+
+def test_old_completed_jobs_dont_count_as_active():
+    """Terminal-status Jobs of any age must not block."""
+    from datetime import datetime, timezone
+
+    from app.database.models import Base, Job, JobStatus
+    from app.database.repositories import JobRepository
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    import asyncio
+
+    async def _run():
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        async with Session() as session:
+            j = Job(
+                telegram_user_id=99, telegram_chat_id=99, source_message_id=1,
+                status=JobStatus.COMPLETED, created_at=datetime.now(timezone.utc),
+            )
+            session.add(j)
+            await session.commit()
+            repo = JobRepository(session)
+            assert await repo.has_active_job(99) is False
+
+        await engine.dispose()
+
+    asyncio.run(_run())

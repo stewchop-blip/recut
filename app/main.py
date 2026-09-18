@@ -45,6 +45,18 @@ async def _on_startup(bot: Bot) -> None:
     except Exception as e:
         logger.error("db_schema_init_failed", error=str(e)[:200])
 
+    # Clean up stale Jobs left over from a previous process crash.
+    # Without this a 'PENDING' Job from yesterday would block the user
+    # from starting a new one (has_active_job ignores only terminal states).
+    try:
+        async with db_manager.session() as session:
+            from app.database.repositories import JobRepository
+            n = await JobRepository(session).cleanup_stale_jobs(max_age_minutes=30)
+            if n:
+                logger.info("stale_jobs_cleaned", count=n)
+    except Exception as e:
+        logger.warning("stale_jobs_cleanup_failed", error=str(e)[:200])
+
     # Clean stale job directories from previous runs
     try:
         from app.utils.temp import get_temp_manager

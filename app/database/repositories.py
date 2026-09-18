@@ -225,18 +225,58 @@ class JobRepository:
             )
         )
 
-    async def has_active_job(self, telegram_user_id: int) -> bool:
+    async def has_active_job(self, telegram_user_id: int, *, max_age_minutes: int = 30) -> bool:
+        """Return True if the user has an unfinished job that's not stale.
+
+        A job is considered "active" only if:
+        - its status is one of the in-flight statuses
+        - AND it was created within the last `max_age_minutes` minutes
+
+        Stale jobs (e.g. left in PENDING/CUTTING after a previous process
+        crashed) are ignored so they don't block the user forever.
+        """
+        from datetime import datetime, timedelta, timezone
         active = {
             JobStatus.PENDING, JobStatus.DOWNLOADING, JobStatus.PROBING,
             JobStatus.TRANSCRIBING, JobStatus.ANALYZING,
             JobStatus.CUTTING, JobStatus.RENDERING,
         }
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
         result = await self.session.execute(
             select(func.count(Job.id))
             .where(Job.telegram_user_id == telegram_user_id)
             .where(Job.status.in_(active))
+            .where(Job.created_at >= cutoff)
         )
         return (result.scalar_one() or 0) > 0
+
+    async def cleanup_stale_jobs(self, *, max_age_minutes: int = 30) -> int:
+        """Mark any non-terminal job older than `max_age_minutes` as FAILED.
+
+        Called on startup to clean up after a process crash. Returns
+        the number of rows updated.
+        """
+        from datetime import datetime, timedelta, timezone
+        from sqlalchemy import update as _upd
+
+        active = {
+            JobStatus.PENDING, JobStatus.DOWNLOADING, JobStatus.PROBING,
+            JobStatus.TRANSCRIBING, JobStatus.ANALYZING,
+            JobStatus.CUTTING, JobStatus.RENDERING,
+        }
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        result = await self.session.execute(
+            _upd(Job)
+            .where(Job.status.in_(active))
+            .where(Job.created_at < cutoff)
+            .values(
+                status=JobStatus.FAILED,
+                error_code="STALE",
+                error_detail=f"Marked stale on startup (> {max_age_minutes} min old)",
+                processing_completed_at=datetime.now(timezone.utc),
+            )
+        )
+        return result.rowcount or 0
 
     async def list_recent(
         self, telegram_user_id: int, limit: int = 10,
