@@ -32,6 +32,8 @@ dependencies = [
     "faster-whisper>=1.0,<2",
     # Memory guard (stage D)
     "psutil>=5.9,<7",
+    # CTA overlay asset generation (stage I)
+    "pillow>=10.0,<12",
 ]
 
 [project.optional-dependencies]

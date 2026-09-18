@@ -15,6 +15,7 @@ from app.pipeline.transcriber import Transcriber, TranscriberError
 from app.pipeline.analyser import Analyser, AnalyserError
 from app.pipeline.clip_cutter import ClipCutter, ClipCutterError
 from app.pipeline.vertical_renderer import VerticalRenderer, VerticalRenderError
+from app.pipeline.final_renderer import FinalRenderer, FinalRenderError, FinalClip, FinalJob
 
 __all__ = [
     "VideoValidator",
@@ -30,4 +31,8 @@ __all__ = [
     "ClipCutterError",
     "VerticalRenderer",
     "VerticalRenderError",
+    "FinalRenderer",
+    "FinalRenderError",
+    "FinalClip",
+    "FinalJob",
 ]

@@ -274,6 +274,293 @@ class MediaService:
         )
         return output_path
 
+    async def burn_subtitles(
+        self,
+        video_path: Path,
+        ass_path: Path,
+        output_path: Path,
+        *,
+        timeout_seconds: float = 300.0,
+    ) -> Path:
+        """Hard-burn ASS subtitles into `video_path` -> `output_path`.
+
+        Single re-encode pass with libx264. Output keeps the source
+        resolution / fps, gets H.264 + AAC.
+        """
+        if not video_path.exists():
+            raise FileNotFoundError(f"Video not found: {video_path}")
+        if not ass_path.exists():
+            raise FileNotFoundError(f"ASS file not found: {ass_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # ass filter — ':force_style' lets us override style on the fly.
+        # Build the filter string outside f-string to avoid the backslash
+        # restriction on Python 3.11.
+        ass_escaped = str(ass_path).replace(":", "\\:")
+        vf = "ass=" + ass_escaped
+
+        cmd = [
+            self._ffmpeg_path,
+            "-y",
+            "-v", "error",
+            "-i", str(video_path),
+            "-vf", vf,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError as e:
+            raise RuntimeError(
+                f"FFmpeg burn_subtitles timed out after {timeout_seconds}s"
+            ) from e
+
+        if proc.returncode != 0:
+            err = stderr.decode(errors="ignore")[:500]
+            logger.error(
+                "ffmpeg_burn_subtitles_failed",
+                input=str(video_path),
+                error=err,
+            )
+            raise RuntimeError(f"FFmpeg burn_subtitles failed: {err}")
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise RuntimeError("FFmpeg burn_subtitles produced empty output")
+
+        logger.info(
+            "ffmpeg_burn_subtitles_done",
+            input=str(video_path),
+            output=str(output_path),
+            bytes=output_path.stat().st_size,
+        )
+        return output_path
+
+    async def burn_cta(
+        self,
+        video_path: Path,
+        cta_path: Path,
+        output_path: Path,
+        *,
+        x: int,
+        y: int,
+        start_seconds: float,
+        end_seconds: float,
+        timeout_seconds: float = 300.0,
+    ) -> Path:
+        """Overlay a PNG over a window of the video. No re-encode of video
+        stream — only a copy of video with the overlay layered on top.
+        Falls back to re-encoding if copy isn't compatible.
+        """
+        if not video_path.exists():
+            raise FileNotFoundError(f"Video not found: {video_path}")
+        if not cta_path.exists():
+            raise FileNotFoundError(f"CTA asset not found: {cta_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # enable=between(t,start,end) shows the overlay only in the window.
+        filter_expr = (
+            f"[1:v]format=rgba[cta];"
+            f"[0:v][cta]overlay=x={x}:y={y}:"
+            f"enable=between(t,{start_seconds:.3f},{end_seconds:.3f})[v]"
+        )
+
+        cmd = [
+            self._ffmpeg_path,
+            "-y",
+            "-v", "error",
+            "-i", str(video_path),
+            "-i", str(cta_path),
+            "-filter_complex", filter_expr,
+            "-map", "[v]",
+            "-map", "0:a?",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError as e:
+            raise RuntimeError(
+                f"FFmpeg burn_cta timed out after {timeout_seconds}s"
+            ) from e
+
+        if proc.returncode != 0:
+            err = stderr.decode(errors="ignore")[:500]
+            logger.error(
+                "ffmpeg_burn_cta_failed",
+                input=str(video_path), error=err,
+            )
+            raise RuntimeError(f"FFmpeg burn_cta failed: {err}")
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise RuntimeError("FFmpeg burn_cta produced empty output")
+
+        logger.info(
+            "ffmpeg_burn_cta_done",
+            input=str(video_path),
+            output=str(output_path),
+            bytes=output_path.stat().st_size,
+        )
+        return output_path
+
+    async def finalize_export(
+        self,
+        video_path: Path,
+        output_path: Path,
+        *,
+        target_lufs: float = -16.0,
+        timeout_seconds: float = 300.0,
+    ) -> Path:
+        """Final clean export — strips source metadata / chapters / paths.
+
+        Uses loudnorm (EBU R128) two-pass for sane loudness across all
+        clips, and `-map_metadata -1 -map_chapters -1` to wipe every
+        piece of metadata that might leak source filename / paths.
+
+        Note: this is a privacy / portability pass, not an anti-detection
+        pass — we don't do pixel mods, frame jitter, or any other
+        tricks that aim to evade platform fingerprinting.
+        """
+        if not video_path.exists():
+            raise FileNotFoundError(f"Video not found: {video_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Pass 1: measure loudness.
+        measure_cmd = [
+            self._ffmpeg_path, "-v", "error",
+            "-i", str(video_path),
+            "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11:print_format=json",
+            "-f", "null", "-",
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *measure_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("loudnorm_measure_timeout_fallback_copy")
+            # Fall back to plain remux-with-metadata-strip.
+            return await self._strip_only(video_path, output_path)
+
+        import json, re
+        m = re.search(r"\{[^}]*\}", stderr.decode(errors="ignore"), re.DOTALL)
+        if not m:
+            logger.warning("loudnorm_parse_failed_fallback_strip")
+            return await self._strip_only(video_path, output_path)
+        measured = json.loads(m.group())
+
+        # Pass 2: apply loudnorm + strip metadata.
+        apply_cmd = [
+            self._ffmpeg_path, "-y", "-v", "error",
+            "-i", str(video_path),
+            "-af", (
+                f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11:"
+                f"measured_I={measured.get('input_i', target_lufs)}:"
+                f"measured_TP={measured.get('input_tp', -1.5)}:"
+                f"measured_LRA={measured.get('input_lra', 11)}:"
+                f"measured_thresh={measured.get('input_thresh', -99)}:"
+                f"offset={measured.get('target_offset', 0)}:linear=true:print_format=summary"
+            ),
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-map_metadata", "-1",     # strip ALL metadata
+            "-map_chapters", "-1",    # strip chapter info
+            "-metadata", "comment=",  # clear comment
+            "-metadata", "title=",    # clear title
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *apply_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError as e:
+            raise RuntimeError(
+                f"FFmpeg finalize timed out after {timeout_seconds}s"
+            ) from e
+
+        if proc.returncode != 0:
+            err = stderr.decode(errors="ignore")[:500]
+            logger.warning("loudnorm_apply_failed_fallback_strip", error=err)
+            return await self._strip_only(video_path, output_path)
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            return await self._strip_only(video_path, output_path)
+
+        logger.info(
+            "ffmpeg_finalize_done",
+            input=str(video_path),
+            output=str(output_path),
+            bytes=output_path.stat().st_size,
+        )
+        return output_path
+
+    async def _strip_only(
+        self,
+        video_path: Path,
+        output_path: Path,
+        *,
+        timeout_seconds: float = 60.0,
+    ) -> Path:
+        """Fallback: re-mux while stripping every piece of metadata."""
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            self._ffmpeg_path, "-y", "-v", "error",
+            "-i", str(video_path),
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+            "-map_metadata", "-1",
+            "-map_chapters", "-1",
+            "-metadata", "comment=",
+            "-metadata", "title=",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout_seconds,
+        )
+        if proc.returncode != 0:
+            err = stderr.decode(errors="ignore")[:500]
+            raise RuntimeError(f"FFmpeg strip failed: {err}")
+        return output_path
+
     async def probe(self, filepath: Path) -> dict:
         """Probe media file for info (duration, format, etc.)."""
         if not filepath.exists():

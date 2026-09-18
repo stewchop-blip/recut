@@ -34,6 +34,7 @@ from app.pipeline.transcriber import Transcriber, TranscriberError
 from app.pipeline.analyser import Analyser, AnalyserError
 from app.pipeline.clip_cutter import ClipCutter, ClipCutterError
 from app.pipeline.vertical_renderer import VerticalRenderer, VerticalRenderError
+from app.pipeline.final_renderer import FinalRenderer, FinalRenderError
 from app.pipeline.validator import VideoValidationError, VideoValidator
 from app.services.media import get_probe_service
 from app.utils.temp import get_temp_manager
@@ -341,21 +342,49 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         count=len(vertical_job.clips),
     )
 
+    # ---- 7g. Final render: subs + CTA + clean export (Stages H+I+J) ----
+    await status_msg.edit_text(
+        f"💬 Субтитры, CTA, чистый экспорт…\n\n🆔 Job #{job_id}"
+    )
+
+    final_dir = job_dir / "final"
+    try:
+        final_job = await FinalRenderer().render(
+            vertical_clips=vertical_job.clips,
+            transcribed=transcribed,
+            output_dir=final_dir,
+            cta_configured_asset=settings.cta_asset_path,
+        )
+    except FinalRenderError as e:
+        logger.error("final_render_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
+        await _mark_failed(job_id, code="FINALIZE_FAILED", detail=str(e)[:200])
+        await status_msg.edit_text(
+            f"❌ Не удалось финализировать клипы.\n\n🆔 Job #{job_id}"
+        )
+        temp.cleanup_job(job_dir.name)
+        return
+
+    logger.info(
+        "final_clips_ready",
+        job_id=job_id,
+        count=len(final_job.clips),
+    )
+
     # ---- 8. Acknowledge and signal next stage ----
     duration_str = _format_duration(probe.duration_seconds)
     clips_preview = "\n".join(
-        f"  {c.index}. {_format_duration(c.source_start)}–{_format_duration(c.source_end)} "
-        f"({_format_duration(c.source_end - c.source_start)})"
-        for c in cut_job.clips
+        f"  {c.index}. {c.final_path.stat().st_size // 1024} KB"
+        f"{' + subs' if c.has_subtitles else ''}"
+        f"{' + CTA' if c.has_cta else ''}"
+        for c in final_job.clips
     )
     summary = (
         f"✅ Видео принято.\n\n"
         f"⏱ Длительность: {duration_str}\n"
         f"📐 Размер: {probe.width}×{probe.height}\n"
-        f"🎤 Речь: {len(transcribed.segments)} сегментов\n"
-        f"📱 Вертикальных клипов: {len(vertical_job.clips)}\n\n"
+        f"🎬 Готово вертикальных клипов: {len(final_job.clips)}\n\n"
         f"{clips_preview}\n\n"
-        f"⏳ Этап G завершён — следующий шаг: субтитры.\n\n"
+        f"⏳ Этапы H+I+J завершены — следующий шаг: отправка в Telegram.\n\n"
         f"🆔 Job #{job_id}"
     )
     await status_msg.edit_text(summary)
