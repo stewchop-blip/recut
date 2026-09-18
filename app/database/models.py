@@ -67,7 +67,7 @@ class Generation(Base):
 
 
 # ---------------------------------------------------------------------------
-# New: video-repurpose Jobs
+# New: video-repurpose jobs
 # ---------------------------------------------------------------------------
 
 class JobStatus(str, enum.Enum):
@@ -132,4 +132,52 @@ class Job(Base):
         return (
             f"<Job(id={self.id}, user={self.telegram_user_id}, "
             f"status={self.status.value}, clips={self.clips_generated})>"
+        )
+
+
+# ---------------------------------------------------------------------------
+# New: per-user settings (CTA, subtitles, output mode)
+# ---------------------------------------------------------------------------
+
+class UserSettings(Base):
+    """Per-Telegram-user preferences.
+
+    One row per user. Settings persist across sessions — the user sets
+    them once via 'Settings' menu and Quick Prep uses them automatically.
+    """
+
+    __tablename__ = "user_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_user_id: Mapped[int] = mapped_column(
+        BigInteger, unique=True, index=True, nullable=False,
+    )
+
+    # CTA overlay
+    cta_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
+    cta_asset_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    cta_position: Mapped[str] = mapped_column(String(20), default="bottom", nullable=False)
+    cta_mode: Mapped[str] = mapped_column(String(20), default="end", nullable=False)
+    cta_duration_seconds: Mapped[float] = mapped_column(default=4.0, nullable=False)
+    cta_start_seconds: Mapped[float] = mapped_column(default=0.0, nullable=False)
+
+    # Subtitles (default OFF — quick prep does NOT run Whisper automatically)
+    subtitles_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+    # Output mode (always universal_9_16 for MVP)
+    output_mode: Mapped[str] = mapped_column(
+        String(20), default="universal_9_16", nullable=False,
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<UserSettings(user={self.telegram_user_id}, cta_enabled={self.cta_enabled}, "
+            f"position={self.cta_position}, mode={self.cta_mode})>"
         )

@@ -370,11 +370,16 @@ class MediaService:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # enable=between(t,start,end) shows the overlay only in the window.
+        # IMPORTANT: ffmpeg's expression parser splits on commas — if we
+        # emit e.g. `between(t,1.500,2.000)` it sees "between(t" "1.500"
+        # "2.000)" as separate filter arguments. Solution: use %g (no
+        # trailing zeros, e.g. "1.5") AND quote the expression so commas
+        # inside don't split arguments.
         filter_expr = (
             f"[1:v]format=rgba[cta];"
             f"[0:v][cta]overlay=x={x}:y={y}:"
-            f"enable=between(t,{start_seconds:.3f},{end_seconds:.3f})[v]"
-        )
+            f"enable='between(t,%g,%g)'[v]"
+        ) % (start_seconds, end_seconds)
 
         cmd = [
             self._ffmpeg_path,

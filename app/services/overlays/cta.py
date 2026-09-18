@@ -116,3 +116,72 @@ class CTAService:
             start_seconds=t0,
             end_seconds=t1,
         )
+
+    def _make_spec(
+        self,
+        *,
+        clip_duration: float,
+        mode: str,
+        duration_seconds: float,
+        start_seconds: float,
+        position: str,
+        margin: int,
+        output_w: int,
+        output_h: int,
+        asset: Path,
+    ) -> CTAOverlaySpec | None:
+        """Build a CTAOverlaySpec from explicit params (used by Quick Prep).
+
+        Same logic as `resolve()` but doesn't pull from Settings — the
+        caller passes every value. Useful when settings come from
+        per-user DB rows instead of env vars.
+        """
+        if clip_duration <= 0:
+            return None
+
+        # Time window
+        if mode == "full":
+            t0, t1 = 0.0, clip_duration
+        elif mode == "start":
+            t0, t1 = 0.0, min(duration_seconds, clip_duration)
+        elif mode == "end":
+            t0 = max(0.0, clip_duration - duration_seconds)
+            t1 = clip_duration
+        elif mode == "range":
+            t0 = start_seconds
+            t1 = start_seconds + duration_seconds
+        else:
+            logger.warning("cta_unknown_mode", mode=mode)
+            return None
+        if t1 <= t0:
+            return None
+
+        # Position (assume 720x200 CTA box)
+        if position == "top":
+            x = (output_w - 720) // 2
+            y = margin
+        elif position == "bottom":
+            x = (output_w - 720) // 2
+            y = output_h - 200 - margin
+        elif position == "top_left":
+            x = margin
+            y = margin
+        elif position == "top_right":
+            x = output_w - 720 - margin
+            y = margin
+        elif position == "bottom_left":
+            x = margin
+            y = output_h - 200 - margin
+        elif position == "bottom_right":
+            x = output_w - 720 - margin
+            y = output_h - 200 - margin
+        else:
+            logger.warning("cta_unknown_position", position=position)
+            return None
+
+        return CTAOverlaySpec(
+            asset_path=asset,
+            x=x, y=y,
+            start_seconds=t0,
+            end_seconds=t1,
+        )

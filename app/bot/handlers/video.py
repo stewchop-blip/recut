@@ -1,49 +1,95 @@
-"""Video intake handler.
+"""Video intake + Quick Prep + Settings handlers.
 
-Accepts `message.video`, `message.video_note`, and `message.document`
-with a video MIME. Flow:
+New UX flow:
 
-1. Validate Telegram-reported file size + MIME.
-2. Make sure user doesn't already have a Job in flight (DB check).
-3. Open a `JobRepository` session, create a `Job` row.
-4. Send a status message ("⏳ Загружаю…").
-5. Download the file from Telegram to `temp_dir/{job_id}/input.mp4`.
-6. Run ffprobe to confirm duration / dimensions.
-7. Reject early if duration > limit.
-8. Update Job with source_* metadata; mark JobStatus.PROBING → done.
+  user sends video
+    -> accept + validate + create Job row
+    -> save downloaded file to job_dir/input.mp4
+    -> send action menu:
+        [ 🚀 Подготовить видео ]
+        [ ✂️ Найти лучшие моменты ]  [ ⚙️ Настройки ]
 
-Realtime pipeline stages (transcribe/analyze/cut/render) are NOT
-triggered here — that's wired up in stage C+.
+  user clicks "🚀 Подготовить видео"
+    -> Quick Prep pipeline (FFmpeg only: probe -> vertical -> CTA -> clean)
+    -> send final MP4 in chat
 
-Errors are reported as friendly messages; full detail goes to logs.
+  user clicks "✂️ Найти лучшие моменты"
+    -> Full long-video pipeline (Whisper + LLM + cut + subtitles)
+    -> send N short clips
+
+  user clicks "⚙️ Настройки"
+    -> show Settings menu, persist via UserSettingsRepository
+
+The Telegram 20 MB Bot API limit applies — this code can't work around
+that without a self-hosted Bot API server. The handler validates file size
+before starting any work.
 """
+import shutil
 import uuid
-from datetime import datetime, timezone
+from pathlib import Path
 
 from aiogram import Bot, F, Router, types
-from sqlalchemy.ext.asyncio import AsyncSession
+from aiogram.types import CallbackQuery
 
+from app.bot.keyboards.inline import (
+    ACTION_MENU,
+    POSITION_MENU,
+    SETTINGS_MENU,
+    TIMING_MENU,
+    preview_keyboard,
+)
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.database.models import Job, JobStatus
-from app.database.repositories import JobRepository
+from app.database.repositories import (
+    JobRepository,
+    UserSettingsRepository,
+)
 from app.database.session import db_manager
 from app.pipeline.downloader import VideoDownloader
-from app.pipeline.extractor import AudioExtractionError, AudioExtractor
-from app.pipeline.transcriber import Transcriber, TranscriberError
-from app.pipeline.analyser import Analyser, AnalyserError
-from app.pipeline.clip_cutter import ClipCutter, ClipCutterError
-from app.pipeline.vertical_renderer import VerticalRenderer, VerticalRenderError
-from app.pipeline.final_renderer import FinalRenderer, FinalRenderError
-from app.pipeline.validator import VideoValidationError, VideoValidator
-from app.services.media import get_probe_service
+from app.pipeline.quick_prep import QuickPrepPipeline
+from app.services.sender import TelegramSender
+from app.services.transcription.faster_whisper import get_transcription_service
 from app.utils.temp import get_temp_manager
 
 router = Router()
 logger = get_logger(__name__)
 
 
-# Accept video, video_note (round video), and video-as-document.
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+CTA_POSITIONS = {
+    "top": "Сверху",
+    "bottom": "Снизу",
+    "top_left": "Сверху слева",
+    "top_right": "Сверху справа",
+    "bottom_left": "Снизу слева",
+    "bottom_right": "Снизу справа",
+}
+
+CTA_TIMING = {
+    "full": "Весь ролик",
+    "start_3": "Первые 3 сек",
+    "end_3": "Последние 3 сек",
+    "end_5": "Последние 5 сек",
+}
+
+# Where we keep user-uploaded CTA banners
+_USER_ASSETS_DIR = Path("/tmp/recut/users")
+
+
+def _user_asset_path(user_id: int) -> Path:
+    """Directory where per-user CTA assets live."""
+    p = _USER_ASSETS_DIR / str(user_id)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Step 1 — accept video, save to job_dir, show action menu
+# ---------------------------------------------------------------------------
+
 @router.message(F.video | F.video_note | F.document)
 async def on_video_message(message: types.Message, bot: Bot) -> None:
     user_id: int = message.from_user.id if message.from_user else 0
@@ -51,38 +97,45 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         return
 
     settings = get_settings()
-    validator = VideoValidator()
 
-    # ---- 1. Validate the Telegram attachment metadata ----
+    # Detect attachment
     attachment = _pick_attachment(message)
     if attachment is None:
-        # Not actually a video — ignore silently (start handler covers text).
         return
 
     declared_size = int(getattr(attachment, "file_size", 0) or 0)
     mime = getattr(attachment, "mime_type", None)
-    filename = getattr(attachment, "file_name", None)
+    filename = getattr(attachment, "file_name", None) or "video.mp4"
 
-    try:
-        validator.check_size(declared_size)
-        validator.check_mime(mime)
-    except VideoValidationError as e:
-        await message.answer(f"❌ {e}")
-        logger.warning("video_rejected_pre_download", user_id=user_id, code=e.code)
+    # Telegram Bot API limit: 20 MB for files via getFile.
+    TELEGRAM_BOT_API_LIMIT = 20 * 1024 * 1024
+    if declared_size > TELEGRAM_BOT_API_LIMIT:
+        await message.answer(
+            "❌ Видео больше 20 МБ.\n\n"
+            "Telegram Bot API сейчас не позволяет боту скачивать файлы больше этого лимита. "
+            "Это ограничение платформы, не наше.\n\n"
+            "Попробуй сжать видео до 20 МБ или отправь ссылку на файл."
+        )
         return
 
-    # ---- 2. Concurrent-job guard (DB-backed) ----
+    # Telegram MIME hint (some attachments omit it; treat as ok)
+    if mime and mime != "application/octet-stream" and not mime.startswith("video/"):
+        await message.answer(
+            f"❌ Неподдерживаемый формат: {mime}.\n\n"
+            f"Отправь MP4 / MOV / MKV / WebM."
+        )
+        return
+
+    # Concurrency guard
     async with db_manager.session() as session:
         repo = JobRepository(session)
         if await repo.has_active_job(user_id):
             await message.answer(
                 "⏳ У тебя уже есть видео в обработке.\n"
-                "Подожди, пока оно закончится, или отправь /cancel."
+                "Подожди, пока оно закончится."
             )
-            logger.info("video_rejected_concurrent", user_id=user_id)
             return
 
-        # ---- 3. Create Job row ----
         job = await repo.create(
             telegram_user_id=user_id,
             telegram_chat_id=message.chat.id,
@@ -92,13 +145,10 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         )
         job_id = job.id
 
-    # ---- 4. Status message — we'll keep editing this through the pipeline ----
     status_msg = await message.answer(
-        f"⏳ Загружаю видео…\n"
-        f"🆔 Job #{job_id}"
+        f"⏳ Загружаю видео…\n\n🆔 Job #{job_id}"
     )
 
-    # ---- 5. Download ----
     temp = get_temp_manager()
     downloader = VideoDownloader(bot)
     job_dir = temp._job_dir(f"job_{job_id}_{uuid.uuid4().hex[:8]}")
@@ -110,345 +160,377 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         )
     except Exception as e:
         logger.error("video_download_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
-        await _mark_failed(job_id, code="DOWNLOAD_FAILED", detail=str(e)[:200])
         await status_msg.edit_text(
-            f"❌ Не удалось скачать видео.\n"
-            f"Попробуй ещё раз или отправь другое видео.\n\n"
-            f"🆔 Job #{job_id}"
+            f"❌ Не удалось скачать видео.\n\nПопробуй ещё раз.\n\n🆔 Job #{job_id}"
         )
+        temp.cleanup_job(job_dir.name)
         return
 
-    # ---- 6. Probe ----
     actual_size = input_path.stat().st_size
-    try:
-        validator.check_size(actual_size)  # safety check after download
-        probe = await get_probe_service().probe(input_path)
-    except VideoValidationError as e:
-        await _mark_failed(job_id, code=e.code, detail=str(e))
-        await status_msg.edit_text(f"❌ {e}\n\n🆔 Job #{job_id}")
-        temp.cleanup_job(job_dir.name)
-        return
-    except Exception as e:
-        logger.error("video_probe_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
-        await _mark_failed(job_id, code="PROBE_FAILED", detail=str(e)[:200])
-        await status_msg.edit_text(
-            f"❌ Не удалось разобрать видео. Возможно, файл повреждён.\n\n"
-            f"🆔 Job #{job_id}"
-        )
-        temp.cleanup_job(job_dir.name)
-        return
 
-    try:
-        validator.check_duration(probe.duration_seconds)
-    except VideoValidationError as e:
-        await _mark_failed(job_id, code=e.code, detail=str(e))
-        await status_msg.edit_text(f"❌ {e}\n\n🆔 Job #{job_id}")
-        temp.cleanup_job(job_dir.name)
-        return
-
-    # ---- 7. Persist source metadata on Job ----
+    # Mark job DOWNLOADING done; remember source path on the job
     async with db_manager.session() as session:
         repo = JobRepository(session)
-        await repo.update_source_meta(
+        await repo.set_status(
             job_id=job_id,
-            source_duration_seconds=probe.duration_seconds,
-            source_width=probe.width,
-            source_height=probe.height,
+            status=__import__("app.database.models", fromlist=["JobStatus"]).JobStatus.PENDING,
+            status_message_id=status_msg.message_id,
+        )
+        # Persist a small metadata note (actual size)
+        from sqlalchemy import update as _u
+        from app.database.models import Job as _Job
+        await session.execute(
+            _u(_Job).where(_Job.id == job_id).values(source_bytes=actual_size)
         )
 
-    # ---- 7b. Extract audio track (Stage C) ----
-    wav_path = job_dir / "audio.wav"
-    if not probe.has_audio:
-        # Mark job failed: speech-to-text needs audio.
-        await _mark_failed(job_id, code="NO_AUDIO", detail="Source has no audio track")
-        await status_msg.edit_text(
-            f"❌ Видео без звука — не могу распознать речь.\n\n"
-            f"🆔 Job #{job_id}"
-        )
-        temp.cleanup_job(job_dir.name)
-        return
-
-    try:
-        extracted = await AudioExtractor().extract(
-            video_path=input_path,
-            output_wav=wav_path,
-            has_audio=True,
-        )
-    except AudioExtractionError as e:
-        logger.error("audio_extract_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
-        await _mark_failed(job_id, code="AUDIO_EXTRACT_FAILED", detail=str(e)[:200])
-        await status_msg.edit_text(
-            f"❌ Не удалось извлечь звук.\n\n🆔 Job #{job_id}"
-        )
-        temp.cleanup_job(job_dir.name)
-        return
-
-    logger.info(
-        "audio_extracted",
-        job_id=job_id,
-        path=str(extracted.path),
-        duration_s=round(extracted.duration_seconds, 1),
-        bytes=extracted.path.stat().st_size,
-    )
-
-    # ---- 7c. Transcribe audio (Stage D) ----
+    # Show action menu
     await status_msg.edit_text(
-        f"🎧 Распознаю речь…\n\n🆔 Job #{job_id}"
+        f"✅ Видео загружено ({actual_size // 1024 // 1024} МБ).\n\n"
+        f"Выбери действие:",
+        reply_markup=ACTION_MENU,
     )
 
-    try:
-        transcribed = await Transcriber().transcribe(
-            audio_path=extracted.path,
-            language="ru",
-            beam_size=1,
-            word_timestamps=False,
-        )
-    except TranscriberError as e:
-        logger.error("transcribe_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
-        await _mark_failed(job_id, code="TRANSCRIBE_FAILED", detail=str(e)[:200])
-        await status_msg.edit_text(
-            f"❌ Не удалось распознать речь.\n\n🆔 Job #{job_id}"
-        )
-        temp.cleanup_job(job_dir.name)
-        return
-
-    if not transcribed.segments:
-        await _mark_failed(job_id, code="NO_SPEECH", detail="Whisper found no speech segments")
-        await status_msg.edit_text(
-            f"❌ В видео не нашлось речи. Попробуй другое видео.\n\n🆔 Job #{job_id}"
-        )
-        temp.cleanup_job(job_dir.name)
-        return
-
-    # Persist transcript JSON next to audio for Stage E
-    import json
-    transcript_path = job_dir / "transcript.json"
-    transcript_path.write_text(
-        json.dumps(
-            {
-                "language": transcribed.language,
-                "duration_seconds": transcribed.duration_seconds,
-                "model": transcribed.model,
-                "segments": [
-                    {"start": s.start, "end": s.end, "text": s.text}
-                    for s in transcribed.segments
-                ],
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-    logger.info(
-        "transcribed",
+    # Stash the job info on a tiny in-memory store so callbacks can find it
+    _pending_jobs[user_id] = _PendingJob(
         job_id=job_id,
-        segments=len(transcribed.segments),
-        language=transcribed.language,
-        duration_s=round(transcribed.duration_seconds, 1),
-        chars=len(transcribed.raw_text),
-    )
-
-    # ---- 7d. Pick interesting moments via LLM (Stage E) ----
-    await status_msg.edit_text(
-        f"🧠 Ищу интересные моменты…\n\n🆔 Job #{job_id}"
-    )
-
-    try:
-        analysed = await Analyser().analyse(transcribed)
-    except AnalyserError as e:
-        logger.error("analyse_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
-        await _mark_failed(job_id, code="ANALYSE_FAILED", detail=str(e)[:200])
-        await status_msg.edit_text(
-            f"❌ Не удалось подобрать моменты.\n\n🆔 Job #{job_id}"
-        )
-        temp.cleanup_job(job_dir.name)
-        return
-
-    # Persist chosen clips next to transcript.
-    clips_path = job_dir / "clips.json"
-    clips_path.write_text(
-        json.dumps(
-            {
-                "model": analysed.model,
-                "language": analysed.language,
-                "clips": [
-                    {"start": c.start, "end": c.end, "title": c.title,
-                     "hook": c.hook, "reason": c.reason}
-                    for c in analysed.clips
-                ],
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-    logger.info(
-        "clips_selected",
-        job_id=job_id,
-        count=len(analysed.clips),
-        model=analysed.model,
-    )
-
-    # ---- 7e. Cut source video into N MP4 clips (Stage F) ----
-    await status_msg.edit_text(
-        f"✂️ Нарезаю клипы…\n\n🆔 Job #{job_id}"
-    )
-
-    try:
-        cut_job = await ClipCutter().cut(
-            analysed=analysed,
-            transcribed=transcribed,
-            source_video=input_path,
-            output_dir=job_dir,
-        )
-    except ClipCutterError as e:
-        logger.error("clip_cut_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
-        await _mark_failed(job_id, code="CUT_FAILED", detail=str(e)[:200])
-        await status_msg.edit_text(
-            f"❌ Не удалось нарезать клипы.\n\n🆔 Job #{job_id}"
-        )
-        temp.cleanup_job(job_dir.name)
-        return
-
-    logger.info(
-        "clips_cut",
-        job_id=job_id,
-        count=len(cut_job.clips),
-        dir=str(job_dir),
-    )
-
-    # ---- 7f. Render vertical (Stage G) ----
-    await status_msg.edit_text(
-        f"📱 Конвертирую в вертикальный формат…\n\n🆔 Job #{job_id}"
-    )
-
-    vertical_dir = job_dir / "vertical"
-    try:
-        vertical_job = await VerticalRenderer().render(cut_job, vertical_dir)
-    except VerticalRenderError as e:
-        logger.error("vertical_render_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
-        await _mark_failed(job_id, code="VERTICAL_FAILED", detail=str(e)[:200])
-        await status_msg.edit_text(
-            f"❌ Не удалось сделать вертикальный формат.\n\n🆔 Job #{job_id}"
-        )
-        temp.cleanup_job(job_dir.name)
-        return
-
-    logger.info(
-        "vertical_clips_ready",
-        job_id=job_id,
-        count=len(vertical_job.clips),
-    )
-
-    # ---- 7g. Final render: subs + CTA + clean export (Stages H+I+J) ----
-    await status_msg.edit_text(
-        f"💬 Субтитры, CTA, чистый экспорт…\n\n🆔 Job #{job_id}"
-    )
-
-    final_dir = job_dir / "final"
-    try:
-        final_job = await FinalRenderer().render(
-            vertical_clips=vertical_job.clips,
-            transcribed=transcribed,
-            output_dir=final_dir,
-            cta_configured_asset=settings.cta_asset_path,
-        )
-    except FinalRenderError as e:
-        logger.error("final_render_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
-        await _mark_failed(job_id, code="FINALIZE_FAILED", detail=str(e)[:200])
-        await status_msg.edit_text(
-            f"❌ Не удалось финализировать клипы.\n\n🆔 Job #{job_id}"
-        )
-        temp.cleanup_job(job_dir.name)
-        return
-
-    logger.info(
-        "final_clips_ready",
-        job_id=job_id,
-        count=len(final_job.clips),
-    )
-
-    # ---- 8. Acknowledge (status summary before sending) ----
-    duration_str = _format_duration(probe.duration_seconds)
-    clips_preview = "\n".join(
-        f"  {c.index}. {c.final_path.stat().st_size // 1024} KB"
-        f"{' + subs' if c.has_subtitles else ''}"
-        f"{' + CTA' if c.has_cta else ''}"
-        for c in final_job.clips
-    )
-    summary = (
-        f"✅ Видео принято.\n\n"
-        f"⏱ Длительность: {duration_str}\n"
-        f"📐 Размер: {probe.width}×{probe.height}\n"
-        f"🎬 Готово вертикальных клипов: {len(final_job.clips)}\n\n"
-        f"{clips_preview}\n\n"
-        f"📤 Отправляю в Telegram…\n\n"
-        f"🆔 Job #{job_id}"
-    )
-    await status_msg.edit_text(summary)
-
-    # ---- 9. Send clips (Stage K) ----
-    from app.services.sender import TelegramSender
-    sender = TelegramSender(bot)
-    send_result = await sender.send(
-        final_job=final_job,
         chat_id=message.chat.id,
-    )
-
-    logger.info(
-        "clips_sent",
-        job_id=job_id,
-        user_id=user_id,
-        sent=len(send_result.sent),
-        failed=len(send_result.failed),
-    )
-
-    # ---- 10. Final message + cleanup ----
-    if send_result.sent:
-        await status_msg.edit_text(
-            f"✅ Нашёл {len(send_result.sent)} моментов.\n\n"
-            f"Готово. Исходник и временные файлы удалены.\n\n"
-            f"🆔 Job #{job_id}"
-        )
-    else:
-        await status_msg.edit_text(
-            f"❌ Не удалось отправить клипы в Telegram.\n\n"
-            f"🆔 Job #{job_id}"
-        )
-
-    # Mark Job as completed in DB (or failed if all sends failed)
-    async with db_manager.session() as session:
-        repo = JobRepository(session)
-        if send_result.sent and not send_result.failed:
-            await repo.mark_completed(job_id, clips_generated=len(send_result.sent))
-        elif send_result.sent and send_result.failed:
-            # Partial success — still call it completed with the partial count
-            await repo.mark_completed(job_id, clips_generated=len(send_result.sent))
-        else:
-            await repo.mark_failed(
-                job_id, code="SEND_FAILED",
-                error_detail=f"all {len(final_job.clips)} clips failed to send",
-            )
-
-    # Cleanup the entire job workspace — files are no longer needed
-    temp.cleanup_job(job_dir.name)
-
-    logger.info(
-        "video_accepted",
-        job_id=job_id,
-        user_id=user_id,
-        duration_s=round(probe.duration_seconds, 1),
-        width=probe.width,
-        height=probe.height,
-        bytes=actual_size,
+        input_path=str(input_path),
         job_dir=str(job_dir),
+        status_message_id=status_msg.message_id,
     )
 
 
 # ---------------------------------------------------------------------------
-# helpers
+# In-memory pending-job store (process-local, no DB column needed)
+# ---------------------------------------------------------------------------
+
+class _PendingJob:
+    __slots__ = ("job_id", "chat_id", "input_path", "job_dir", "status_message_id")
+
+    def __init__(self, job_id: int, chat_id: int, input_path: str, job_dir: str,
+                 status_message_id: int) -> None:
+        self.job_id = job_id
+        self.chat_id = chat_id
+        self.input_path = input_path
+        self.job_dir = job_dir
+        self.status_message_id = status_message_id
+
+
+_pending_jobs: dict[int, _PendingJob] = {}
+
+
+def _pop_pending(user_id: int) -> _PendingJob | None:
+    return _pending_jobs.pop(user_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Step 2 — callbacks
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data == "action:quick_prep")
+async def on_quick_prep(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    pending = _pop_pending(user_id)
+    if pending is None:
+        await call.answer("⚠️ Сначала отправь видео.", show_alert=True)
+        return
+    await call.answer("🚀 Запускаю…")
+
+    settings = get_settings()
+    input_path = Path(pending.input_path)
+    job_dir = Path(pending.job_dir)
+
+    await _edit_status(call.message, "🎬 Подготавливаю…\n\n⏳ FFmpeg в работе…")
+
+    # Load user's CTA settings
+    cta_asset: Path | None = None
+    cta_enabled = False
+    cta_position = "bottom"
+    cta_mode = "end"
+    cta_duration_seconds = 4.0
+    cta_start_seconds = 0.0
+
+    async with db_manager.session() as session:
+        srepo = UserSettingsRepository(session)
+        s = await srepo.get(user_id)
+        if s is not None:
+            cta_enabled = s.cta_enabled
+            cta_position = s.cta_position
+            cta_mode = s.cta_mode
+            cta_duration_seconds = s.cta_duration_seconds
+            cta_start_seconds = s.cta_start_seconds
+            if s.cta_asset_path:
+                p = Path(s.cta_asset_path)
+                if p.exists():
+                    cta_asset = p
+
+    # Run QuickPrep
+    pipeline = QuickPrepPipeline()
+    try:
+        result = await pipeline.run(
+            input_video=input_path,
+            job_dir=job_dir,
+            target_width=settings.output_width,
+            target_height=settings.output_height,
+            target_fps=settings.output_fps,
+            video_bitrate=settings.output_video_bitrate,
+            audio_bitrate=settings.output_audio_bitrate,
+            cta_asset=cta_asset if cta_enabled else None,
+            cta_position=cta_position,
+            cta_mode=cta_mode,
+            cta_duration_seconds=cta_duration_seconds,
+            cta_start_seconds=cta_start_seconds,
+            cta_min_margin_px=settings.cta_min_margin_px,
+            output_width=settings.output_width,
+            output_height=settings.output_height,
+        )
+    except Exception as e:
+        logger.error("quickprep_failed", user_id=user_id, job_id=pending.job_id, error=str(e)[:200])
+        await _edit_status(call.message, f"❌ Не удалось подготовить видео.\n\nОшибка в логах.")
+        # Clean up the job workspace
+        try:
+            get_temp_manager().cleanup_job(job_dir.name)
+        except Exception:
+            pass
+        return
+
+    await _edit_status(
+        call.message,
+        f"✅ Готово. Отправляю…\n\n"
+        f"📦 {result.size_bytes // 1024 // 1024} МБ · {result.width}×{result.height}",
+    )
+
+    # Send via Telegram
+    sender = TelegramSender(call.bot)
+    from app.pipeline.final_renderer import FinalClip, FinalJob
+
+    final_clip = FinalClip(
+        index=1,
+        final_path=result.final_path,
+        has_subtitles=False,  # QuickPrep does not run Whisper
+        has_cta=result.has_cta,
+        size_bytes=result.size_bytes,
+    )
+    send_result = await sender.send(
+        final_job=FinalJob(clips=(final_clip,)),
+        chat_id=pending.chat_id,
+        reply_to_message_id=pending.status_message_id,
+    )
+
+    if send_result.sent:
+        await _edit_status(
+            call.message,
+            f"✅ Готово. Исходник удалён.\n\n🆔 Job #{pending.job_id}",
+        )
+        # Mark job completed
+        async with db_manager.session() as session:
+            repo = JobRepository(session)
+            await repo.mark_completed(pending.job_id, clips_generated=1)
+    else:
+        await _edit_status(
+            call.message,
+            f"❌ Не удалось отправить видео.\n\n🆔 Job #{pending.job_id}",
+        )
+
+    # Always clean up
+    try:
+        get_temp_manager().cleanup_job(job_dir.name)
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "action:analyze_long")
+async def on_analyze_long(call: CallbackQuery) -> None:
+    """For long videos — full pipeline. Currently delegated to the legacy
+    video handler flow. We reuse `_pending_jobs` data + the long pipeline
+    runner we already have.
+    """
+    user_id = call.from_user.id if call.from_user else 0
+    pending = _pop_pending(user_id)
+    if pending is None:
+        await call.answer("⚠️ Сначала отправь видео.", show_alert=True)
+        return
+    await call.answer("🔍 Анализирую…")
+
+    # Run the long pipeline (legacy handler) in-place.
+    # We import the inner function to avoid a circular import.
+    from app.bot.handlers.video_legacy import run_long_pipeline
+    try:
+        await run_long_pipeline(
+            call.message,
+            call.bot,
+            pending,
+            user_id,
+        )
+    finally:
+        # The legacy runner cleans up its own workspace.
+        pass
+
+
+@router.callback_query(F.data == "action:settings")
+async def on_settings(call: CallbackQuery) -> None:
+    await _show_settings(call.message, call.from_user.id if call.from_user else 0)
+    await call.answer()
+
+
+@router.callback_query(F.data == "settings:back")
+async def on_settings_back(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    await _show_settings(call.message, user_id)
+    await call.answer()
+
+
+@router.callback_query(F.data == "settings:toggle_cta")
+async def on_toggle_cta(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    async with db_manager.session() as session:
+        s = await UserSettingsRepository(session).update_fields(user_id)
+        s.cta_enabled = not s.cta_enabled
+    await _show_settings(call.message, user_id)
+    await call.answer(f"CTA {'включён' if s.cta_enabled else 'выключен'}")
+
+
+@router.callback_query(F.data == "settings:toggle_subs")
+async def on_toggle_subs(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    async with db_manager.session() as session:
+        s = await UserSettingsRepository(session).update_fields(user_id)
+        s.subtitles_enabled = not s.subtitles_enabled
+    await _show_settings(call.message, user_id)
+    await call.answer(f"Субтитры {'включены' if s.subtitles_enabled else 'выключены'}")
+
+
+@router.callback_query(F.data == "settings:position")
+async def on_settings_position(call: CallbackQuery) -> None:
+    await call.message.edit_text("📍 Выбери позицию CTA:", reply_markup=POSITION_MENU)
+    await call.answer()
+
+
+@router.callback_query(F.data == "settings:timing")
+async def on_settings_timing(call: CallbackQuery) -> None:
+    await call.message.edit_text("⏱ Когда показывать CTA?", reply_markup=TIMING_MENU)
+    await call.answer()
+
+
+@router.callback_query(F.data == "settings:upload_cta")
+async def on_settings_upload_cta(call: CallbackQuery) -> None:
+    await call.message.edit_text(
+        "📎 Отправь мне свой баннер (PNG с прозрачностью).\n\n"
+        "Я сохраню его и буду использовать при подготовке видео.\n\n"
+        "/cancel — отмена"
+    )
+    await call.answer()
+    # Mark user as waiting for banner upload
+    _awaiting_banner.add(call.from_user.id if call.from_user else 0)
+
+
+_awaiting_banner: set[int] = set()
+
+
+@router.callback_query(F.data.startswith("cta_pos:"))
+async def on_set_position(call: CallbackQuery) -> None:
+    pos = call.data.split(":", 1)[1]
+    user_id = call.from_user.id if call.from_user else 0
+    if pos not in CTA_POSITIONS:
+        await call.answer("Неизвестная позиция")
+        return
+    async with db_manager.session() as session:
+        await UserSettingsRepository(session).update_fields(
+            user_id, cta_position=pos,
+        )
+    await call.message.edit_text(
+        f"✅ Позиция сохранена: {CTA_POSITIONS[pos]}\n\n"
+        f"Хочешь посмотреть как будет выглядеть?",
+        reply_markup=preview_keyboard(),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("cta_time:"))
+async def on_set_timing(call: CallbackQuery) -> None:
+    key = call.data.split(":", 1)[1]
+    user_id = call.from_user.id if call.from_user else 0
+    mapping = {
+        "full": ("full", 0.0),
+        "start_3": ("start", 3.0),
+        "end_3": ("end", 3.0),
+        "end_5": ("end", 5.0),
+    }
+    if key not in mapping:
+        await call.answer("Неизвестный вариант")
+        return
+    mode, dur = mapping[key]
+    async with db_manager.session() as session:
+        await UserSettingsRepository(session).update_fields(
+            user_id,
+            cta_mode=mode,
+            cta_duration_seconds=dur,
+        )
+    label = CTA_TIMING.get(key, key)
+    await call.message.edit_text(
+        f"✅ Время показа сохранено: {label}\n\n"
+        f"Хочешь посмотреть как будет выглядеть?",
+        reply_markup=preview_keyboard(),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "preview:save")
+async def on_preview_save(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    await _show_settings(call.message, user_id)
+    await call.answer("✅ Сохранено")
+
+
+# ---------------------------------------------------------------------------
+# Banner upload handler (user sends PNG)
+# ---------------------------------------------------------------------------
+
+@router.message(F.photo | (F.document & F.document.mime_type.startswith("image/")))
+async def on_banner_upload(message: types.Message, bot: Bot) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    if user_id not in _awaiting_banner:
+        return  # not waiting for a banner
+    _awaiting_banner.discard(user_id)
+
+    # Find the biggest photo / the document
+    file_id: str | None = None
+    if message.photo:
+        file_id = message.photo[-1].file_id  # biggest
+    elif message.document:
+        file_id = message.document.file_id
+
+    if not file_id:
+        await message.answer("❌ Не удалось получить файл.")
+        return
+
+    out_dir = _user_asset_path(user_id)
+    out_path = out_dir / "banner.png"
+
+    try:
+        file = await bot.get_file(file_id)
+        await bot.download_file(file.file_path, destination=out_path)
+    except Exception as e:
+        logger.error("banner_download_failed", user_id=user_id, error=str(e)[:200])
+        await message.answer("❌ Не удалось сохранить баннер.")
+        return
+
+    async with db_manager.session() as session:
+        await UserSettingsRepository(session).update_fields(
+            user_id,
+            cta_asset_path=str(out_path),
+            cta_enabled=True,
+        )
+
+    await message.answer(
+        f"✅ Баннер сохранён и включён.\n"
+        f"📦 {out_path.stat().st_size // 1024} КБ\n\n"
+        f"Открой /start → ⚙️ Настройки чтобы выбрать позицию и время показа."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _pick_attachment(message: types.Message):
@@ -465,21 +547,37 @@ def _pick_attachment(message: types.Message):
     return max(candidates, key=lambda a: getattr(a, "file_size", 0) or 0)
 
 
-async def _mark_failed(job_id: int, code: str, detail: str) -> None:
-    """Mark a job as failed in the DB, swallowing any DB errors."""
+async def _show_settings(message: types.Message, user_id: int) -> None:
+    """Render the Settings menu based on current DB state."""
+    async with db_manager.session() as session:
+        s = await UserSettingsRepository(session).get_or_create(user_id)
+
+    pos = CTA_POSITIONS.get(s.cta_position, s.cta_position)
+    timing = (
+        f"Весь ролик" if s.cta_mode == "full"
+        else f"Последние {s.cta_duration_seconds:g} сек" if s.cta_mode == "end"
+        else f"Первые {s.cta_duration_seconds:g} сек" if s.cta_mode == "start"
+        else f"С {s.cta_start_seconds:g}с ({s.cta_duration_seconds:g}с)"
+    )
+    banner = "✅ Загружен" if s.cta_asset_path else "❌ Не загружен"
+
+    text = (
+        f"⚙️ <b>Настройки</b>\n\n"
+        f"CTA: {'✅ ВКЛ' if s.cta_enabled else '❌ ВЫКЛ'}\n"
+        f"Баннер: {banner}\n"
+        f"Позиция: {pos}\n"
+        f"Время: {timing}\n"
+        f"Субтитры: {'✅ ВКЛ' if s.subtitles_enabled else '❌ ВЫКЛ'}\n\n"
+        f"Формат вывода: 9:16 ({get_settings().output_width}×{get_settings().output_height})"
+    )
+    await message.edit_text(text, reply_markup=SETTINGS_MENU, parse_mode="HTML")
+
+
+async def _edit_status(message: types.Message, text: str) -> None:
+    """Edit a status message. We swallow Bad Request in case the original
+    message was deleted or is too old for edits.
+    """
     try:
-        async with db_manager.session() as session:
-            repo = JobRepository(session)
-            await repo.mark_failed(job_id=job_id, error_code=code, error_detail=detail)
+        await message.edit_text(text)
     except Exception as e:
-        logger.error("mark_failed_db_error", job_id=job_id, error=str(e)[:120])
-
-
-def _format_duration(seconds: float) -> str:
-    """Format seconds as e.g. '12:34' or '1:02:03'."""
-    seconds = max(0, int(seconds))
-    h, rem = divmod(seconds, 3600)
-    m, s = divmod(rem, 60)
-    if h:
-        return f"{h}:{m:02d}:{s:02d}"
-    return f"{m}:{s:02d}"
+        logger.warning("status_edit_failed", error=str(e)[:120])

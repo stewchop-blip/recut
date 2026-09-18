@@ -18,6 +18,7 @@ from app.database.models import (
     Job,
     JobStatus,
     User,
+    UserSettings,
 )
 
 
@@ -247,3 +248,45 @@ class JobRepository:
             .limit(limit)
         )
         return result.scalars().all()
+
+
+class UserSettingsRepository:
+    """CRUD for the `user_settings` table."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def get(self, telegram_user_id: int) -> UserSettings | None:
+        result = await self.session.execute(
+            select(UserSettings).where(
+                UserSettings.telegram_user_id == telegram_user_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_or_create(self, telegram_user_id: int) -> UserSettings:
+        """Return existing row, or insert a fresh one with default values."""
+        existing = await self.get(telegram_user_id)
+        if existing is not None:
+            return existing
+        row = UserSettings(telegram_user_id=telegram_user_id)
+        self.session.add(row)
+        await self.session.flush()
+        return row
+
+    async def update_fields(
+        self,
+        telegram_user_id: int,
+        **fields: object,
+    ) -> UserSettings:
+        """Update one or more fields on the user's settings row.
+
+        Auto-creates the row if it doesn't exist yet.
+        """
+        from sqlalchemy import update
+        row = await self.get_or_create(telegram_user_id)
+        for key, value in fields.items():
+            if hasattr(row, key):
+                setattr(row, key, value)
+        await self.session.flush()
+        return row
