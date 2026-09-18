@@ -46,7 +46,7 @@ logger = get_logger(__name__)
 # Accept video, video_note (round video), and video-as-document.
 @router.message(F.video | F.video_note | F.document)
 async def on_video_message(message: types.Message, bot: Bot) -> None:
-    user_id: int = message.conf.get("telegram_user_id") or (message.from_user.id if message.from_user else 0)
+    user_id: int = message.from_user.id if message.from_user else 0
     if not user_id:
         return
 
