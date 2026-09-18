@@ -51,3 +51,6 @@ dmypy.json
 .ruff_cache/
 # Legacy backups
 *.bak
+
+# Test video artifacts
+tests/**/*.mp4
