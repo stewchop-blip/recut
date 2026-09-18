@@ -370,7 +370,7 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         count=len(final_job.clips),
     )
 
-    # ---- 8. Acknowledge and signal next stage ----
+    # ---- 8. Acknowledge (status summary before sending) ----
     duration_str = _format_duration(probe.duration_seconds)
     clips_preview = "\n".join(
         f"  {c.index}. {c.final_path.stat().st_size // 1024} KB"
@@ -384,10 +384,56 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         f"📐 Размер: {probe.width}×{probe.height}\n"
         f"🎬 Готово вертикальных клипов: {len(final_job.clips)}\n\n"
         f"{clips_preview}\n\n"
-        f"⏳ Этапы H+I+J завершены — следующий шаг: отправка в Telegram.\n\n"
+        f"📤 Отправляю в Telegram…\n\n"
         f"🆔 Job #{job_id}"
     )
     await status_msg.edit_text(summary)
+
+    # ---- 9. Send clips (Stage K) ----
+    from app.services.sender import TelegramSender
+    sender = TelegramSender(bot)
+    send_result = await sender.send(
+        final_job=final_job,
+        chat_id=message.chat.id,
+    )
+
+    logger.info(
+        "clips_sent",
+        job_id=job_id,
+        user_id=user_id,
+        sent=len(send_result.sent),
+        failed=len(send_result.failed),
+    )
+
+    # ---- 10. Final message + cleanup ----
+    if send_result.sent:
+        await status_msg.edit_text(
+            f"✅ Нашёл {len(send_result.sent)} моментов.\n\n"
+            f"Готово. Исходник и временные файлы удалены.\n\n"
+            f"🆔 Job #{job_id}"
+        )
+    else:
+        await status_msg.edit_text(
+            f"❌ Не удалось отправить клипы в Telegram.\n\n"
+            f"🆔 Job #{job_id}"
+        )
+
+    # Mark Job as completed in DB (or failed if all sends failed)
+    async with db_manager.session() as session:
+        repo = JobRepository(session)
+        if send_result.sent and not send_result.failed:
+            await repo.mark_completed(job_id, clips_generated=len(send_result.sent))
+        elif send_result.sent and send_result.failed:
+            # Partial success — still call it completed with the partial count
+            await repo.mark_completed(job_id, clips_generated=len(send_result.sent))
+        else:
+            await repo.mark_failed(
+                job_id, code="SEND_FAILED",
+                error_detail=f"all {len(final_job.clips)} clips failed to send",
+            )
+
+    # Cleanup the entire job workspace — files are no longer needed
+    temp.cleanup_job(job_dir.name)
 
     logger.info(
         "video_accepted",
