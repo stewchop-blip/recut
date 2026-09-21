@@ -24,9 +24,10 @@ def _build_dispatcher() -> Dispatcher:
     # Whitelist gate runs before any router logic.
     dp.message.middleware.register(AccessMiddleware())
     dp.callback_query.middleware.register(AccessMiddleware())
-    # Routers — start must be last so /start works even from a video-like message
-    dp.include_router(video.router)
+    # Routers — start must be FIRST so commands like /start are handled
+    # before the text/video handlers. We register video after start/help.
     dp.include_router(start.router)
+    dp.include_router(video.router)
     return dp
 
 
