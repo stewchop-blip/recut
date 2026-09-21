@@ -34,6 +34,8 @@ dependencies = [
     "psutil>=5.9,<7",
     # CTA overlay asset generation (stage I)
     "pillow>=10.0,<12",
+    # URL video intake (TikTok / Instagram / YouTube)
+    "yt-dlp>=2024.0.0,<2026",
 ]
 
 [project.optional-dependencies]
