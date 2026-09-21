@@ -4,6 +4,11 @@ Uses /api/v1/chat/completions with `response_format: {type: json_object}`
 to force strict JSON. The model sees ONLY text + timestamps — never the
 video. The system prompt encodes all selection criteria from the spec.
 
+Token optimization:
+- Compact transcript format: [MM:SS-MM:SS] text (vs full HH:MM:SS)
+- Truncate user payload at 3000 chars (last segments are most relevant)
+- Log prompt_tokens / completion_tokens from response.usage
+
 Validation:
 - JSON must contain a top-level `clips` array
 - Each clip's start/end must fall inside [0, total_duration]
@@ -12,7 +17,6 @@ Validation:
 """
 import asyncio
 import json
-import re
 from typing import Any, Optional
 
 import httpx
@@ -31,50 +35,33 @@ from app.services.analysis.base import (
 logger = get_logger(__name__)
 
 
-# System prompt — encodes every requirement from the spec.
-SYSTEM_PROMPT = """You are a video editor assistant. Your job is to pick
-self-contained moments from a Russian transcript that will work as
-standalone short-form vertical videos (TikTok / Instagram Reels /
-YouTube Shorts).
+# System prompt — kept tight to save input tokens.
+# Gemini 2.5 Flash charges ~$0.30 / 1M input tokens; this prompt is ~500 tokens.
+SYSTEM_PROMPT = """Pick N standalone short-form vertical clips from a Russian transcript.
 
-SELECTION CRITERIA (each clip must satisfy ALL):
-1. The fragment is understandable WITHOUT prior context.
-2. The opening hooks the viewer in the first 2-3 seconds.
-3. The fragment contains a complete thought (no mid-thought cuts).
-4. Useful / surprising / conflicting / story / opinion / fact / conclusion.
-5. Minimum filler — avoid long intros, greetings, repetitions.
-6. Good ending — do NOT cut mid-sentence.
-7. Suitable for vertical short-form.
+CRITERIA (each clip must satisfy ALL):
+1. Understandable without prior context.
+2. Hooks viewer in first 2-3s.
+3. Complete thought, no mid-sentence cut.
+4. Useful / surprising / story / opinion / fact.
+5. Minimal filler, good ending.
+6. Length: 20-60s. Shorter OK if truly standalone.
 
-FORBIDDEN OPENINGS (re-cut if removing them makes the clip stronger):
-"ну", "короче", "в общем", "как я говорил ранее", "итак", "собственно",
-"кстати", "да", "нет", "вот", "это самое".
+FORBIDDEN OPENINGS: ну, короче, в общем, как я говорил ранее, итак,
+собственно, кстати, это самое. Re-cut if removing them strengthens the clip.
 
-PREFERRED LENGTH: 20-60 seconds per clip. Shorter is OK if the moment is
-truly standalone.
+OUTPUT (strict JSON, no commentary):
+{"clips":[{"start":82.4,"end":117.8,"title":"≤60 chars","hook":"≤80 chars","reason":"≤120 chars"}]}
 
-OUTPUT FORMAT (strict — return ONLY this JSON, no commentary):
-{
-  "clips": [
-    {
-      "start": 82.4,
-      "end": 117.8,
-      "title": "...",
-      "hook": "...",
-      "reason": "..."
-    }
-  ]
-}
+"start"/"end": seconds from video start. Return EXACTLY N clips unless transcript is too short."""
 
-Fields:
-- "start" / "end": seconds from the beginning of the source video.
-- "title": short title for the clip (max 60 chars, Russian).
-- "hook": first-sentence hook the editor should use (max 80 chars).
-- "reason": 1-sentence justification for selection (max 120 chars).
 
-Return EXACTLY the requested number of clips unless the transcript is
-too short to support that many.
-"""
+# Cap on transcript characters sent to the LLM. Russian text averages
+# ~2.5 chars/token; 3000 chars ≈ 1200 tokens input. Real-world Russian
+# videos of 10 min produce ~4500 chars of transcript; truncating to
+# 3000 keeps the most engaging final segments (where videos usually
+# climax) and reduces input cost by ~33% per call.
+MAX_TRANSCRIPT_CHARS = 3000
 
 
 class OpenRouterClipSelector(ClipSelector):
@@ -121,22 +108,55 @@ class OpenRouterClipSelector(ClipSelector):
             await self._client.aclose()
             self._client = None
 
+    @staticmethod
+    def _fmt_time(seconds: float) -> str:
+        """Format seconds as MM:SS (compact) — saves ~11 chars per segment
+        vs HH:MM:SS. For clips < 1h the hour prefix is always 00 and is
+        pure overhead.
+        """
+        seconds = max(0, int(seconds))
+        m, s = divmod(seconds, 60)
+        return f"{m:02d}:{s:02d}"
+
     def _build_user_payload(self, request: ClipSelectionRequest) -> str:
-        """Compress transcript into the user prompt."""
-        # Build a compact representation: [start-ends] text
+        """Build compact user prompt and truncate to MAX_TRANSCRIPT_CHARS.
+
+        Segments are kept in chronological order; we keep the LAST
+        MAX_TRANSCRIPT_CHARS characters (the climactic end of videos
+        usually has the most shareable moments).
+        """
+        # Compact [MM:SS-MM:SS] text
         compact_lines: list[str] = []
         for seg in request.segments:
-            compact_lines.append(
-                f"[{_fmt_time(seg.start)}-{_fmt_time(seg.end)}] {seg.text.strip()}"
-            )
+            line = f"[{self._fmt_time(seg.start)}-{self._fmt_time(seg.end)}] {seg.text.strip()}"
+            compact_lines.append(line)
+
         transcript_block = "\n".join(compact_lines)
 
-        return (
-            f"TOTAL_VIDEO_DURATION_SECONDS: {request.total_duration_seconds:.1f}\n"
-            f"REQUESTED_CLIP_COUNT: {request.target_count}\n"
-            f"CLIP_LENGTH_SECONDS: {request.min_seconds:.0f}-{request.max_seconds:.0f}\n\n"
-            f"TRANSCRIPT (timestamps in [HH:MM:SS]):\n{transcript_block}"
+        header = (
+            f"DUR:{request.total_duration_seconds:.0f}s "
+            f"COUNT:{request.target_count} "
+            f"LEN:{request.min_seconds:.0f}-{request.max_seconds:.0f}s\n"
         )
+
+        # If transcript is under the cap, send it whole.
+        if len(transcript_block) <= MAX_TRANSCRIPT_CHARS:
+            return header + transcript_block
+
+        # Truncate to the LAST MAX_TRANSCRIPT_CHARS chars (preserves the
+        # most engaging segments which usually come at the end of a video).
+        truncated = transcript_block[-MAX_TRANSCRIPT_CHARS:]
+        # Align to the start of a segment line for clean formatting.
+        nl = truncated.find("\n")
+        if nl > 0:
+            truncated = truncated[nl + 1:]
+
+        logger.info(
+            "transcript_truncated",
+            original_chars=len(transcript_block),
+            kept_chars=len(truncated),
+        )
+        return header + "[truncated, last segments only]\n" + truncated
 
     async def select_clips(self, request: ClipSelectionRequest) -> ClipSelection:
         client = await self._get_client()
@@ -160,7 +180,7 @@ class OpenRouterClipSelector(ClipSelector):
                     "openrouter_clip_request",
                     model=self._model,
                     attempt=attempt,
-                    transcript_chars=len(user_payload),
+                    payload_chars=len(user_payload),
                 )
                 resp = await client.post("/chat/completions", json=body)
             except httpx.TimeoutException as e:
@@ -193,6 +213,18 @@ class OpenRouterClipSelector(ClipSelector):
                 last_error = ClipSelectorError("Empty content from model")
                 continue
 
+            # Log token usage from OpenRouter's response.usage block.
+            # Format: {prompt_tokens, completion_tokens, total_tokens}
+            usage = data.get("usage") or {}
+            if usage:
+                logger.info(
+                    "openrouter_token_usage",
+                    model=self._model,
+                    prompt_tokens=usage.get("prompt_tokens", 0),
+                    completion_tokens=usage.get("completion_tokens", 0),
+                    total_tokens=usage.get("total_tokens", 0),
+                )
+
             try:
                 clips = self._parse_and_validate(raw, request)
             except ClipSelectorError as e:
@@ -205,7 +237,6 @@ class OpenRouterClipSelector(ClipSelector):
                 )
                 continue
 
-            # Successful parse — return.
             logger.info(
                 "openrouter_clip_success",
                 model=self._model,
@@ -217,7 +248,6 @@ class OpenRouterClipSelector(ClipSelector):
                 raw_response=raw[:1000],
             )
 
-        # Out of retries.
         raise ClipSelectorError(
             f"OpenRouter clip selection failed after {self._max_retries + 1} attempts: {last_error}"
         )
@@ -256,7 +286,6 @@ class OpenRouterClipSelector(ClipSelector):
             hook = str(item.get("hook", "")).strip()[:200]
             reason = str(item.get("reason", "")).strip()[:200]
 
-            # Range / duration validation.
             if start < 0:
                 raise ClipSelectorError(f"clip[{i}] start < 0 ({start})")
             if end > request.total_duration_seconds + 0.5:
@@ -266,7 +295,6 @@ class OpenRouterClipSelector(ClipSelector):
             if end <= start:
                 raise ClipSelectorError(f"clip[{i}] end <= start ({start} → {end})")
             duration = end - start
-            # Soft warning — accept slightly outside but flag.
             if duration > request.max_seconds * 1.5 or duration < request.min_seconds * 0.4:
                 raise ClipSelectorError(
                     f"clip[{i}] duration {duration:.1f}s outside reasonable bounds "
@@ -280,24 +308,15 @@ class OpenRouterClipSelector(ClipSelector):
         if not out:
             raise ClipSelectorError("LLM returned zero clips")
 
-        # Reject excessive overlap.
         out.sort(key=lambda c: c.start)
         for i in range(len(out) - 1):
             gap = out[i + 1].start - out[i].end
-            if gap < -request.min_seconds * 0.3:  # overlap > 30% of min length
+            if gap < -request.min_seconds * 0.3:
                 raise ClipSelectorError(
                     f"clips[{i}] and [{i+1}] overlap too much (gap={gap:.1f}s)"
                 )
 
         return out
-
-
-def _fmt_time(seconds: float) -> str:
-    """Format seconds as HH:MM:SS for prompt readability."""
-    seconds = max(0, int(seconds))
-    h, rem = divmod(seconds, 3600)
-    m, s = divmod(rem, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 # Global instance (re-instantiated lazily so settings changes apply)
