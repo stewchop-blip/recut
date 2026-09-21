@@ -47,6 +47,7 @@ from app.database.repositories import (
 from app.database.session import db_manager
 from app.pipeline.downloader import VideoDownloader
 from app.pipeline.quick_prep import QuickPrepPipeline
+from app.pipeline.url_downloader import DownloaderService, URLDownloadResult
 from app.services.sender import TelegramSender
 from app.services.transcription.faster_whisper import get_transcription_service
 from app.utils.temp import get_temp_manager
@@ -197,6 +198,73 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         input_path=str(input_path),
         job_dir=str(job_dir),
         status_message_id=status_msg.message_id,
+    )
+
+
+@router.message(F.text)
+async def on_url_message(message: types.Message, bot: Bot) -> None:
+    """Accept a supported video URL, download, then show actions."""
+    user_id: int = message.from_user.id if message.from_user else 0
+    if not user_id:
+        return
+    text = (message.text or "").strip()
+    if not text.lower().startswith("https://"):
+        return
+    svc = DownloaderService()
+    try:
+        svc._validate(text)
+    except Exception:
+        return
+
+    async with db_manager.session() as session:
+        repo = JobRepository(session)
+        if await repo.has_active_job(user_id):
+            await message.answer(
+                "⏳ У тебя уже есть видео в обработке.\nПодожди, пока оно закончится."
+            )
+            return
+        job = await repo.create(
+            telegram_user_id=user_id,
+            telegram_chat_id=message.chat.id,
+            source_message_id=message.message_id,
+            source_filename="url.mp4",
+            source_bytes=None,
+        )
+        job_id = job.id
+
+    status_msg = await message.answer(f"⏳ Скачиваю видео…\n\n🆔 Job #{job_id}")
+    temp = get_temp_manager()
+    job_dir = temp._job_dir(f"job_{job_id}_{uuid.uuid4().hex[:8]}")
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        result = await svc.download(text, job_dir)
+    except Exception as e:
+        logger.error("url_download_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
+        await status_msg.edit_text(
+            f"❌ Не удалось скачать видео по ссылке.\n\n{e}\n\n🆔 Job #{job_id}"
+        )
+        temp.cleanup_job(job_dir.name)
+        return
+
+    async with db_manager.session() as session:
+        repo = JobRepository(session)
+        await repo.set_status(
+            job_id=job_id,
+            status=__import__("app.database.models", fromlist=["JobStatus"]).JobStatus.PENDING,
+            status_message_id=status_msg.message_id,
+        )
+
+    _pending_jobs[user_id] = _PendingJob(
+        job_id=job_id,
+        chat_id=message.chat.id,
+        input_path=str(result.path),
+        job_dir=str(job_dir),
+        status_message_id=status_msg.message_id,
+    )
+    await status_msg.edit_text(
+        f"✅ Видео готово ({result.size_bytes // 1024 // 1024} МБ).\n\nВыбери действие:",
+        reply_markup=URL_ACTION_MENU,
     )
 
 
@@ -372,6 +440,141 @@ async def on_analyze_long(call: CallbackQuery) -> None:
         )
     finally:
         # The legacy runner cleans up its own workspace.
+        pass
+
+
+@router.callback_query(F.data == "url:original")
+async def on_url_original(call: CallbackQuery) -> None:
+    """Send the downloaded URL video as-is, without Recut processing."""
+    user_id = call.from_user.id if call.from_user else 0
+    pending = _pop_pending(user_id)
+    if pending is None:
+        await call.answer("⚠️ Сначала отправь ссылку.", show_alert=True)
+        return
+    await call.answer("📥 Отправляю оригинал…")
+    path = Path(pending.input_path)
+    if not path.exists():
+        await call.message.edit_text("❌ Исходник не найден.")
+        return
+    try:
+        await call.message.chat.forward_message(
+            chat_id=call.message.chat.id,
+            from_chat_id=pending.chat_id,
+            message_id=pending.status_message_id,
+        )
+    except Exception:
+        await call.message.answer_document(
+            document=types.FSInputFile(path),
+            caption="Оригинал",
+        )
+    await _safe_edit_text(
+        call.message,
+        "✅ Готово. Исходник удалён.\n\n🆔 Job #" + str(pending.job_id),
+    )
+    try:
+        get_temp_manager().cleanup_job(Path(pending.job_dir).name)
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "url:recut")
+async def on_url_recut(call: CallbackQuery) -> None:
+    """Run Recut QuickPrep on the downloaded URL video."""
+    user_id = call.from_user.id if call.from_user else 0
+    pending = _pop_pending(user_id)
+    if pending is None:
+        await call.answer("⚠️ Сначала отправь ссылку.", show_alert=True)
+        return
+    await call.answer("🚀 Запускаю Recut…")
+    settings = get_settings()
+    input_path = Path(pending.input_path)
+    job_dir = Path(pending.job_dir)
+    await _edit_status(call.message, "🎬 Подготавливаю…\n\n⏳ FFmpeg в работе…")
+    cta_asset: Path | None = None
+    cta_enabled = False
+    cta_position = "bottom"
+    cta_mode = "end"
+    cta_duration_seconds = 4.0
+    cta_start_seconds = 0.0
+    async with db_manager.session() as session:
+        srepo = UserSettingsRepository(session)
+        s = await srepo.get(user_id)
+        if s is not None:
+            cta_enabled = s.cta_enabled
+            cta_position = s.cta_position
+            cta_mode = s.cta_mode
+            cta_duration_seconds = s.cta_duration_seconds
+            cta_start_seconds = s.cta_start_seconds
+            if s.cta_asset_path:
+                p = Path(s.cta_asset_path)
+                if p.exists():
+                    cta_asset = p
+        if cta_enabled and cta_asset is None:
+            from app.services.overlays.cta_generator import ensure_cta_asset
+            cta_asset, _ = ensure_cta_asset("", job_dir)
+            logger.info("cta_default_asset_generated", path=str(cta_asset))
+    pipeline = QuickPrepPipeline()
+    try:
+        result = await pipeline.run(
+            input_video=input_path,
+            job_dir=job_dir,
+            target_width=settings.output_width,
+            target_height=settings.output_height,
+            target_fps=settings.output_fps,
+            video_bitrate=settings.output_video_bitrate,
+            audio_bitrate=settings.output_audio_bitrate,
+            cta_asset=cta_asset if cta_enabled else None,
+            cta_position=cta_position,
+            cta_mode=cta_mode,
+            cta_duration_seconds=cta_duration_seconds,
+            cta_start_seconds=cta_start_seconds,
+            cta_min_margin_px=settings.cta_min_margin_px,
+            output_width=settings.output_width,
+            output_height=settings.output_height,
+        )
+    except Exception as e:
+        logger.error("quickprep_failed", user_id=user_id, job_id=pending.job_id, error=str(e)[:200])
+        await _edit_status(call.message, f"❌ Не удалось подготовить видео.\n\nОшибка в логах.")
+        try:
+            get_temp_manager().cleanup_job(job_dir.name)
+        except Exception:
+            pass
+        return
+    await _edit_status(
+        call.message,
+        f"✅ Готово. Отправляю…\n\n"
+        f"📦 {result.size_bytes // 1024 // 1024} МБ · {result.width}×{result.height}",
+    )
+    sender = TelegramSender(call.bot)
+    from app.pipeline.final_renderer import FinalClip, FinalJob
+    final_clip = FinalClip(
+        index=1,
+        final_path=result.final_path,
+        has_subtitles=False,
+        has_cta=result.has_cta,
+        size_bytes=result.size_bytes,
+    )
+    send_result = await sender.send(
+        final_job=FinalJob(clips=(final_clip,)),
+        chat_id=pending.chat_id,
+        reply_to_message_id=pending.status_message_id,
+    )
+    if send_result.sent:
+        await _edit_status(
+            call.message,
+            "✅ Готово. Исходник удалён.\n\n🆔 Job #" + str(pending.job_id),
+        )
+        async with db_manager.session() as session:
+            repo = JobRepository(session)
+            await repo.mark_completed(pending.job_id, clips_generated=1)
+    else:
+        await _edit_status(
+            call.message,
+            "❌ Не удалось отправить видео.\n\n🆔 Job #" + str(pending.job_id),
+        )
+    try:
+        get_temp_manager().cleanup_job(job_dir.name)
+    except Exception:
         pass
 
 

@@ -155,7 +155,13 @@ class QuickPrepPipeline:
                     current = cta_path
                     has_cta = True
                 except Exception as e:
-                    logger.warning("quickprep_cta_failed", error=str(e)[:200])
+                    logger.error(
+                        "quickprep_cta_failed",
+                        job_id=getattr(locals().get("pending"), "job_id", None),
+                        error=str(e)[:300],
+                        cta_path=str(effective_cta_asset),
+                    )
+                    raise QuickPrepError(f"CTA overlay failed: {e}") from e
 
         # 4. Clean final export (loudnorm + strip metadata).
         final_path = job_dir / "final.mp4"

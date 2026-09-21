@@ -98,3 +98,14 @@ def preview_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔙 Назад", callback_data="settings:back"),
         ],
     ])
+
+
+# Menu shown after URL download: original vs recut
+URL_ACTION_MENU = InlineKeyboardMarkup(inline_keyboard=[
+    [
+        InlineKeyboardButton(text="📥 Скачать оригинал", callback_data="url:original"),
+    ],
+    [
+        InlineKeyboardButton(text="🎬 Сделать Recut", callback_data="url:recut"),
+    ],
+])
