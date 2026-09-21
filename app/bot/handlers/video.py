@@ -239,10 +239,21 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
 
     try:
         result = await svc.download(text, job_dir)
-    except Exception as e:
+    except URLDownloadError as e:
         logger.error("url_download_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
         await status_msg.edit_text(
-            f"❌ Не удалось скачать видео по ссылке.\n\n{e}\n\n🆔 Job #{job_id}"
+            f"❌ Не удалось скачать видео по ссылке.\n\n"
+            f"Попробуй другую ссылку или исходник.\n\n"
+            f"🆔 Job #{job_id}"
+        )
+        temp.cleanup_job(job_dir.name)
+        return
+    except Exception as e:
+        logger.error("url_download_unexpected_error", user_id=user_id, job_id=job_id, error=str(e)[:200])
+        await status_msg.edit_text(
+            f"❌ Не удалось скачать видео.\n\n"
+            f"Попробуй ещё раз.\n\n"
+            f"🆔 Job #{job_id}"
         )
         temp.cleanup_job(job_dir.name)
         return
