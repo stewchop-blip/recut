@@ -99,7 +99,7 @@ class DownloaderService:
 
         # Step 1: quick metadata probe without downloading.
         info = await self._run_ytdlp(
-            ["yt-dlp", "--dump-json", "--no-warnings", "--no-playlist", url],
+            [self._ytdlp_path, "--dump-json", "--no-warnings", "--no-playlist", url],
             timeout=60,
         )
         if info is None:
@@ -125,10 +125,10 @@ class DownloaderService:
             )
 
         # Step 2: download to output_dir.
-        out_template = str(output_dir / "%(title)s.%(ext)s")
+        out_template = str(output_dir / "download.%(ext)s")
         await self._run_ytdlp(
             [
-                "yt-dlp",
+                self._ytdlp_path,
                 "--no-warnings",
                 "--no-playlist",
                 "--merge-output-format", "mp4",
@@ -234,7 +234,7 @@ class DownloaderService:
 
     @staticmethod
     def _parse_source(url: str) -> str:
-        h = URLDownloadService._host(url) or ""
+        h = DownloaderService._host(url) or ""
         if "tiktok" in h:
             return "tiktok"
         if "instagram" in h or "instagr.am" in h:

@@ -203,6 +203,8 @@ class MediaService:
         # - bg: scale to fully cover target (increase), crop, heavy blur
         # - fg: scale to fit inside target (decrease, never exceed)
         # - overlay fg over bg (centred)
+        # Foreground: fit inside target (no upscaling past source res).
+        # NO pad — overlay directly; background fills the gaps.
         filter_complex = (
             "[0:v]split=2[bg_src][fg_src];"
             # Background: scale to cover target, enhance contrast/saturation, heavy blur
@@ -211,11 +213,9 @@ class MediaService:
             f"crop={target_width}:{target_height},"
             f"eq=brightness=0.0:contrast=1.1:saturation=1.2,"
             f"gblur=sigma={blur_strength}[bg];"
-            # Foreground: fit inside target (no upscaling past source res),
-            # pad to exact target size with black bars (will be overlaid on bg).
+            # Foreground: fit inside target (no upscaling past source res).
             f"[fg_src]scale=w={target_width}:h={target_height}:"
-            f"force_original_aspect_ratio=decrease:flags=fast_bilinear,"
-            f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:color=black[fg];"
+            f"force_original_aspect_ratio=decrease:flags=fast_bilinear[fg];"
             "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=0[v]"
         )
 
@@ -354,15 +354,16 @@ class MediaService:
         cta_path: Path,
         output_path: Path,
         *,
-        x: int,
-        y: int,
+        position: str,
+        margin: int,
         start_seconds: float,
         end_seconds: float,
         timeout_seconds: float = 300.0,
     ) -> Path:
-        """Overlay a PNG over a window of the video. No re-encode of video
-        stream — only a copy of video with the overlay layered on top.
-        Falls back to re-encoding if copy isn't compatible.
+        """Overlay a PNG over a window of the video.
+
+        CTA positioning is computed INSIDE the FFmpeg filtergraph from
+        actual video/overlay dimensions — no hardcoded 720x200 assumption.
         """
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
@@ -370,16 +371,13 @@ class MediaService:
             raise FileNotFoundError(f"CTA asset not found: {cta_path}")
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # enable=between(t,start,end) shows the overlay only in the window.
-        # IMPORTANT: ffmpeg's expression parser splits on commas — if we
-        # emit e.g. `between(t,1.500,2.000)` it sees "between(t" "1.500"
-        # "2.000)" as separate filter arguments. Solution: use %g (no
-        # trailing zeros, e.g. "1.5") AND quote the expression so commas
-        # inside don't split arguments.
+        x_expr, y_expr = _cta_position_exprs(position, margin)
         filter_expr = (
             f"[1:v]format=rgba[cta];"
-            f"[0:v][cta]overlay=x={x}:y={y}:"
-            f"enable='between(t,%g,%g)'[v]"
+            f"[0:v][cta]overlay="
+            f"x={x_expr}:y={y_expr}:"
+            f"enable='between(t,%g,%g)':"
+            f"eof_action=repeat:repeatlast=1[v]"
         ) % (start_seconds, end_seconds)
 
         cmd = [
@@ -760,3 +758,31 @@ media_service = MediaService()
 
 def get_media_service() -> MediaService:
     return media_service
+
+
+# ---------------------------------------------------------------------------
+# CTA positioning helpers (used by burn_cta filtergraph)
+# ---------------------------------------------------------------------------
+
+
+def _cta_position_exprs(position: str, margin: int) -> tuple[str, str]:
+    """Return (x_expr, y_expr) FFmpeg overlay expressions.
+
+    Uses FFmpeg built-in variables: main_w, main_h, overlay_w, overlay_h.
+    Positions the CTA relative to actual dimensions, not hardcoded pixels.
+    """
+    if position == "top":
+        return (f"(main_w-overlay_w)/2", f"{margin}")
+    elif position == "bottom":
+        return (f"(main_w-overlay_w)/2", f"main_h-overlay_h-{margin}")
+    elif position == "top_left":
+        return (f"{margin}", f"{margin}")
+    elif position == "top_right":
+        return (f"main_w-overlay_w-{margin}", f"{margin}")
+    elif position == "bottom_left":
+        return (f"{margin}", f"main_h-overlay_h-{margin}")
+    elif position == "bottom_right":
+        return (f"main_w-overlay_w-{margin}", f"main_h-overlay_h-{margin}")
+    else:
+        # Default: center bottom
+        return (f"(main_w-overlay_w)/2", f"main_h-overlay_h-{margin}")

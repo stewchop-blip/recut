@@ -87,6 +87,19 @@ def _user_asset_path(user_id: int) -> Path:
     return p
 
 
+async def _fail_job(job_id: int, code: str, detail: str = "") -> None:
+    """Mark a job as FAILED so it doesn't block the user via has_active_job.
+
+    Must be called in EVERY error path after a job has been created.
+    """
+    try:
+        async with db_manager.session() as session:
+            repo = JobRepository(session)
+            await repo.mark_failed(job_id, code, detail)
+    except Exception as e:
+        logger.warning("fail_job_db_error", job_id=job_id, error=str(e)[:120])
+
+
 # ---------------------------------------------------------------------------
 # Step 1 — accept video, save to job_dir, show action menu
 # ---------------------------------------------------------------------------
@@ -161,6 +174,7 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         )
     except Exception as e:
         logger.error("video_download_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
+        await _fail_job(job_id, "DOWNLOAD_FAILED", str(e)[:500])
         await status_msg.edit_text(
             f"❌ Не удалось скачать видео.\n\nПопробуй ещё раз.\n\n🆔 Job #{job_id}"
         )
@@ -241,6 +255,7 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
         result = await svc.download(text, job_dir)
     except URLDownloadError as e:
         logger.error("url_download_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
+        await _fail_job(job_id, "URL_DOWNLOAD_FAILED", str(e)[:500])
         await status_msg.edit_text(
             f"❌ Не удалось скачать видео по ссылке.\n\n"
             f"Попробуй другую ссылку или исходник.\n\n"
@@ -250,6 +265,7 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
         return
     except Exception as e:
         logger.error("url_download_unexpected_error", user_id=user_id, job_id=job_id, error=str(e)[:200])
+        await _fail_job(job_id, "URL_DOWNLOAD_FAILED", str(e)[:500])
         await status_msg.edit_text(
             f"❌ Не удалось скачать видео.\n\n"
             f"Попробуй ещё раз.\n\n"
@@ -298,6 +314,14 @@ class _PendingJob:
 _pending_jobs: dict[int, _PendingJob] = {}
 
 
+def _get_pending(user_id: int) -> _PendingJob | None:
+    """Return pending job WITHOUT removing it (peek).
+
+    Removal happens only on SUCCESS / CANCEL / explicit terminal cleanup.
+    """
+    return _pending_jobs.get(user_id)
+
+
 def _pop_pending(user_id: int) -> _PendingJob | None:
     return _pending_jobs.pop(user_id, None)
 
@@ -309,7 +333,7 @@ def _pop_pending(user_id: int) -> _PendingJob | None:
 @router.callback_query(F.data == "action:quick_prep")
 async def on_quick_prep(call: CallbackQuery) -> None:
     user_id = call.from_user.id if call.from_user else 0
-    pending = _pop_pending(user_id)
+    pending = _get_pending(user_id)
     if pending is None:
         await call.answer("⚠️ Сначала отправь видео.", show_alert=True)
         return
@@ -373,12 +397,14 @@ async def on_quick_prep(call: CallbackQuery) -> None:
         )
     except Exception as e:
         logger.error("quickprep_failed", user_id=user_id, job_id=pending.job_id, error=str(e)[:200])
+        await _fail_job(pending.job_id, "QUICKPREP_FAILED", str(e)[:500])
         await _edit_status(call.message, f"❌ Не удалось подготовить видео.\n\nОшибка в логах.")
         # Clean up the job workspace
         try:
             get_temp_manager().cleanup_job(job_dir.name)
         except Exception:
             pass
+        _pop_pending(user_id)
         return
 
     await _edit_status(
@@ -413,11 +439,14 @@ async def on_quick_prep(call: CallbackQuery) -> None:
         async with db_manager.session() as session:
             repo = JobRepository(session)
             await repo.mark_completed(pending.job_id, clips_generated=1)
+        _pop_pending(user_id)
     else:
+        await _fail_job(pending.job_id, "SEND_FAILED")
         await _edit_status(
             call.message,
             f"❌ Не удалось отправить видео.\n\n🆔 Job #{pending.job_id}",
         )
+        _pop_pending(user_id)
 
     # Always clean up
     try:
@@ -465,22 +494,27 @@ async def on_url_original(call: CallbackQuery) -> None:
     await call.answer("📥 Отправляю оригинал…")
     path = Path(pending.input_path)
     if not path.exists():
+        await _fail_job(pending.job_id, "FILE_GONE")
         await call.message.edit_text("❌ Исходник не найден.")
         return
+    # Send the actual downloaded video file, not the status message.
     try:
-        await call.message.chat.forward_message(
-            chat_id=call.message.chat.id,
-            from_chat_id=pending.chat_id,
-            message_id=pending.status_message_id,
+        await call.message.answer_video(
+            video=types.FSInputFile(path),
+            caption="Оригинал",
         )
     except Exception:
+        # Fall back to document if Telegram rejects it as video.
         await call.message.answer_document(
             document=types.FSInputFile(path),
             caption="Оригинал",
         )
+    async with db_manager.session() as session:
+        repo = JobRepository(session)
+        await repo.mark_completed(pending.job_id, clips_generated=0)
     await _safe_edit_text(
         call.message,
-        "✅ Готово. Исходник удалён.\n\n🆔 Job #" + str(pending.job_id),
+        "✅ Готово. Исходник удалён.",
     )
     try:
         get_temp_manager().cleanup_job(Path(pending.job_dir).name)
@@ -492,7 +526,7 @@ async def on_url_original(call: CallbackQuery) -> None:
 async def on_url_recut(call: CallbackQuery) -> None:
     """Run Recut QuickPrep on the downloaded URL video."""
     user_id = call.from_user.id if call.from_user else 0
-    pending = _pop_pending(user_id)
+    pending = _get_pending(user_id)
     if pending is None:
         await call.answer("⚠️ Сначала отправь ссылку.", show_alert=True)
         return
@@ -545,6 +579,7 @@ async def on_url_recut(call: CallbackQuery) -> None:
         )
     except Exception as e:
         logger.error("quickprep_failed", user_id=user_id, job_id=pending.job_id, error=str(e)[:200])
+        await _fail_job(pending.job_id, "QUICKPREP_FAILED", str(e)[:500])
         await _edit_status(call.message, f"❌ Не удалось подготовить видео.\n\nОшибка в логах.")
         try:
             get_temp_manager().cleanup_job(job_dir.name)
@@ -724,7 +759,7 @@ async def on_preview_save(call: CallbackQuery) -> None:
 # Banner upload handler (user sends PNG)
 # ---------------------------------------------------------------------------
 
-@router.message(F.photo | (F.document & F.document.mime_type.startswith("image/")))
+@router.message(F.document, F.document.mime_type == "image/png")
 async def on_banner_upload(message: types.Message, bot: Bot) -> None:
     user_id = message.from_user.id if message.from_user else 0
     if user_id not in _awaiting_banner:

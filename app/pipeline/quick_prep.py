@@ -139,8 +139,8 @@ class QuickPrepPipeline:
                 start_seconds=cta_start_seconds,
                 position=cta_position,
                 margin=cta_min_margin_px,
-                output_w=output_width,
-                output_h=output_height,
+                output_w=meta.width,
+                output_h=meta.height,
                 asset=effective_cta_asset,
             )
             if spec is not None:
@@ -148,7 +148,8 @@ class QuickPrepPipeline:
                 try:
                     await media.burn_cta(
                         current, spec.asset_path, cta_path,
-                        x=spec.x, y=spec.y,
+                        position=cta_position,
+                        margin=cta_min_margin_px,
                         start_seconds=spec.start_seconds,
                         end_seconds=spec.end_seconds,
                     )

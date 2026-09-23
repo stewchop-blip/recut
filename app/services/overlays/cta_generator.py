@@ -53,9 +53,19 @@ def ensure_cta_asset(
 ) -> Tuple[Path, bool]:
     """Return (path, was_generated).
 
-    If `configured_path` is empty or doesn't exist on disk, generate a
-    placeholder in `fallback_dir/cta_default.png` and return that path.
+    Priority:
+    1. A statically-shipped app/assets/cta/banner.png (bundled in repo)
+    2. `configured_path` (user upload — future/Railway ephemeral)
+    3. Auto-generated placeholder in fallback_dir
     """
+    # Static repo asset — always available, works on Railway ephemeral
+    import os
+    repo_asset = Path(os.path.join(
+        os.path.dirname(__file__), "..", "..", "assets", "cta", "banner.png"
+    )).resolve()
+    if repo_asset.exists():
+        return repo_asset, False
+
     if configured_path:
         p = Path(configured_path)
         if p.exists():
