@@ -894,6 +894,23 @@ async def on_banner_upload(message: types.Message, bot: Bot) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Banner wrong-input response (explicit state when user taps "Upload banner")
+# ---------------------------------------------------------------------------
+
+@router.message(F.photo)
+async def on_banner_photo_wrong_input(message: types.Message) -> None:
+    """User sent a photo (not a file). Must respond clearly when in banner-upload state."""
+    user_id = message.from_user.id if message.from_user else 0
+    if user_id in _awaiting_banner:
+        await message.answer(
+            "❌ Ты отправил изображение как фото.\n\n"
+            "Пришли PNG через:\n"
+            "Скрепка → Файл\n\n"
+            "Это нужно, чтобы сохранить качество и прозрачность."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

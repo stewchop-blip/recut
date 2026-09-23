@@ -167,7 +167,8 @@ class FinalRenderer:
             try:
                 await media.burn_cta(
                     current, cta_spec.asset_path, cta_path,
-                    x=cta_spec.x, y=cta_spec.y,
+                    position=cta_service._position,
+                    margin=cta_service._margin,
                     start_seconds=cta_spec.start_seconds,
                     end_seconds=cta_spec.end_seconds,
                 )

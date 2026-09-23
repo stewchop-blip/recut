@@ -113,7 +113,6 @@ class QuickPrepPipeline:
                 # If SAR not square, remux with setsar=1 via a quick ffmpeg copy pass.
                 if abs(meta.sample_aspect_ratio - 1.0) > 0.01:
                     sar_fixed = job_dir / "vertical_sar_fixed.mp4"
-                    from app.services.media.ffmpeg import get_media_service
                     await get_media_service()._run_sar_fix(vertical_path, sar_fixed)
                     vertical_path = sar_fixed
             else:

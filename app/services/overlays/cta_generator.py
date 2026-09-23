@@ -63,14 +63,15 @@ def ensure_cta_asset(
         if p.exists():
             return p, False
 
-    # Static repo asset — always available, works on Railway ephemeral
-    import os
-    repo_asset = Path(os.path.join(
-        os.path.dirname(__file__), "..", "..", "assets", "cta", "banner.png"
-    )).resolve()
-    if repo_asset.exists():
-        return repo_asset, False
+    # If user has configured a banner (telegram_file_id or cta_asset_path),
+    # it should have been downloaded to job_dir/user_cta.png before this call.
+    # We check for it by looking in fallback_dir for the downloaded copy.
+    user_downloaded = fallback_dir / "cta_user.png"
+    if user_downloaded.exists():
+        return user_downloaded, False
 
+    # No custom banner — fall back to default (tests/dev only; production should
+    # show an error instead, handled at the QuickPrep / Smart Clips level).
     out = fallback_dir / "cta_default.png"
     if not out.exists():
         generate_default_cta(out)

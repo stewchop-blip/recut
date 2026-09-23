@@ -86,26 +86,21 @@ class CTAService:
             return None
 
         # Determine position. x/y are the top-left of the CTA box.
-        # CTA box assumed ~720x200 by default; FFmpeg scales it via overlay
-        # expressions using iw/ih of the asset. We choose TOP-LEFT corner.
+        # CTA box size is no longer hardcoded; overlay uses FFmpeg expressions
+        # based on actual overlay_w / overlay_h. We keep the top-left corner
+        # computation minimal — placement is handled by the filtergraph.
         if self._position == "top":
-            x = (self._w - 720) // 2
-            y = self._margin
+            x, y = 0, self._margin  # will be overridden by filtergraph
         elif self._position == "bottom":
-            x = (self._w - 720) // 2
-            y = self._h - 200 - self._margin
+            x, y = 0, 0
         elif self._position == "top_left":
-            x = self._margin
-            y = self._margin
+            x, y = self._margin, self._margin
         elif self._position == "top_right":
-            x = self._w - 720 - self._margin
-            y = self._margin
+            x, y = 0, self._margin
         elif self._position == "bottom_left":
-            x = self._margin
-            y = self._h - 200 - self._margin
+            x, y = self._margin, 0
         elif self._position == "bottom_right":
-            x = self._w - 720 - self._margin
-            y = self._h - 200 - self._margin
+            x, y = 0, 0
         else:
             logger.warning("cta_unknown_position", position=self._position)
             return None
@@ -156,13 +151,15 @@ class CTAService:
         if t1 <= t0:
             return None
 
-        # Position (assume 720x200 CTA box)
-        if position == "top":
-            x = (output_w - 720) // 2
-            y = margin
-        elif position == "bottom":
+        # Position — placement is handled by FFmpeg overlay expressions in
+        # burn_cta(); these x/y are kept for backward API compatibility but
+        # are NOT used by the current filtergraph-based overlay.
+        if position == "bottom":
             x = (output_w - 720) // 2
             y = output_h - 200 - margin
+        elif position == "top":
+            x = (output_w - 720) // 2
+            y = margin
         elif position == "top_left":
             x = margin
             y = margin

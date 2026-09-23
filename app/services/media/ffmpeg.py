@@ -225,7 +225,6 @@ class MediaService:
             # crop to exact target, then normalize SAR to 1:1 and blur.
             f"[bg_src]scale=w={target_width}:h={target_height}:"
             f"force_original_aspect_ratio=increase:flags=fast_bilinear,"
-            f"force_divisible_by=2,"
             f"crop={target_width}:{target_height},"
             f"setsar=1,"  # normalize sample aspect ratio to square pixels
             f"eq=brightness=0.0:contrast=1.1:saturation=1.2,"
@@ -235,7 +234,6 @@ class MediaService:
             f"[fg_src]scale=w=min(iw,{target_width}):"
             f"h=min(ih,{target_height}):"
             f"force_original_aspect_ratio=decrease:"
-            f"force_divisible_by=2,"
             f"setsar=1,"
             f"flags=fast_bilinear[fg];"
             "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=0[v]"
@@ -394,8 +392,10 @@ class MediaService:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         x_expr, y_expr = _cta_position_exprs(position, margin)
+        # Scale banner to max 85% of video width, preserve aspect ratio.
         filter_expr = (
-            f"[1:v]format=rgba[cta];"
+            f"[1:v]format=rgba,"
+            f"scale='min(iw,main_w*0.85)':-1[cta];"
             f"[0:v][cta]overlay="
             f"x={x_expr}:y={y_expr}:"
             f"enable='between(t,%g,%g)':"
