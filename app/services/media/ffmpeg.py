@@ -474,12 +474,20 @@ class MediaService:
             # Fall back to plain remux-with-metadata-strip.
             return await self._strip_only(video_path, output_path)
 
-        import json, re
-        m = re.search(r"\{[^}]*\}", stderr.decode(errors="ignore"), re.DOTALL)
-        if not m:
+        import json
+        # loudnorm prints JSON to stderr. Find the block containing "input_i"
+        stderr_text = stderr.decode(errors="ignore")
+        idx = stderr_text.find('"input_i"')
+        if idx == -1:
             logger.warning("loudnorm_parse_failed_fallback_strip")
             return await self._strip_only(video_path, output_path)
-        measured = json.loads(m.group())
+        # Find the surrounding braces (loudnorm JSON is flat, single level)
+        brace_start = stderr_text.rfind('{', 0, idx)
+        brace_end = stderr_text.find('}', idx)
+        if brace_start == -1 or brace_end == -1:
+            logger.warning("loudnorm_parse_failed_fallback_strip")
+            return await self._strip_only(video_path, output_path)
+        measured = json.loads(stderr_text[brace_start:brace_end + 1])
 
         # Pass 2: apply loudnorm + strip metadata.
         apply_cmd = [
