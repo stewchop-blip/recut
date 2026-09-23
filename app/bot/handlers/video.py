@@ -598,7 +598,23 @@ async def on_settings(call: CallbackQuery) -> None:
 @router.callback_query(F.data == "settings:back")
 async def on_settings_back(call: CallbackQuery) -> None:
     user_id = call.from_user.id if call.from_user else 0
-    await _show_settings(call.message, user_id)
+    pending = _pending_jobs.get(user_id)
+    if pending is not None:
+        # Restore the main action menu for the pending job
+        input_path = Path(pending.input_path)
+        if input_path.exists():
+            actual_size = input_path.stat().st_size
+            await call.message.edit_text(
+                f"✅ Видео загружено ({actual_size // 1024 // 1024} МБ).\n\nВыбери действие:",
+                reply_markup=ACTION_MENU,
+            )
+            await call.answer()
+            return
+    # No pending job — go back to /start
+    await call.message.edit_text(
+        "🎬 <b>Recut</b>\n\nОтправь видео — подготовлю его к публикации.",
+        parse_mode="HTML",
+    )
     await call.answer()
 
 
