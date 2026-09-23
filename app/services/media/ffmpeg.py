@@ -26,6 +26,20 @@ class MediaService:
         logger.info("ffmpeg_found", path=ffmpeg)
         return ffmpeg
 
+    async def _run_sar_fix(self, input_path: Path, output_path: Path, timeout: int = 60) -> None:
+        """Remux with square pixels (SAR=1:1) without full re-encode."""
+        cmd = [
+            self._ffmpeg_path, "-y", "-v", "error",
+            "-i", str(input_path),
+            "-c:v", "libx264", "-preset", "veryfast",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            "-map_metadata", "-1", "-map_chapters", "-1",
+            str(output_path),
+        ]
+        proc = await asyncio.create_subprocess_exec(*cmd)
+        await asyncio.wait_for(proc.communicate(), timeout=timeout)
+
     async def extract_audio(
         self,
         input_path: Path,
@@ -207,15 +221,23 @@ class MediaService:
         # NO pad — overlay directly; background fills the gaps.
         filter_complex = (
             "[0:v]split=2[bg_src][fg_src];"
-            # Background: scale to cover target, enhance contrast/saturation, heavy blur
+            # Background: scale to cover target (force_original_aspect_ratio=increase),
+            # crop to exact target, then normalize SAR to 1:1 and blur.
             f"[bg_src]scale=w={target_width}:h={target_height}:"
             f"force_original_aspect_ratio=increase:flags=fast_bilinear,"
+            f"force_divisible_by=2,"
             f"crop={target_width}:{target_height},"
+            f"setsar=1,"  # normalize sample aspect ratio to square pixels
             f"eq=brightness=0.0:contrast=1.1:saturation=1.2,"
             f"gblur=sigma={blur_strength}[bg];"
-            # Foreground: fit inside target (no upscaling past source res).
-            f"[fg_src]scale=w={target_width}:h={target_height}:"
-            f"force_original_aspect_ratio=decrease:flags=fast_bilinear[fg];"
+            # Foreground: scale to CONTAIN inside target (decrease, never exceed),
+            # preserve native aspect ratio, normalize SAR, NO black pad.
+            f"[fg_src]scale=w=min(iw,{target_width}):"
+            f"h=min(ih,{target_height}):"
+            f"force_original_aspect_ratio=decrease:"
+            f"force_divisible_by=2,"
+            f"setsar=1,"
+            f"flags=fast_bilinear[fg];"
             "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=0[v]"
         )
 
@@ -758,6 +780,26 @@ media_service = MediaService()
 
 def get_media_service() -> MediaService:
     return media_service
+
+
+# ---------------------------------------------------------------------------
+# SAR normalization helper (for passthrough vertical format)
+# ---------------------------------------------------------------------------
+
+
+async def _run_sar_fix(self, input_path: Path, output_path: Path, timeout: int = 60) -> None:
+    """Remux with square pixels (SAR=1:1) without full re-encode."""
+    cmd = [
+        self._ffmpeg_path, "-y", "-v", "error",
+        "-i", str(input_path),
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        "-map_metadata", "-1", "-map_chapters", "-1",
+        str(output_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(*cmd)
+    await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
 
 # ---------------------------------------------------------------------------

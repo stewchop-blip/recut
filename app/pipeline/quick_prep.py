@@ -85,6 +85,16 @@ class QuickPrepPipeline:
         except Exception as e:
             raise QuickPrepError(f"Probe failed: {e}") from e
 
+        logger.info(
+            "video_geometry_input",
+            input=str(input_video),
+            width=meta.width,
+            height=meta.height,
+            sar=meta.sample_aspect_ratio,
+            dar=meta.display_aspect_ratio,
+            rotation=meta.rotation,
+        )
+
         if meta.duration_seconds <= 0:
             raise QuickPrepError("Source has no duration")
         if not meta.has_audio:
@@ -95,11 +105,17 @@ class QuickPrepPipeline:
         is_portrait = meta.height >= meta.width  # loose check
         try:
             if is_portrait and abs(meta.width / max(meta.height, 1) - target_width / target_height) < 0.05:
-                # Already 9:16 (within 5%) — copy as-is.
+                # Already 9:16 (within 5%) — copy as-is, but normalize SAR if needed.
                 vertical_path = job_dir / "vertical.mp4"
                 import shutil
                 shutil.copy2(current, vertical_path)
                 logger.info("quickprep_passthrough_vertical", path=str(vertical_path))
+                # If SAR not square, remux with setsar=1 via a quick ffmpeg copy pass.
+                if abs(meta.sample_aspect_ratio - 1.0) > 0.01:
+                    sar_fixed = job_dir / "vertical_sar_fixed.mp4"
+                    from app.services.media.ffmpeg import get_media_service
+                    await get_media_service()._run_sar_fix(vertical_path, sar_fixed)
+                    vertical_path = sar_fixed
             else:
                 vertical_path = job_dir / "vertical.mp4"
                 await media.make_vertical(
