@@ -41,6 +41,9 @@ class SendJob:
 class TelegramSender:
     """Send `FinalJob` clips via aiogram's send_video."""
 
+    # Telegram Bot API limit ~50 MB; compress at 48 MB to leave headroom
+    _MAX_SAFE_BYTES = 48 * 1024 * 1024
+
     def __init__(self, bot: Bot) -> None:
         self._bot = bot
 
@@ -84,14 +87,25 @@ class TelegramSender:
         chat_id: int,
         reply_to_message_id: int | None,
     ) -> Message:
-        """Upload + caption one clip."""
+        """Upload + caption one clip. Auto-compress if >48 MB."""
         if not clip.final_path.exists():
             raise SenderError(f"final file missing: {clip.final_path}")
 
-        caption = _build_caption(clip)
+        send_path = clip.final_path
+        # Telegram Bot API limit: 50 MB. Compress if needed.
+        size_bytes = send_path.stat().st_size
+        if size_bytes > 48 * 1024 * 1024:
+            logger.warning(
+                "sender_compressing",
+                original_size=size_bytes,
+                path=str(send_path),
+            )
+            send_path = await self._compress_for_telegram(send_path)
+
+        caption = _build_caption(clip, send_path)
         kwargs = {
             "chat_id": chat_id,
-            "video": FSInputFile(str(clip.final_path), filename=clip.final_path.name),
+            "video": FSInputFile(str(send_path), filename=send_path.name),
             "caption": caption,
             "supports_streaming": True,
         }
@@ -101,7 +115,7 @@ class TelegramSender:
         return await self._bot.send_video(**kwargs)
 
 
-def _build_caption(clip: FinalClip) -> str:
+def _build_caption(clip: FinalClip, send_path: Path | None = None) -> str:
     """Telegram captions are HTML, 1024 char limit."""
     flags: list[str] = []
     if clip.has_subtitles:
@@ -110,9 +124,62 @@ def _build_caption(clip: FinalClip) -> str:
         flags.append("CTA")
     flag_str = " · ".join(flags)
 
-    size_kb = clip.final_path.stat().st_size // 1024
+    path = send_path or clip.final_path
+    size_kb = path.stat().st_size // 1024
     return (
         f"🎬 <b>Клип {clip.index}</b>\n"
         f"{flag_str}\n"
         f"📦 {size_kb} КБ"
     )[:1024]
+
+
+async def _compress_for_telegram(src: Path) -> Path:
+    """Re-encode a video to fit under ~45 MB for Telegram send."""
+    import asyncio, math, subprocess, tempfile
+
+    out = src.with_suffix(".tg.mp4")
+    # Get duration via ffprobe
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(src),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        duration = float(stdout.decode(errors="ignore").strip() or 60)
+    except Exception:
+        duration = 60.0
+
+    # Target size: 45 MB, audio: 128k, overhead: ~5%
+    target_bytes = 45 * 1024 * 1024
+    total_kbps = (target_bytes * 8) / duration / 1000
+    video_kbps = max(500, int(total_kbps - 128 * 0.95))
+
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        "-i", str(src),
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-b:v", f"{video_kbps}k",
+        "-maxrate", f"{int(video_kbps * 1.5)}k",
+        "-bufsize", f"{video_kbps * 2}k",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-ac", "2",
+        "-movflags", "+faststart",
+        str(out),
+    ]
+    proc = await asyncio.create_subprocess_exec(*cmd)
+    await asyncio.wait_for(proc.communicate(), timeout=600)
+    if not out.exists() or out.stat().st_size == 0:
+        raise RuntimeError("Compression produced empty file")
+    logger.info(
+        "sender_compressed",
+        original=src.stat().st_size,
+        compressed=out.stat().st_size,
+        video_kbps=video_kbps,
+        duration=duration,
+    )
+    return out

@@ -454,7 +454,7 @@ class MediaService:
 
         # Pass 1: measure loudness.
         measure_cmd = [
-            self._ffmpeg_path, "-v", "error",
+            self._ffmpeg_path, "-v", "info",
             "-i", str(video_path),
             "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11:print_format=json",
             "-f", "null", "-",

@@ -54,10 +54,15 @@ def ensure_cta_asset(
     """Return (path, was_generated).
 
     Priority:
-    1. A statically-shipped app/assets/cta/banner.png (bundled in repo)
-    2. `configured_path` (user upload — future/Railway ephemeral)
+    1. `configured_path` (user upload — highest priority, overrides default)
+    2. Statically-shipped app/assets/cta/banner.png (bundled in repo)
     3. Auto-generated placeholder in fallback_dir
     """
+    if configured_path:
+        p = Path(configured_path)
+        if p.exists():
+            return p, False
+
     # Static repo asset — always available, works on Railway ephemeral
     import os
     repo_asset = Path(os.path.join(
@@ -65,11 +70,6 @@ def ensure_cta_asset(
     )).resolve()
     if repo_asset.exists():
         return repo_asset, False
-
-    if configured_path:
-        p = Path(configured_path)
-        if p.exists():
-            return p, False
 
     out = fallback_dir / "cta_default.png"
     if not out.exists():

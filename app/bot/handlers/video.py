@@ -116,7 +116,7 @@ def _fmt_duration(seconds: float) -> str:
 # Step 1 — accept video, save to job_dir, show action menu
 # ---------------------------------------------------------------------------
 
-@router.message(F.video | F.video_note | F.document)
+@router.message(F.video | F.video_note | (F.document & F.document.mime_type.startswith("video/")))
 async def on_video_message(message: types.Message, bot: Bot) -> None:
     user_id: int = message.from_user.id if message.from_user else 0
     if not user_id:
@@ -392,14 +392,24 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             cta_mode = s.cta_mode
             cta_duration_seconds = s.cta_duration_seconds
             cta_start_seconds = s.cta_start_seconds
-            if s.cta_asset_path:
+
+        # Resolve CTA asset: prefer telegram_file_id (Railway-safe),
+        # then local path, then default static banner.
+        if cta_enabled:
+            bot_instance = call.bot
+            if s is not None and s.cta_telegram_file_id:
+                try:
+                    tg_file = await bot_instance.get_file(s.cta_telegram_file_id)
+                    banner_path = job_dir / "cta_user.png"
+                    await bot_instance.download_file(tg_file.file_path, destination=banner_path)
+                    cta_asset = banner_path
+                    logger.info("cta_loaded_from_telegram_file_id", user_id=user_id)
+                except Exception as e:
+                    logger.warning("cta_telegram_file_id_load_failed", error=str(e)[:200])
+            if cta_asset is None and s is not None and s.cta_asset_path:
                 p = Path(s.cta_asset_path)
                 if p.exists():
                     cta_asset = p
-
-        # If the user enabled CTA but never uploaded a PNG (or the file
-        # got lost between deploys), fall back to a default banner so
-        # they still see something on the video.
         if cta_enabled and cta_asset is None:
             from app.services.overlays.cta_generator import ensure_cta_asset
             cta_asset, _ = ensure_cta_asset("", job_dir)
@@ -580,7 +590,21 @@ async def on_url_recut(call: CallbackQuery) -> None:
             cta_mode = s.cta_mode
             cta_duration_seconds = s.cta_duration_seconds
             cta_start_seconds = s.cta_start_seconds
-            if s.cta_asset_path:
+
+        # Resolve CTA asset: prefer telegram_file_id (Railway-safe),
+        # then local path, then default static banner.
+        if cta_enabled:
+            bot_instance = call.bot
+            if s is not None and s.cta_telegram_file_id:
+                try:
+                    tg_file = await bot_instance.get_file(s.cta_telegram_file_id)
+                    banner_path = job_dir / "cta_user.png"
+                    await bot_instance.download_file(tg_file.file_path, destination=banner_path)
+                    cta_asset = banner_path
+                    logger.info("cta_loaded_from_telegram_file_id", user_id=user_id)
+                except Exception as e:
+                    logger.warning("cta_telegram_file_id_load_failed", error=str(e)[:200])
+            if cta_asset is None and s is not None and s.cta_asset_path:
                 p = Path(s.cta_asset_path)
                 if p.exists():
                     cta_asset = p
@@ -796,39 +820,54 @@ async def on_banner_upload(message: types.Message, bot: Bot) -> None:
         return  # not waiting for a banner
     _awaiting_banner.discard(user_id)
 
-    # Find the biggest photo / the document
-    file_id: str | None = None
-    if message.photo:
-        file_id = message.photo[-1].file_id  # biggest
-    elif message.document:
-        file_id = message.document.file_id
-
-    if not file_id:
+    doc = message.document
+    if not doc or not doc.file_id:
         await message.answer("❌ Не удалось получить файл.")
         return
 
-    out_dir = _user_asset_path(user_id)
-    out_path = out_dir / "banner.png"
-
+    # Download temporarily, validate with Pillow, then store file_id in DB.
     try:
-        file = await bot.get_file(file_id)
-        await bot.download_file(file.file_path, destination=out_path)
+        file = await bot.get_file(doc.file_id)
+        tmp_png = _USER_ASSETS_DIR / f"_tmp_banner_{user_id}.png"
+        await bot.download_file(file.file_path, destination=tmp_png)
     except Exception as e:
         logger.error("banner_download_failed", user_id=user_id, error=str(e)[:200])
-        await message.answer("❌ Не удалось сохранить баннер.")
+        await message.answer("❌ Не удалось скачать файл.")
         return
 
+    # Validate with Pillow: must be PNG RGBA with non-zero dimensions.
+    try:
+        from PIL import Image
+        img = Image.open(tmp_png)
+        if img.format != "PNG":
+            tmp_png.unlink(missing_ok=True)
+            await message.answer("❌ Отправь плашку именно как PNG-файл.")
+            return
+        if img.mode not in ("RGBA", "RGB"):
+            # Convert to RGBA for alpha support
+            img = img.convert("RGBA")
+        w, h = img.size
+        if w <= 0 or h <= 0:
+            tmp_png.unlink(missing_ok=True)
+            await message.answer("❌ Изображение повреждено.")
+            return
+    except Exception:
+        tmp_png.unlink(missing_ok=True)
+        await message.answer("❌ Не удалось прочитать изображение. Отправь PNG-файл.")
+        return
+
+    # Store Telegram file_id in DB (survives Railway redeploy).
     async with db_manager.session() as session:
         await UserSettingsRepository(session).update_fields(
             user_id,
-            cta_asset_path=str(out_path),
+            cta_telegram_file_id=doc.file_id,
             cta_enabled=True,
         )
+    tmp_png.unlink(missing_ok=True)
 
     await message.answer(
-        f"✅ Баннер сохранён и включён.\n"
-        f"📦 {out_path.stat().st_size // 1024} КБ\n\n"
-        f"Открой /start → ⚙️ Настройки чтобы выбрать позицию и время показа."
+        "✅ Плашка сохранена\n\n"
+        "Открой /start → ⚙️ Настройки чтобы выбрать позицию и время показа."
     )
 
 

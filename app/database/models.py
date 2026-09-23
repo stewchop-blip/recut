@@ -156,6 +156,7 @@ class UserSettings(Base):
     # CTA overlay
     cta_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
     cta_asset_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    cta_telegram_file_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     cta_position: Mapped[str] = mapped_column(String(20), default="bottom", nullable=False)
     cta_mode: Mapped[str] = mapped_column(String(20), default="end", nullable=False)
     cta_duration_seconds: Mapped[float] = mapped_column(default=4.0, nullable=False)
