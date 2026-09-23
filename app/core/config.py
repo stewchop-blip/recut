@@ -102,7 +102,7 @@ class Settings(BaseSettings):
     ] = Field(default="bottom")
     cta_start_seconds: float = Field(default=0.0, ge=0.0)
     cta_duration_seconds: float = Field(default=4.0, ge=0.5, le=60.0)
-    cta_min_margin_px: int = Field(default=120, ge=0, le=600, description="Safe margin from edges")
+    cta_min_margin_px: int = Field(default=0, ge=0, le=600, description="Safe margin from edges (0 = auto: ~9.5% of frame height)")
 
     # === Subtitle safe areas (px) ===
     subtitle_safe_top_px: int = Field(default=300, ge=0)

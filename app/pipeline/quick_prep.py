@@ -100,7 +100,25 @@ class QuickPrepPipeline:
         if not meta.has_audio:
             logger.warning("quickprep_no_audio", path=str(input_video))
 
-        # 2. Vertical format (pass-through if already 9:16).
+        # 2. Black-bar detection BEFORE portrait check (a "9:16" video with
+        # embedded letterbox must be pre-cropped, not passed through).
+        try:
+            bars = await media.detect_black_bars(input_video)
+        except Exception as e:
+            logger.warning("quickprep_cropdetect_failed", error=str(e)[:200])
+            bars = None
+        if bars is not None:
+            w, h, x, y = bars
+            logger.info("black_bars_detected", crop_w=w, crop_h=h, crop_x=x, crop_y=y)
+            cropped = job_dir / "precrop.mp4"
+            await media._run_crop_pass(input_video, cropped, w, h, x, y)
+            input_video = cropped
+            try:
+                meta = await probe.probe(input_video)
+            except Exception as e:
+                raise QuickPrepError(f"Re-probe after crop failed: {e}") from e
+
+        # 3. Vertical format (pass-through if already 9:16).
         current = input_video
         is_portrait = meta.height >= meta.width  # loose check
         try:
@@ -127,6 +145,17 @@ class QuickPrepPipeline:
                     audio_bitrate=audio_bitrate,
                 )
             current = vertical_path
+            # Output geometry log (audit #22).
+            try:
+                out_meta = await probe.probe(vertical_path)
+                logger.info(
+                    "video_geometry_output",
+                    width=out_meta.width, height=out_meta.height,
+                    sar=out_meta.sample_aspect_ratio,
+                    dar=out_meta.display_aspect_ratio,
+                )
+            except Exception:
+                pass
         except Exception as e:
             logger.warning("quickprep_vertical_failed_using_source", error=str(e)[:200])
             current = input_video  # fall back to source

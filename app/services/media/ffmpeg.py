@@ -212,6 +212,30 @@ class MediaService:
             raise FileNotFoundError(f"Input not found: {input_path}")
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # STEP 1 / #20: detect embedded letterbox/pillarbox black bars and
+        # pre-crop real content BEFORE layout. Stable across >=70% of
+        # sampled frames — a single random frame never decides.
+        source = input_path
+        try:
+            bars = await self.detect_black_bars(input_path)
+        except Exception as e:
+            logger.warning("cropdetect_failed", error=str(e)[:200])
+            bars = None
+        if bars is not None:
+            w, h, x, y = bars
+            logger.info(
+                "black_bars_detected",
+                crop_w=w, crop_h=h, crop_x=x, crop_y=y,
+                input=str(input_path),
+            )
+            cropped = output_path.parent / (output_path.stem + "_precrop.mp4")
+            try:
+                await self._run_crop_pass(input_path, cropped, w, h, x, y)
+                source = cropped
+            except Exception as e:
+                logger.warning("black_bars_crop_failed_keep_original", error=str(e)[:200])
+                source = input_path
+
         # Filter graph:
         # - split source into [bg][fg]
         # - bg: scale to fully cover target (increase), crop, heavy blur
@@ -241,7 +265,7 @@ class MediaService:
             self._ffmpeg_path,
             "-y",
             "-v", "error",
-            "-i", str(input_path),
+            "-i", str(source),
             "-filter_complex", filter_complex,
             "-map", "[v]",
             "-map", "0:a?",
@@ -366,6 +390,123 @@ class MediaService:
         )
         return output_path
 
+    async def detect_black_bars(
+        self,
+        video_path: Path,
+        *,
+        sample_frames: int = 15,
+        min_agreement: float = 0.7,
+        timeout_seconds: float = 90.0,
+    ) -> tuple[int, int, int, int] | None:
+        """Detect stable letterbox/pillarbox black bars via cropdetect.
+
+        Samples the first `sample_frames` frames; the crop must agree on
+        (w, h) for >= min_agreement of samples AND on (x, y). Returns
+        (crop_w, crop_h, crop_x, crop_y) or None.
+
+        Guards: crop must actually trim at least one dimension and must
+        never remove more than half of either dimension (protects against
+        destroying real content).
+        """
+        if not video_path.exists():
+            raise FileNotFoundError(f"Video not found: {video_path}")
+
+        cmd = [
+            self._ffmpeg_path,
+            "-v", "info",
+            "-i", str(video_path),
+            "-vf", "cropdetect=limit=24:round=2:reset=0",
+            "-frames:v", str(sample_frames),
+            "-f", "null", "-",
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+        except asyncio.TimeoutError as e:
+            proc.kill()
+            raise RuntimeError("cropdetect timed out") from e
+
+        import re
+        crops: list[tuple[int, int, int, int]] = []
+        for line in stderr.decode(errors="ignore").splitlines():
+            m = re.search(r"crop=(\d+):(\d+):(\d+):(\d+)", line)
+            if m:
+                crops.append(tuple(int(g) for g in m.groups()))
+        if not crops:
+            return None
+
+        # Source dimensions from the cropdetect log itself (x+w etc.) —
+        # cropdetect's final line reflects the trimmed window; we instead
+        # get original dims from the first reported x/y offsets' frame:
+        # simpler — probe via streams.
+        info = await self.probe(video_path)
+        vstream = next(
+            (s for s in (info.get("streams") or []) if s.get("codec_type") == "video"), {},
+        )
+        src_w = int(vstream.get("width") or 0)
+        src_h = int(vstream.get("height") or 0)
+
+        n = len(crops)
+        mode_wh: tuple[int, int] | None = None
+        best_count = 0
+        for wh in set((c[0], c[1]) for c in crops):
+            cnt = sum(1 for c in crops if (c[0], c[1]) == wh)
+            if cnt > best_count:
+                best_count = cnt
+                mode_wh = wh
+        if mode_wh is None or best_count / n < min_agreement:
+            logger.info("cropdetect_unstable", samples=n, agreement=best_count / n)
+            return None
+
+        matching = [c for c in crops if (c[0], c[1]) == mode_wh]
+        x_counts: dict[int, int] = {}
+        y_counts: dict[int, int] = {}
+        for c in matching:
+            x_counts[c[2]] = x_counts.get(c[2], 0) + 1
+            y_counts[c[3]] = y_counts.get(c[3], 0) + 1
+        mode_x = max(x_counts, key=x_counts.get)
+        mode_y = max(y_counts, key=y_counts.get)
+        if x_counts[mode_x] / len(matching) < min_agreement or y_counts[mode_y] / len(matching) < min_agreement:
+            return None
+
+        w, h = mode_wh
+        x, y = mode_x, mode_y
+        # Guards.
+        if w >= src_w and h >= src_h:
+            return None  # nothing to trim
+        if src_w and w < src_w * 0.5:
+            return None
+        if src_h and h < src_h * 0.5:
+            return None
+        return (w, h, x, y)
+
+    async def _run_crop_pass(
+        self, input_path: Path, output_path: Path,
+        w: int, h: int, x: int, y: int, timeout: float = 300.0,
+    ) -> None:
+        """Pre-crop real content (re-encode; crop filter can't stream-copy)."""
+        cmd = [
+            self._ffmpeg_path, "-y", "-v", "error",
+            "-i", str(input_path),
+            "-vf", f"crop={w}:{h}:{x}:{y},setsar=1",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError as e:
+            proc.kill()
+            raise RuntimeError("crop pass timed out") from e
+        if proc.returncode != 0:
+            raise RuntimeError(f"crop pass failed: {stderr.decode(errors='ignore')[:300]}")
+
     async def burn_cta(
         self,
         video_path: Path,
@@ -417,9 +558,9 @@ class MediaService:
             logger.warning("cta_probe_failed", error=str(e)[:200])
 
         if video_w > 0 and video_h > 0 and banner_in_w > 0 and banner_in_h > 0:
-            # Effective margin: caller value if given, else 4% of frame height
-            # (audit range 3-5%).
-            margin_px = margin if margin > 0 else int(video_h * 0.04)
+            # Effective margin: caller value if given, else ~9.5% of frame
+            # height (audit range 160-220 px for 1080x1920 → 182 px).
+            margin_px = margin if margin > 0 else int(video_h * 0.095)
             side_margin = int(video_w * 0.04)
 
             if position == "full_width_bottom":
@@ -439,6 +580,10 @@ class MediaService:
             banner_out_w = max(2, int(banner_in_w * scale) // 2 * 2)
             banner_out_h = max(2, int(banner_in_h * scale) // 2 * 2)
 
+            # Re-derive x/y with the effective margin (margin_px may differ
+            # from the raw `margin` argument when caller passed 0/negative)
+            # BEFORE logging so the debug log shows final coordinates.
+            x_expr, y_expr = _cta_position_exprs(position, margin_px)
             logger.info(
                 "cta_banner_scaling",
                 input_banner_width=banner_in_w,
@@ -449,10 +594,11 @@ class MediaService:
                 video_height=video_h,
                 banner_position=position,
                 margin_px=margin_px,
+                x_expression=x_expr,
+                y_expression=y_expr,
+                start_seconds=start_seconds,
+                end_seconds=end_seconds,
             )
-            # Re-derive x/y with the effective margin (margin_px may differ
-            # from the raw `margin` argument when caller passed 0/negative).
-            x_expr, y_expr = _cta_position_exprs(position, margin_px)
 
         cta_chain = (
             f"[1:v]format=rgba,scale={banner_out_w}:{banner_out_h}[cta];"
