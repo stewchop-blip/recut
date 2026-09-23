@@ -24,6 +24,7 @@ The Telegram 20 MB Bot API limit applies — this code can't work around
 that without a self-hosted Bot API server. The handler validates file size
 before starting any work.
 """
+import io
 import shutil
 import uuid
 from pathlib import Path
@@ -33,10 +34,17 @@ from aiogram.types import CallbackQuery
 
 from app.bot.keyboards.inline import (
     ACTION_MENU,
+    BANNER_CANCEL_MENU,
+    HOME_MENU,
     POSITION_MENU,
+    RESULT_MENU_MOMENTS,
+    RESULT_MENU_PREPARE,
+    RESULT_MENU_VERSIONS,
     SETTINGS_MENU,
     SHORT_ACTION_MENU,
     TIMING_MENU,
+    banner_menu,
+    mode_input_menu,
     preview_keyboard,
 )
 from app.core.config import get_settings
@@ -230,9 +238,14 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         text += f"\U0001f4d0 {res_str}\n"
     text += "\n\u0412\u044b\u0431\u0435\u0440\u0438 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435:"
 
-    # Decide menu: short videos get Quick Prep only.
+    # Decide menu: chosen mode wins; short videos get Quick Prep only.
     SMART_CLIPS_MIN_SECONDS = 120
-    menu = ACTION_MENU if duration_sec >= SMART_CLIPS_MIN_SECONDS else SHORT_ACTION_MENU
+    selected_mode = get_selected_mode(user_id)
+    if selected_mode:
+        menu = mode_input_menu(selected_mode)
+        _mode_state.pop(user_id, None)
+    else:
+        menu = ACTION_MENU if duration_sec >= SMART_CLIPS_MIN_SECONDS else SHORT_ACTION_MENU
     await status_msg.edit_text(text, reply_markup=menu)
 
     # Stash the job info on a tiny in-memory store so callbacks can find it
@@ -348,8 +361,13 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
     text_out += "\nВыбери действие:"
 
     SMART_CLIPS_MIN_SECONDS = 120
-    menu = ACTION_MENU if duration_sec >= SMART_CLIPS_MIN_SECONDS else SHORT_ACTION_MENU
-    logger.info("url_ready_for_actions", user_id=user_id, job_id=job_id, menu="long" if duration_sec >= SMART_CLIPS_MIN_SECONDS else "short")
+    selected_mode = get_selected_mode(user_id)
+    if selected_mode:
+        menu = mode_input_menu(selected_mode)
+        _mode_state.pop(user_id, None)
+    else:
+        menu = ACTION_MENU if duration_sec >= SMART_CLIPS_MIN_SECONDS else SHORT_ACTION_MENU
+    logger.info("url_ready_for_actions", user_id=user_id, job_id=job_id, menu=type(menu).__name__)
     await status_msg.edit_text(text_out, reply_markup=menu)
 
 
@@ -491,6 +509,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             await _edit_status(
                 call.message,
                 f"✅ Готово. Исходник удалён.\n\n🆔 Job #{pending.job_id}",
+                reply_markup=RESULT_MENU_PREPARE,
             )
             async with db_manager.session() as session:
                 repo = JobRepository(session)
@@ -576,6 +595,7 @@ async def on_url_original(call: CallbackQuery) -> None:
     await _safe_edit_text(
         call.message,
         "✅ Готово. Исходник удалён.",
+        reply_markup=RESULT_MENU_PREPARE,
     )
     try:
         get_temp_manager().cleanup_job(Path(pending.job_dir).name)
@@ -684,6 +704,7 @@ async def on_url_recut(call: CallbackQuery) -> None:
         await _edit_status(
             call.message,
             "✅ Готово. Исходник удалён.\n\n🆔 Job #" + str(pending.job_id),
+            reply_markup=RESULT_MENU_PREPARE,
         )
         async with db_manager.session() as session:
             repo = JobRepository(session)
@@ -720,11 +741,146 @@ async def on_settings_back(call: CallbackQuery) -> None:
             )
             await call.answer()
             return
-    # No pending job — go back to /start
+# No pending job — show HOME
     await call.message.edit_text(
-        "🎬 <b>Recut</b>\n\nОтправь видео — подготовлю его к публикации.",
+        HOME_TEXT,
         parse_mode="HTML",
+        reply_markup=HOME_MENU,
     )
+    await call.answer()
+
+
+# ---------------------------------------------------------------------------
+# HOME / mode selection / banner section (audit #1, #3-9, #33)
+# ---------------------------------------------------------------------------
+
+HOME_TEXT = (
+    "🎬 <b>ReCut</b>\n\nЧто сделать?"
+)
+
+_MODE_PROMPTS = {
+    "prepare": (
+        "🚀 <b>Подготовить к публикации</b>\n\n"
+        "📎 Пришли видео или ссылку на TikTok / Reels / Shorts."
+    ),
+    "versions": (
+        "✨ <b>Сделать 3 версии</b>\n\n"
+        "📎 Пришли короткий ролик.\n\n"
+        "Сделаю несколько разных монтажных вариантов."
+    ),
+    "moments": (
+        "✂️ <b>Найти лучшие моменты</b>\n\n"
+        "📎 Пришли длинное видео или ссылку."
+    ),
+}
+
+# Selected mode per user; consumed when a video/URL arrives.
+_mode_state: dict[int, str] = {}
+
+
+@router.callback_query(F.data == "home:open")
+async def on_home_open(call: CallbackQuery) -> None:
+    _mode_state.pop(call.from_user.id if call.from_user else 0, None)
+    await call.message.edit_text(HOME_TEXT, parse_mode="HTML", reply_markup=HOME_MENU)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("mode:"))
+async def on_mode_selected(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    mode = (call.data or "").split(":", 1)[1]
+    if mode not in _MODE_PROMPTS:
+        await call.answer("Неизвестный режим")
+        return
+    _mode_state[user_id] = mode
+    await call.message.edit_text(_MODE_PROMPTS[mode], parse_mode="HTML")
+    await call.answer()
+
+
+def get_selected_mode(user_id: int) -> str | None:
+    return _mode_state.get(user_id)
+
+
+@router.callback_query(F.data == "banner:menu")
+async def on_banner_menu(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    file_id = None
+    try:
+        async with db_manager.session() as session:
+            s = await UserSettingsRepository(session).get_or_create(user_id)
+            file_id = s.cta_telegram_file_id
+    except Exception as e:
+        logger.warning("banner_menu_db_failed", error=str(e)[:200])
+    if file_id:
+        text = (
+            "🖼 <b>Плашка</b>\n\n"
+            "Статус: ✅ Загружена\n"
+            f"Положение: {getattr(s, 'cta_position', 'снизу')}\n"
+            "Показ: последние сек."
+        )
+    else:
+        text = "🖼 <b>Плашка</b>\n\nПлашка пока не загружена."
+    await call.message.edit_text(text, parse_mode="HTML", reply_markup=banner_menu(bool(file_id)))
+    await call.answer()
+
+
+@router.callback_query(F.data == "banner:upload")
+async def on_banner_upload_request(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    _awaiting_banner.add(user_id)
+    await call.message.edit_text(
+        "📎 Пришли PNG-файл с плашкой.\n\n"
+        "Важно: отправь его как <b>ФАЙЛ</b>, а не как фото —\n"
+        "так сохранится прозрачность.",
+        parse_mode="HTML",
+        reply_markup=BANNER_CANCEL_MENU,
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "banner:cancel")
+async def on_banner_cancel(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    _awaiting_banner.discard(user_id)
+    await call.message.edit_text("Отменено.", reply_markup=banner_menu(False))
+    await call.answer()
+
+
+@router.callback_query(F.data == "banner:delete")
+async def on_banner_delete(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    async with db_manager.session() as session:
+        s = await UserSettingsRepository(session).update_fields(user_id)
+        s.cta_telegram_file_id = None
+        s.cta_enabled = False
+    await call.message.edit_text(
+        "🗑 Плашка удалена.",
+        reply_markup=banner_menu(False),
+    )
+    await call.answer("Плашка удалена")
+
+
+@router.callback_query(F.data == "banner:preview")
+async def on_banner_preview(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    file_id = None
+    async with db_manager.session() as session:
+        s = await UserSettingsRepository(session).get_or_create(user_id)
+        file_id = s.cta_telegram_file_id
+    if not file_id:
+        await call.answer("Плашка не загружена", show_alert=True)
+        return
+    try:
+        bot = call.bot
+        tg_file = await bot.get_file(file_id)
+        buf = io.BytesIO()
+        await bot.download_file(tg_file.file_path if hasattr(tg_file, "file_path") else tg_file, destination=buf)
+    except Exception:
+        await call.answer("Не удалось загрузить плашку", show_alert=True)
+        return
+    buf.seek(0)
+    photo = types.BufferedInputFile(buf.getvalue(), filename="banner.png")
+    await call.message.answer_photo(photo, caption="Так выглядит твоя плашка.")
     await call.answer()
 
 
@@ -906,7 +1062,34 @@ async def on_banner_photo_wrong_input(message: types.Message) -> None:
             "❌ Ты отправил изображение как фото.\n\n"
             "Пришли PNG через:\n"
             "Скрепка → Файл\n\n"
-            "Это нужно, чтобы сохранить качество и прозрачность."
+            "Это нужно, чтобы сохранить качество и прозрачность.",
+            reply_markup=BANNER_CANCEL_MENU,
+        )
+
+
+@router.message(F.document)
+async def on_banner_document_wrong_type(message: types.Message) -> None:
+    """Non-PNG document while waiting for banner — never stay silent."""
+    user_id = message.from_user.id if message.from_user else 0
+    if user_id not in _awaiting_banner:
+        return
+    doc = message.document
+    if doc and doc.mime_type == "image/png":
+        return  # handled by on_banner_upload
+    await message.answer(
+        "❌ Нужен PNG-файл.",
+        reply_markup=BANNER_CANCEL_MENU,
+    )
+
+
+@router.message(F.text)
+async def on_banner_text_while_waiting(message: types.Message) -> None:
+    """Text while waiting for a banner file — respond, never stay silent."""
+    user_id = message.from_user.id if message.from_user else 0
+    if user_id in _awaiting_banner:
+        await message.answer(
+            "📎 Жду PNG-файл.",
+            reply_markup=BANNER_CANCEL_MENU,
         )
 
 
@@ -976,11 +1159,11 @@ async def _safe_edit_text(
         logger.warning("edit_text_failed", error=err[:120])
 
 
-async def _edit_status(message: types.Message, text: str) -> None:
+async def _edit_status(message: types.Message, text: str, reply_markup=None) -> None:
     """Edit a status message. We swallow Bad Request in case the original
     message was deleted or is too old for edits.
     """
     try:
-        await message.edit_text(text)
+        await message.edit_text(text, reply_markup=reply_markup)
     except Exception as e:
         logger.warning("status_edit_failed", error=str(e)[:120])

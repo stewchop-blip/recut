@@ -36,6 +36,7 @@ HELP_TEXT = (
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message) -> None:
+    from app.bot.keyboards.inline import HOME_MENU
     # If the user has a pending job in memory, restore the action menu
     # instead of showing the welcome text (better UX — the menu is
     # otherwise lost after the status message scrolls away).
@@ -57,7 +58,11 @@ async def cmd_start(message: types.Message) -> None:
                 return
     except Exception:
         pass
-    await message.answer(WELCOME, parse_mode="HTML")
+    await message.answer(
+        "🎬 <b>ReCut</b>\n\nЧто сделать?",
+        parse_mode="HTML",
+        reply_markup=HOME_MENU,
+    )
 
 
 @router.message(Command("help"))

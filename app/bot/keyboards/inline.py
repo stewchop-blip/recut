@@ -11,7 +11,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 ACTION_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [
         InlineKeyboardButton(
-            text="🚀 Подготовить видео",
+            text="🚀 Подготовить к публикации",
             callback_data="action:quick_prep",
         ),
     ],
@@ -20,6 +20,8 @@ ACTION_MENU = InlineKeyboardMarkup(inline_keyboard=[
             text="✂️ Найти лучшие моменты",
             callback_data="action:analyze_long",
         ),
+    ],
+    [
         InlineKeyboardButton(
             text="⚙️ Настройки",
             callback_data="action:settings",
@@ -27,12 +29,10 @@ ACTION_MENU = InlineKeyboardMarkup(inline_keyboard=[
     ],
 ])
 
-
-# Shorter action menu — no "find moments" for videos under SMART_CLIPS_MIN_SECONDS
 SHORT_ACTION_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [
         InlineKeyboardButton(
-            text="🚀 Подготовить",
+            text="🚀 Подготовить к публикации",
             callback_data="action:quick_prep",
         ),
     ],
@@ -42,6 +42,72 @@ SHORT_ACTION_MENU = InlineKeyboardMarkup(inline_keyboard=[
             callback_data="action:settings",
         ),
     ],
+])
+
+# ---------------------------------------------------------------------------
+# HOME screen (audit: result-named modes, banner is its own section)
+# ---------------------------------------------------------------------------
+
+HOME_MENU = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🚀 Подготовить к публикации", callback_data="mode:prepare")],
+    [InlineKeyboardButton(text="✨ Сделать 3 версии", callback_data="mode:versions")],
+    [InlineKeyboardButton(text="✂️ Найти лучшие моменты", callback_data="mode:moments")],
+    [InlineKeyboardButton(text="🖼 Плашка", callback_data="banner:menu")],
+    [InlineKeyboardButton(text="⚙️ Настройки", callback_data="action:settings")],
+])
+
+HOME_BACK_MENU = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
+])
+
+def mode_input_menu(mode: str) -> InlineKeyboardMarkup:
+    """Menu shown after video input in the chosen mode (audit #3-5)."""
+    if mode == "prepare":
+        rows = [[InlineKeyboardButton(text="🚀 Подготовить", callback_data="action:quick_prep")]]
+    elif mode == "versions":
+        rows = [[InlineKeyboardButton(text="✨ Сделать 3 версии", callback_data="action:versions")]]
+    else:  # moments
+        rows = [[InlineKeyboardButton(text="✂️ Найти лучшие моменты", callback_data="action:analyze_long")]]
+    rows.append([InlineKeyboardButton(text="🖼 Плашка", callback_data="banner:menu")])
+    rows.append([InlineKeyboardButton(text="⚙️ Настройки", callback_data="action:settings")])
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def banner_menu(exists: bool) -> InlineKeyboardMarkup:
+    """Banner section: status screen when a banner exists, else empty state."""
+    if exists:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📎 Загрузить новую", callback_data="banner:upload")],
+            [InlineKeyboardButton(text="📍 Положение", callback_data="settings:position")],
+            [InlineKeyboardButton(text="⏱ Время показа", callback_data="settings:timing")],
+            [InlineKeyboardButton(text="👁 Предпросмотр", callback_data="banner:preview")],
+            [InlineKeyboardButton(text="🗑 Удалить", callback_data="banner:delete")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📎 Загрузить PNG", callback_data="banner:upload")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
+    ])
+
+BANNER_CANCEL_MENU = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="❌ Отмена", callback_data="banner:cancel")],
+])
+
+RESULT_MENU_PREPARE = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🚀 Ещё одно видео", callback_data="mode:prepare")],
+    [InlineKeyboardButton(text="🖼 Изменить плашку", callback_data="banner:menu")],
+    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
+])
+
+RESULT_MENU_VERSIONS = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="✨ Сделать ещё варианты", callback_data="mode:versions")],
+    [InlineKeyboardButton(text="🖼 Изменить плашку", callback_data="banner:menu")],
+    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
+])
+
+RESULT_MENU_MOMENTS = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="✂️ Ещё одно видео", callback_data="mode:moments")],
+    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
 ])
 
 
@@ -60,7 +126,10 @@ SETTINGS_MENU = InlineKeyboardMarkup(inline_keyboard=[
         InlineKeyboardButton(text="💬 Субтитры вкл/выкл", callback_data="settings:toggle_subs"),
     ],
     [
-        InlineKeyboardButton(text="📎 Загрузить баннер", callback_data="settings:upload_cta"),
+        InlineKeyboardButton(text="🖼 Плашка", callback_data="banner:menu"),
+    ],
+    [
+        InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open"),
     ],
     [
         InlineKeyboardButton(text="🔙 Назад", callback_data="settings:back"),
