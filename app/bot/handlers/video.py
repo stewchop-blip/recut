@@ -535,6 +535,101 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             pass
 
 
+@router.callback_query(F.data == "action:versions")
+async def on_action_versions(call: CallbackQuery) -> None:
+    """STEP 5: ✨ Сделать 3 версии — three real edit decisions."""
+    user_id = call.from_user.id if call.from_user else 0
+    pending = _get_pending(user_id)
+    if pending is None:
+        await call.answer("⚠️ Сначала отправь видео.", show_alert=True)
+        return
+    await call.answer("✨ Готовлю 3 версии…")
+
+    input_path = Path(pending.input_path)
+    job_dir = Path(pending.job_dir)
+
+    await _edit_status(call.message, "✨ Монтирую 3 версии…\n\n⏳ Это займёт минуту-две.")
+
+    try:
+        # CTA settings (same resolution as quick_prep).
+        cta_asset: Path | None = None
+        cta_enabled = False
+        cta_position = "bottom"
+        async with db_manager.session() as session:
+            s = await UserSettingsRepository(session).get(user_id)
+            if s is not None:
+                cta_enabled = s.cta_enabled
+                cta_position = s.cta_position
+            if cta_enabled:
+                if s is not None and s.cta_telegram_file_id:
+                    try:
+                        tg_file = await call.bot.get_file(s.cta_telegram_file_id)
+                        banner_path = job_dir / "cta_user.png"
+                        await call.bot.download_file(tg_file.file_path, destination=banner_path)
+                        cta_asset = banner_path
+                    except Exception as e:
+                        logger.warning("cta_telegram_file_id_load_failed", error=str(e)[:200])
+                if cta_asset is None and s is not None and s.cta_asset_path:
+                    p = Path(s.cta_asset_path)
+                    if p.exists():
+                        cta_asset = p
+
+        from app.pipeline.three_versions import ThreeVersionsPipeline
+        pipeline = ThreeVersionsPipeline()
+        results = await pipeline.run(
+            input_path, job_dir,
+            cta_asset=cta_asset if cta_enabled else None,
+            cta_position=cta_position,
+            cta_margin_px=0,  # auto ~9.5% of height
+        )
+
+        await _edit_status(call.message, "✅ Готово. Отправляю 3 варианта…")
+
+        sender = TelegramSender(call.bot)
+        from app.pipeline.final_renderer import FinalClip, FinalJob
+        clips = tuple(
+            FinalClip(
+                index=i + 1,
+                final_path=r.final_path,
+                has_subtitles=False,
+                has_cta=False,
+                size_bytes=r.size_bytes,
+            )
+            for i, r in enumerate(results)
+        )
+        send_result = await sender.send(
+            final_job=FinalJob(clips=clips),
+            chat_id=pending.chat_id,
+            reply_to_message_id=pending.status_message_id,
+        )
+
+        if send_result.sent:
+            await _edit_status(
+                call.message,
+                f"✅ Готово 3 варианта.",
+                reply_markup=RESULT_MENU_VERSIONS,
+            )
+            async with db_manager.session() as session:
+                repo = JobRepository(session)
+                await repo.mark_completed(pending.job_id, clips_generated=3)
+            _pop_pending(user_id)
+        else:
+            await _fail_job(pending.job_id, "SEND_FAILED")
+            await _edit_status(call.message, "❌ Не удалось отправить видео.")
+            _pop_pending(user_id)
+
+    except Exception as e:
+        logger.exception("versions_pipeline_failed", user_id=user_id, job_id=pending.job_id)
+        await _fail_job(pending.job_id, "VERSIONS_FAILED", str(e)[:500])
+        await _edit_status(call.message, "❌ Не удалось сделать 3 версии.")
+        _pop_pending(user_id)
+    finally:
+        try:
+            get_temp_manager().cleanup_job(job_dir.name)
+        except Exception:
+            pass
+
+
 @router.callback_query(F.data == "action:analyze_long")
 async def on_analyze_long(call: CallbackQuery) -> None:
     """For long videos — full pipeline. Currently delegated to the legacy

@@ -996,26 +996,6 @@ def get_media_service() -> MediaService:
 
 
 # ---------------------------------------------------------------------------
-# SAR normalization helper (for passthrough vertical format)
-# ---------------------------------------------------------------------------
-
-
-async def _run_sar_fix(self, input_path: Path, output_path: Path, timeout: int = 60) -> None:
-    """Remux with square pixels (SAR=1:1) without full re-encode."""
-    cmd = [
-        self._ffmpeg_path, "-y", "-v", "error",
-        "-i", str(input_path),
-        "-c:v", "libx264", "-preset", "veryfast",
-        "-c:a", "copy",
-        "-movflags", "+faststart",
-        "-map_metadata", "-1", "-map_chapters", "-1",
-        str(output_path),
-    ]
-    proc = await asyncio.create_subprocess_exec(*cmd)
-    await asyncio.wait_for(proc.communicate(), timeout=timeout)
-
-
-# ---------------------------------------------------------------------------
 # CTA positioning helpers (used by burn_cta filtergraph)
 # ---------------------------------------------------------------------------
 
