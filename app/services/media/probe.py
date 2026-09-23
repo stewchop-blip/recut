@@ -140,38 +140,36 @@ class FFprobeService:
         except (ValueError, TypeError):
             bitrate_kbps = 0
 
-        # SAR: sample_aspect_ratio from video stream; DAR: display_aspect_ratio.
+        # Rotation must be resolved BEFORE effective dims / DAR (audit #6).
+        rotation = _parse_rotation(video.get("tags") or {})
+        rot = rotation % 360
+        effective_w = height if rot in (90, 270) else width
+        effective_h = width if rot in (90, 270) else height
+
+        # SAR: ONLY from sample_aspect_ratio (audit #5 — never reuse DAR as SAR).
+        # DAR: from display_aspect_ratio, else computed from effective dims.
         sar = 1.0
         dar = 0.0
         try:
-            # SAR: if sample_aspect_ratio present, parse as ratio (e.g. "16:9" or float)
-            sar_str = video.get("sample_aspect_ratio") or video.get("display_aspect_ratio")
+            sar_str = video.get("sample_aspect_ratio")
             if sar_str and isinstance(sar_str, str) and ":" in sar_str:
                 a, b = sar_str.split(":")
                 sar = float(a) / float(b) if float(b) else 1.0
+            # "0:1" / "N/A" / missing → default 1.0 (square pixels).
+
+            dar_str = video.get("display_aspect_ratio")
+            if dar_str and isinstance(dar_str, str) and ":" in dar_str:
+                a, b = dar_str.split(":")
+                dar = float(a) / float(b) if float(b) else 0.0
             else:
-                # Fallback: display_aspect_ratio from format or compute from width/height
-                display_aspect_str = fmt.get("display_aspect_ratio") or video.get("display_aspect_ratio")
-                if display_aspect_str and isinstance(display_aspect_str, str) and ":" in display_aspect_str:
-                    dar_raw = float(display_aspect_str.split(":")[0]) / float(display_aspect_str.split(":")[1])
-                else:
-                    dar_raw = (width / max(height, 1)) if height > 0 else 1.0
-                # SAR = DAR * height / width (for square pixel check: SAR ≈ 1)
-                sar = (dar_raw * max(height, 1) / max(width, 1)) if width > 0 else 1.0
-            # DAR: width/height ratio after rotation correction
-            rot = rotation % 360
-            effective_w = height if rot in (90, 270) else width
-            effective_h = width if rot in (90, 270) else height
-            dar = (effective_w / max(effective_h, 1)) if effective_h > 0 else 1.0
+                dar = (effective_w / max(effective_h, 1)) if effective_h > 0 else 1.0
         except (ValueError, TypeError, ZeroDivisionError):
             sar = 1.0
-            dar = (width / max(height, 1)) if height > 0 else 1.0
+            dar = (effective_w / max(effective_h, 1)) if effective_h > 0 else 1.0
 
-        # Clamp SAR to ~1.0 for normal videos; log extreme values.
+        # Log extreme SAR for diagnosis of stretched files.
         if abs(sar - 1.0) > 0.5:
             logger.info("video_unusual_sar", sar=sar, width=width, height=height, rotation=rotation)
-
-        rotation = _parse_rotation(video.get("tags") or {})
 
         return VideoProbeResult(
             duration_seconds=duration,

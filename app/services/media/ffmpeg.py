@@ -224,18 +224,16 @@ class MediaService:
             # Background: scale to cover target (force_original_aspect_ratio=increase),
             # crop to exact target, then normalize SAR to 1:1 and blur.
             f"[bg_src]scale=w={target_width}:h={target_height}:"
-            f"force_original_aspect_ratio=increase:flags=fast_bilinear,"
+            f"force_original_aspect_ratio=increase,"
             f"crop={target_width}:{target_height},"
             f"setsar=1,"  # normalize sample aspect ratio to square pixels
             f"eq=brightness=0.0:contrast=1.1:saturation=1.2,"
             f"gblur=sigma={blur_strength}[bg];"
-            # Foreground: scale to CONTAIN inside target (decrease, never exceed),
-            # preserve native aspect ratio, normalize SAR, NO black pad.
-            f"[fg_src]scale=w=min(iw,{target_width}):"
-            f"h=min(ih,{target_height}):"
-            f"force_original_aspect_ratio=decrease:"
-            f"setsar=1,"
-            f"flags=fast_bilinear[fg];"
+            # Foreground: scale CONTAIN target (force_original_aspect_ratio=decrease),
+            # preserve aspect ratio, then normalize SAR to 1:1. NO pad, NO crop.
+            f"[fg_src]scale=w={target_width}:h={target_height}:"
+            f"force_original_aspect_ratio=decrease,"
+            f"setsar=1[fg];"
             "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=0[v]"
         )
 
@@ -392,10 +390,21 @@ class MediaService:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         x_expr, y_expr = _cta_position_exprs(position, margin)
-        # Scale banner to max 85% of video width, preserve aspect ratio.
+        # Scale banner to max 85% of video width (computed in Python —
+        # main_w is not available inside the scale filter).
+        banner_w = 0
+        try:
+            probe_info = await self.probe(video_path)
+            streams = probe_info.get("streams") or []
+            vstream = next((s for s in streams if s.get("codec_type") == "video"), {})
+            main_w = int(vstream.get("width") or 0)
+            if main_w > 0:
+                banner_w = int(main_w * 0.85) // 2 * 2
+        except Exception:
+            banner_w = 0
+        cta_chain = f"[1:v]format=rgba,scale={banner_w}:-1[cta];" if banner_w > 0 else "[1:v]format=rgba[cta];"
         filter_expr = (
-            f"[1:v]format=rgba,"
-            f"scale='min(iw,main_w*0.85)':-1[cta];"
+            cta_chain +
             f"[0:v][cta]overlay="
             f"x={x_expr}:y={y_expr}:"
             f"enable='between(t,%g,%g)':"
