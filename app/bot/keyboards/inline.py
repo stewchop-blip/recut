@@ -28,6 +28,23 @@ ACTION_MENU = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 
+# Shorter action menu — no "find moments" for videos under SMART_CLIPS_MIN_SECONDS
+SHORT_ACTION_MENU = InlineKeyboardMarkup(inline_keyboard=[
+    [
+        InlineKeyboardButton(
+            text="🚀 Подготовить",
+            callback_data="action:quick_prep",
+        ),
+    ],
+    [
+        InlineKeyboardButton(
+            text="⚙️ Настройки",
+            callback_data="action:settings",
+        ),
+    ],
+])
+
+
 # Settings menu
 SETTINGS_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [

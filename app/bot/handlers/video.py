@@ -35,6 +35,7 @@ from app.bot.keyboards.inline import (
     ACTION_MENU,
     POSITION_MENU,
     SETTINGS_MENU,
+    SHORT_ACTION_MENU,
     TIMING_MENU,
     preview_keyboard,
 )
@@ -48,6 +49,7 @@ from app.database.session import db_manager
 from app.pipeline.downloader import VideoDownloader
 from app.pipeline.quick_prep import QuickPrepPipeline
 from app.pipeline.url_downloader import DownloaderService, URLDownloadError, URLDownloadResult
+from app.services.media.probe import get_probe_service
 from app.services.sender import TelegramSender
 from app.services.transcription.faster_whisper import get_transcription_service
 from app.utils.temp import get_temp_manager
@@ -98,6 +100,16 @@ async def _fail_job(job_id: int, code: str, detail: str = "") -> None:
             await repo.mark_failed(job_id, code, detail)
     except Exception as e:
         logger.warning("fail_job_db_error", job_id=job_id, error=str(e)[:120])
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Format seconds as M:SS or H:MM:SS."""
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +195,16 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
 
     actual_size = input_path.stat().st_size
 
+    # Probe for UX metadata (duration, resolution).
+    try:
+        probe = get_probe_service()
+        meta = await probe.probe(input_path)
+        duration_sec = meta.duration_seconds
+        w, h = meta.width, meta.height
+    except Exception:
+        duration_sec = 0.0
+        w, h = 0, 0
+
     # Mark job DOWNLOADING done; remember source path on the job
     async with db_manager.session() as session:
         repo = JobRepository(session)
@@ -198,12 +220,20 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
             _u(_Job).where(_Job.id == job_id).values(source_bytes=actual_size)
         )
 
-    # Show action menu
-    await status_msg.edit_text(
-        f"✅ Видео загружено ({actual_size // 1024 // 1024} МБ).\n\n"
-        f"Выбери действие:",
-        reply_markup=ACTION_MENU,
-    )
+    # Show action menu with video info.
+    dur_str = _fmt_duration(duration_sec) if duration_sec > 0 else "—"
+    res_str = f"{w}\u00d7{h}" if w > 0 and h > 0 else "—"
+    text = f"\U0001f3ac \u0412\u0438\u0434\u0435\u043e \u043f\u043e\u043b\u0443\u0447\u0435\u043d\u043e\n"
+    if duration_sec > 0:
+        text += f"\u23f1 {dur_str}\n"
+    if w > 0 and h > 0:
+        text += f"\U0001f4d0 {res_str}\n"
+    text += "\n\u0412\u044b\u0431\u0435\u0440\u0438 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435:"
+
+    # Decide menu: short videos get Quick Prep only.
+    SMART_CLIPS_MIN_SECONDS = 120
+    menu = ACTION_MENU if duration_sec >= SMART_CLIPS_MIN_SECONDS else SHORT_ACTION_MENU
+    await status_msg.edit_text(text, reply_markup=menu)
 
     # Stash the job info on a tiny in-memory store so callbacks can find it
     _pending_jobs[user_id] = _PendingJob(
