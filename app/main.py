@@ -31,13 +31,36 @@ def _build_dispatcher() -> Dispatcher:
     return dp
 
 
+async def run_schema_migrations() -> None:
+    """Run idempotent schema migrations on startup.
+    
+    SQLAlchemy's Base.metadata.create_all does not add new columns to
+    pre-existing tables. We explicitly apply ALTER TABLE statements here.
+    """
+    from sqlalchemy import text
+    try:
+        async with db_manager.engine.begin() as conn:
+            # 1. Add cta_telegram_file_id column if it doesn't exist
+            # Note: SQLite in tests uses table_info; Postgres supports ADD COLUMN IF NOT EXISTS
+            is_sqlite = "sqlite" in str(db_manager.engine.url)
+            if is_sqlite:
+                res = await conn.execute(text("PRAGMA table_info(user_settings)"))
+                cols = [row[1] for row in res.fetchall()]
+                if cols and "cta_telegram_file_id" not in cols:
+                    await conn.execute(text("ALTER TABLE user_settings ADD COLUMN cta_telegram_file_id VARCHAR(200)"))
+                    logger.info("schema_migration_ok", dialect="sqlite", column="cta_telegram_file_id")
+            else:
+                await conn.execute(text("ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS cta_telegram_file_id VARCHAR(200)"))
+                logger.info("schema_migration_ok", dialect="postgres", column="cta_telegram_file_id")
+    except Exception as e:
+        logger.error("schema_migration_failed", error=str(e)[:200])
+
+
 async def _on_startup(bot: Bot) -> None:
     """Common startup: DB init + table creation, cleanup, commands."""
     db_manager.initialize()
 
     # Create tables if they don't exist (idempotent).
-    # Without this the new `jobs` table is never created on Railway
-    # and the first video crashes with UndefinedTableError.
     try:
         from app.database.models import Base
         async with db_manager.engine.begin() as conn:
@@ -45,6 +68,9 @@ async def _on_startup(bot: Bot) -> None:
         logger.info("db_schema_ready")
     except Exception as e:
         logger.error("db_schema_init_failed", error=str(e)[:200])
+
+    # Run schema migrations for existing tables
+    await run_schema_migrations()
 
     # Clean up stale Jobs left over from a previous process crash.
     # Without this a 'PENDING' Job from yesterday would block the user

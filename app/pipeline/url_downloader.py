@@ -98,6 +98,7 @@ class DownloaderService:
         url = self._validate(url)
 
         # Step 1: quick metadata probe without downloading.
+        logger.info("url_metadata_start", url=url)
         info = await self._run_ytdlp(
             [self._ytdlp_path, "--dump-json", "--no-warnings", "--no-playlist", url],
             timeout=60,
@@ -109,10 +110,10 @@ class DownloaderService:
         filesize_approx = int(
             meta.get("filesize_approx")
             or meta.get("filesize")
-            or meta.get("filesize")
             or 0
         )
         title = str(meta.get("title") or "recat_video")[:120]
+        logger.info("url_metadata_ok", url=url, duration=duration, filesize_approx=filesize_approx, title=title)
 
         if max_size_mb and filesize_approx > max_size_mb * 1024 * 1024:
             raise DownloadTooLargeError(
@@ -126,6 +127,7 @@ class DownloaderService:
 
         # Step 2: download to output_dir.
         out_template = str(output_dir / "download.%(ext)s")
+        logger.info("url_download_start", url=url, out_template=out_template)
         await self._run_ytdlp(
             [
                 self._ytdlp_path,
@@ -152,10 +154,19 @@ class DownloaderService:
             path.unlink(missing_ok=True)
             raise URLDownloadError("Downloaded file is empty")
 
+        res_source = self._parse_source(url)
+        logger.info(
+            "url_download_file_created",
+            path=str(path),
+            size_bytes=size_bytes,
+            duration=duration,
+            source=res_source,
+        )
+
         return URLDownloadResult(
             path=path,
             title=title,
-            source=self._parse_source(url),
+            source=res_source,
             size_bytes=size_bytes,
             duration_seconds=duration,
             thumbnail=meta.get("thumbnail"),

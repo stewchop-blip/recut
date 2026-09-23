@@ -94,7 +94,7 @@ class TelegramSender:
         send_path = clip.final_path
         # Telegram Bot API limit: 50 MB. Compress if needed.
         size_bytes = send_path.stat().st_size
-        if size_bytes > 48 * 1024 * 1024:
+        if size_bytes > self._MAX_SAFE_BYTES:
             logger.warning(
                 "sender_compressing",
                 original_size=size_bytes,
@@ -114,6 +114,56 @@ class TelegramSender:
 
         return await self._bot.send_video(**kwargs)
 
+    async def _compress_for_telegram(self, src: Path) -> Path:
+        """Re-encode a video to fit under ~45 MB for Telegram send."""
+        import asyncio
+        out = src.with_suffix(".tg.mp4")
+        # Get duration via ffprobe
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", str(src),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+            duration = float(stdout.decode(errors="ignore").strip() or 60)
+        except Exception:
+            duration = 60.0
+
+        # Target size: 45 MB, audio: 128k, overhead: ~5%
+        target_bytes = 45 * 1024 * 1024
+        total_kbps = (target_bytes * 8) / duration / 1000
+        video_kbps = max(500, int(total_kbps - 128 * 0.95))
+
+        cmd = [
+            "ffmpeg", "-y", "-v", "error",
+            "-i", str(src),
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-b:v", f"{video_kbps}k",
+            "-maxrate", f"{int(video_kbps * 1.5)}k",
+            "-bufsize", f"{video_kbps * 2}k",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-ac", "2",
+            "-movflags", "+faststart",
+            str(out),
+        ]
+        proc = await asyncio.create_subprocess_exec(*cmd)
+        await asyncio.wait_for(proc.communicate(), timeout=600)
+        if not out.exists() or out.stat().st_size == 0:
+            raise RuntimeError("Compression produced empty file")
+        logger.info(
+            "sender_compressed",
+            original=src.stat().st_size,
+            compressed=out.stat().st_size,
+            video_kbps=video_kbps,
+            duration=duration,
+        )
+        return out
+
 
 def _build_caption(clip: FinalClip, send_path: Path | None = None) -> str:
     """Telegram captions are HTML, 1024 char limit."""
@@ -131,55 +181,3 @@ def _build_caption(clip: FinalClip, send_path: Path | None = None) -> str:
         f"{flag_str}\n"
         f"📦 {size_kb} КБ"
     )[:1024]
-
-
-async def _compress_for_telegram(src: Path) -> Path:
-    """Re-encode a video to fit under ~45 MB for Telegram send."""
-    import asyncio, math, subprocess, tempfile
-
-    out = src.with_suffix(".tg.mp4")
-    # Get duration via ffprobe
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", str(src),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        duration = float(stdout.decode(errors="ignore").strip() or 60)
-    except Exception:
-        duration = 60.0
-
-    # Target size: 45 MB, audio: 128k, overhead: ~5%
-    target_bytes = 45 * 1024 * 1024
-    total_kbps = (target_bytes * 8) / duration / 1000
-    video_kbps = max(500, int(total_kbps - 128 * 0.95))
-
-    cmd = [
-        "ffmpeg", "-y", "-v", "error",
-        "-i", str(src),
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-b:v", f"{video_kbps}k",
-        "-maxrate", f"{int(video_kbps * 1.5)}k",
-        "-bufsize", f"{video_kbps * 2}k",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-ac", "2",
-        "-movflags", "+faststart",
-        str(out),
-    ]
-    proc = await asyncio.create_subprocess_exec(*cmd)
-    await asyncio.wait_for(proc.communicate(), timeout=600)
-    if not out.exists() or out.stat().st_size == 0:
-        raise RuntimeError("Compression produced empty file")
-    logger.info(
-        "sender_compressed",
-        original=src.stat().st_size,
-        compressed=out.stat().st_size,
-        video_kbps=video_kbps,
-        duration=duration,
-    )
-    return out

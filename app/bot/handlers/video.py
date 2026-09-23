@@ -304,12 +304,30 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
         temp.cleanup_job(job_dir.name)
         return
 
+    # Probe downloaded file for UX metadata (same UI as Telegram upload).
+    try:
+        probe = get_probe_service()
+        meta = await probe.probe(result.path)
+        duration_sec = meta.duration_seconds
+        w, h = meta.width, meta.height
+        logger.info("url_probe_ok", user_id=user_id, job_id=job_id, w=w, h=h, duration=duration_sec)
+    except Exception as e:
+        logger.warning("url_probe_failed_fallback", user_id=user_id, job_id=job_id, error=str(e)[:120])
+        duration_sec = result.duration_seconds
+        w, h = 0, 0
+
+    actual_size = result.size_bytes
     async with db_manager.session() as session:
         repo = JobRepository(session)
         await repo.set_status(
             job_id=job_id,
             status=__import__("app.database.models", fromlist=["JobStatus"]).JobStatus.PENDING,
             status_message_id=status_msg.message_id,
+        )
+        from sqlalchemy import update as _u
+        from app.database.models import Job as _Job
+        await session.execute(
+            _u(_Job).where(_Job.id == job_id).values(source_bytes=actual_size)
         )
 
     _pending_jobs[user_id] = _PendingJob(
@@ -319,10 +337,20 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
         job_dir=str(job_dir),
         status_message_id=status_msg.message_id,
     )
-    await status_msg.edit_text(
-        f"✅ Видео готово ({result.size_bytes // 1024 // 1024} МБ).\n\nВыбери действие:",
-        reply_markup=URL_ACTION_MENU,
-    )
+
+    dur_str = _fmt_duration(duration_sec) if duration_sec > 0 else "—"
+    res_str = f"{w}×{h}" if w > 0 and h > 0 else "—"
+    text_out = f"🎬 Видео получено\n"
+    if duration_sec > 0:
+        text_out += f"⏱ {dur_str}\n"
+    if w > 0 and h > 0:
+        text_out += f"📐 {res_str}\n"
+    text_out += "\nВыбери действие:"
+
+    SMART_CLIPS_MIN_SECONDS = 120
+    menu = ACTION_MENU if duration_sec >= SMART_CLIPS_MIN_SECONDS else SHORT_ACTION_MENU
+    logger.info("url_ready_for_actions", user_id=user_id, job_id=job_id, menu="long" if duration_sec >= SMART_CLIPS_MIN_SECONDS else "short")
+    await status_msg.edit_text(text_out, reply_markup=menu)
 
 
 # ---------------------------------------------------------------------------
@@ -375,49 +403,49 @@ async def on_quick_prep(call: CallbackQuery) -> None:
 
     await _edit_status(call.message, "🎬 Подготавливаю…\n\n⏳ FFmpeg в работе…")
 
-    # Load user's CTA settings
-    cta_asset: Path | None = None
-    cta_enabled = False
-    cta_position = "bottom"
-    cta_mode = "end"
-    cta_duration_seconds = 4.0
-    cta_start_seconds = 0.0
-
-    async with db_manager.session() as session:
-        srepo = UserSettingsRepository(session)
-        s = await srepo.get(user_id)
-        if s is not None:
-            cta_enabled = s.cta_enabled
-            cta_position = s.cta_position
-            cta_mode = s.cta_mode
-            cta_duration_seconds = s.cta_duration_seconds
-            cta_start_seconds = s.cta_start_seconds
-
-        # Resolve CTA asset: prefer telegram_file_id (Railway-safe),
-        # then local path, then default static banner.
-        if cta_enabled:
-            bot_instance = call.bot
-            if s is not None and s.cta_telegram_file_id:
-                try:
-                    tg_file = await bot_instance.get_file(s.cta_telegram_file_id)
-                    banner_path = job_dir / "cta_user.png"
-                    await bot_instance.download_file(tg_file.file_path, destination=banner_path)
-                    cta_asset = banner_path
-                    logger.info("cta_loaded_from_telegram_file_id", user_id=user_id)
-                except Exception as e:
-                    logger.warning("cta_telegram_file_id_load_failed", error=str(e)[:200])
-            if cta_asset is None and s is not None and s.cta_asset_path:
-                p = Path(s.cta_asset_path)
-                if p.exists():
-                    cta_asset = p
-        if cta_enabled and cta_asset is None:
-            from app.services.overlays.cta_generator import ensure_cta_asset
-            cta_asset, _ = ensure_cta_asset("", job_dir)
-            logger.info("cta_default_asset_generated", path=str(cta_asset))
-
-    # Run QuickPrep
-    pipeline = QuickPrepPipeline()
     try:
+        # Load user's CTA settings
+        cta_asset: Path | None = None
+        cta_enabled = False
+        cta_position = "bottom"
+        cta_mode = "end"
+        cta_duration_seconds = 4.0
+        cta_start_seconds = 0.0
+
+        async with db_manager.session() as session:
+            srepo = UserSettingsRepository(session)
+            s = await srepo.get(user_id)
+            if s is not None:
+                cta_enabled = s.cta_enabled
+                cta_position = s.cta_position
+                cta_mode = s.cta_mode
+                cta_duration_seconds = s.cta_duration_seconds
+                cta_start_seconds = s.cta_start_seconds
+
+            # Resolve CTA asset: prefer telegram_file_id (Railway-safe),
+            # then local path, then default static banner.
+            if cta_enabled:
+                bot_instance = call.bot
+                if s is not None and s.cta_telegram_file_id:
+                    try:
+                        tg_file = await bot_instance.get_file(s.cta_telegram_file_id)
+                        banner_path = job_dir / "cta_user.png"
+                        await bot_instance.download_file(tg_file.file_path, destination=banner_path)
+                        cta_asset = banner_path
+                        logger.info("cta_loaded_from_telegram_file_id", user_id=user_id)
+                    except Exception as e:
+                        logger.warning("cta_telegram_file_id_load_failed", error=str(e)[:200])
+                if cta_asset is None and s is not None and s.cta_asset_path:
+                    p = Path(s.cta_asset_path)
+                    if p.exists():
+                        cta_asset = p
+            if cta_enabled and cta_asset is None:
+                from app.services.overlays.cta_generator import ensure_cta_asset
+                cta_asset, _ = ensure_cta_asset("", job_dir)
+                logger.info("cta_default_asset_generated", path=str(cta_asset))
+
+        # Run QuickPrep
+        pipeline = QuickPrepPipeline()
         result = await pipeline.run(
             input_video=input_path,
             job_dir=job_dir,
@@ -435,64 +463,57 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             output_width=settings.output_width,
             output_height=settings.output_height,
         )
+
+        await _edit_status(
+            call.message,
+            f"✅ Готово. Отправляю…\n\n"
+            f"📦 {result.size_bytes // 1024 // 1024} МБ · {result.width}×{result.height}",
+        )
+
+        # Send via Telegram
+        sender = TelegramSender(call.bot)
+        from app.pipeline.final_renderer import FinalClip, FinalJob
+
+        final_clip = FinalClip(
+            index=1,
+            final_path=result.final_path,
+            has_subtitles=False,  # QuickPrep does not run Whisper
+            has_cta=result.has_cta,
+            size_bytes=result.size_bytes,
+        )
+        send_result = await sender.send(
+            final_job=FinalJob(clips=(final_clip,)),
+            chat_id=pending.chat_id,
+            reply_to_message_id=pending.status_message_id,
+        )
+
+        if send_result.sent:
+            await _edit_status(
+                call.message,
+                f"✅ Готово. Исходник удалён.\n\n🆔 Job #{pending.job_id}",
+            )
+            async with db_manager.session() as session:
+                repo = JobRepository(session)
+                await repo.mark_completed(pending.job_id, clips_generated=1)
+            _pop_pending(user_id)
+        else:
+            await _fail_job(pending.job_id, "SEND_FAILED")
+            await _edit_status(
+                call.message,
+                f"❌ Не удалось отправить видео.\n\n🆔 Job #{pending.job_id}",
+            )
+            _pop_pending(user_id)
+
     except Exception as e:
-        logger.error("quickprep_failed", user_id=user_id, job_id=pending.job_id, error=str(e)[:200])
+        logger.exception("quickprep_pipeline_failed", user_id=user_id, job_id=pending.job_id)
         await _fail_job(pending.job_id, "QUICKPREP_FAILED", str(e)[:500])
-        await _edit_status(call.message, f"❌ Не удалось подготовить видео.\n\nОшибка в логах.")
-        # Clean up the job workspace
+        await _edit_status(call.message, "❌ Не удалось подготовить видео.")
+        _pop_pending(user_id)
+    finally:
         try:
             get_temp_manager().cleanup_job(job_dir.name)
         except Exception:
             pass
-        _pop_pending(user_id)
-        return
-
-    await _edit_status(
-        call.message,
-        f"✅ Готово. Отправляю…\n\n"
-        f"📦 {result.size_bytes // 1024 // 1024} МБ · {result.width}×{result.height}",
-    )
-
-    # Send via Telegram
-    sender = TelegramSender(call.bot)
-    from app.pipeline.final_renderer import FinalClip, FinalJob
-
-    final_clip = FinalClip(
-        index=1,
-        final_path=result.final_path,
-        has_subtitles=False,  # QuickPrep does not run Whisper
-        has_cta=result.has_cta,
-        size_bytes=result.size_bytes,
-    )
-    send_result = await sender.send(
-        final_job=FinalJob(clips=(final_clip,)),
-        chat_id=pending.chat_id,
-        reply_to_message_id=pending.status_message_id,
-    )
-
-    if send_result.sent:
-        await _edit_status(
-            call.message,
-            f"✅ Готово. Исходник удалён.\n\n🆔 Job #{pending.job_id}",
-        )
-        # Mark job completed
-        async with db_manager.session() as session:
-            repo = JobRepository(session)
-            await repo.mark_completed(pending.job_id, clips_generated=1)
-        _pop_pending(user_id)
-    else:
-        await _fail_job(pending.job_id, "SEND_FAILED")
-        await _edit_status(
-            call.message,
-            f"❌ Не удалось отправить видео.\n\n🆔 Job #{pending.job_id}",
-        )
-        _pop_pending(user_id)
-
-    # Always clean up
-    try:
-        get_temp_manager().cleanup_job(job_dir.name)
-    except Exception:
-        pass
 
 
 @router.callback_query(F.data == "action:analyze_long")
@@ -827,6 +848,7 @@ async def on_banner_upload(message: types.Message, bot: Bot) -> None:
 
     # Download temporarily, validate with Pillow, then store file_id in DB.
     try:
+        _USER_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
         file = await bot.get_file(doc.file_id)
         tmp_png = _USER_ASSETS_DIR / f"_tmp_banner_{user_id}.png"
         await bot.download_file(file.file_path, destination=tmp_png)
@@ -901,12 +923,13 @@ async def _show_settings(message: types.Message, user_id: int) -> None:
         else f"Первые {s.cta_duration_seconds:g} сек" if s.cta_mode == "start"
         else f"С {s.cta_start_seconds:g}с ({s.cta_duration_seconds:g}с)"
     )
-    banner = "✅ Загружен" if s.cta_asset_path else "❌ Не загружен"
+    has_banner = bool(s.cta_telegram_file_id or s.cta_asset_path)
+    banner = "✅ Загружена" if has_banner else "❌ Не загружена"
 
     text = (
         f"⚙️ <b>Настройки</b>\n\n"
-        f"CTA: {'✅ ВКЛ' if s.cta_enabled else '❌ ВЫКЛ'}\n"
-        f"Баннер: {banner}\n"
+        f"Плашка: {'✅ ВКЛ' if s.cta_enabled else '❌ ВЫКЛ'}\n"
+        f"Файл плашки: {banner}\n"
         f"Позиция: {pos}\n"
         f"Время: {timing}\n"
         f"Субтитры: {'✅ ВКЛ' if s.subtitles_enabled else '❌ ВЫКЛ'}\n\n"
