@@ -390,19 +390,75 @@ class MediaService:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         x_expr, y_expr = _cta_position_exprs(position, margin)
-        # Scale banner to max 85% of video width (computed in Python —
-        # main_w is not available inside the scale filter).
-        banner_w = 0
+        # --- Safe-area banner sizing (computed in Python; overlay only) ---
+        # max width  = 85% of video width (or full width minus side margins
+        #              for full_width_bottom)
+        # max height = 15% of video height
+        # scale preserves aspect ratio, never upscales, never crops.
+        banner_out_w = 0
+        banner_out_h = 0
+        video_w = 0
+        video_h = 0
+        banner_in_w = 0
+        banner_in_h = 0
         try:
-            probe_info = await self.probe(video_path)
-            streams = probe_info.get("streams") or []
-            vstream = next((s for s in streams if s.get("codec_type") == "video"), {})
-            main_w = int(vstream.get("width") or 0)
-            if main_w > 0:
-                banner_w = int(main_w * 0.85) // 2 * 2
-        except Exception:
-            banner_w = 0
-        cta_chain = f"[1:v]format=rgba,scale={banner_w}:-1[cta];" if banner_w > 0 else "[1:v]format=rgba[cta];"
+            video_info = await self.probe(video_path)
+            vstreams = video_info.get("streams") or []
+            vstream = next((s for s in vstreams if s.get("codec_type") == "video"), {})
+            video_w = int(vstream.get("width") or 0)
+            video_h = int(vstream.get("height") or 0)
+
+            banner_info = await self.probe(cta_path)
+            bstreams = banner_info.get("streams") or []
+            bstream = next((s for s in bstreams if s.get("codec_type") == "video"), {})
+            banner_in_w = int(bstream.get("width") or 0)
+            banner_in_h = int(bstream.get("height") or 0)
+        except Exception as e:
+            logger.warning("cta_probe_failed", error=str(e)[:200])
+
+        if video_w > 0 and video_h > 0 and banner_in_w > 0 and banner_in_h > 0:
+            # Effective margin: caller value if given, else 4% of frame height
+            # (audit range 3-5%).
+            margin_px = margin if margin > 0 else int(video_h * 0.04)
+            side_margin = int(video_w * 0.04)
+
+            if position == "full_width_bottom":
+                max_w = video_w - 2 * side_margin
+            else:
+                max_w = video_w * 0.85
+            max_h = video_h * 0.15
+
+            scale = min(1.0, max_w / banner_in_w, max_h / banner_in_h)
+            if scale < 1.0:
+                logger.warning(
+                    "cta_banner_too_large_auto_scaled",
+                    input_width=banner_in_w, input_height=banner_in_h,
+                    scale=round(scale, 3),
+                    max_width=int(max_w), max_height=int(max_h),
+                )
+            banner_out_w = max(2, int(banner_in_w * scale) // 2 * 2)
+            banner_out_h = max(2, int(banner_in_h * scale) // 2 * 2)
+
+            logger.info(
+                "cta_banner_scaling",
+                input_banner_width=banner_in_w,
+                input_banner_height=banner_in_h,
+                output_banner_width=banner_out_w,
+                output_banner_height=banner_out_h,
+                video_width=video_w,
+                video_height=video_h,
+                banner_position=position,
+                margin_px=margin_px,
+            )
+            # Re-derive x/y with the effective margin (margin_px may differ
+            # from the raw `margin` argument when caller passed 0/negative).
+            x_expr, y_expr = _cta_position_exprs(position, margin_px)
+
+        cta_chain = (
+            f"[1:v]format=rgba,scale={banner_out_w}:{banner_out_h}[cta];"
+            if banner_out_w > 0
+            else "[1:v]format=rgba[cta];"
+        )
         filter_expr = (
             cta_chain +
             f"[0:v][cta]overlay="
@@ -610,9 +666,11 @@ class MediaService:
             raise FileNotFoundError(f"File not found: {filepath}")
 
         cmd = [
-            self._ffmpeg_path,
+            str(Path(self._ffmpeg_path).with_name("ffprobe.exe"))
+            if Path(self._ffmpeg_path).with_name("ffprobe.exe").exists()
+            else str(Path(self._ffmpeg_path).with_name("ffprobe")),
             "-v", "error",
-            "-show_entries", "format=duration,bit_rate,format_name:stream=codec_type,codec_name,sample_rate,channels",
+            "-show_entries", "format=duration,bit_rate,format_name:stream=codec_type,codec_name,sample_rate,channels,width,height,sample_aspect_ratio,display_aspect_ratio",
             "-of", "json",
             str(filepath),
         ]
@@ -824,7 +882,9 @@ def _cta_position_exprs(position: str, margin: int) -> tuple[str, str]:
     """
     if position == "top":
         return (f"(main_w-overlay_w)/2", f"{margin}")
-    elif position == "bottom":
+    elif position in ("bottom", "full_width_bottom"):
+        # full_width_bottom: banner already scaled to (W - 2*side_margin),
+        # so centering equals the side-margin placement.
         return (f"(main_w-overlay_w)/2", f"main_h-overlay_h-{margin}")
     elif position == "top_left":
         return (f"{margin}", f"{margin}")
