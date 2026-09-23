@@ -205,13 +205,14 @@ class MediaService:
         # - overlay fg over bg (centred)
         filter_complex = (
             "[0:v]split=2[bg_src][fg_src];"
-            # Background: cover (scale up if needed) target area + heavy blur
+            # Background: scale to cover target, enhance contrast/saturation, heavy blur
             f"[bg_src]scale=w={target_width}:h={target_height}:"
             f"force_original_aspect_ratio=increase:flags=fast_bilinear,"
             f"crop={target_width}:{target_height},"
+            f"eq=brightness=0.0:contrast=1.1:saturation=1.2,"
             f"gblur=sigma={blur_strength}[bg];"
             # Foreground: fit inside target (no upscaling past source res),
-            # pad to exact target size with black bars.
+            # pad to exact target size with black bars (will be overlaid on bg).
             f"[fg_src]scale=w={target_width}:h={target_height}:"
             f"force_original_aspect_ratio=decrease:flags=fast_bilinear,"
             f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:color=black[fg];"
