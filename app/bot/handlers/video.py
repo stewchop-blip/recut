@@ -47,7 +47,7 @@ from app.database.repositories import (
 from app.database.session import db_manager
 from app.pipeline.downloader import VideoDownloader
 from app.pipeline.quick_prep import QuickPrepPipeline
-from app.pipeline.url_downloader import DownloaderService, URLDownloadResult
+from app.pipeline.url_downloader import DownloaderService, URLDownloadError, URLDownloadResult
 from app.services.sender import TelegramSender
 from app.services.transcription.faster_whisper import get_transcription_service
 from app.utils.temp import get_temp_manager

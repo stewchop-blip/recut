@@ -235,6 +235,10 @@ class OpenRouterClipSelector(ClipSelector):
                     error=str(e),
                     raw_first_200=raw[:200],
                 )
+                # If LLM returned zero clips, don't bother retrying —
+                # fall back to taking the full video as one clip.
+                if "zero clips" in str(e).lower():
+                    break
                 continue
 
             logger.info(
@@ -244,6 +248,21 @@ class OpenRouterClipSelector(ClipSelector):
             )
             return ClipSelection(
                 clips=tuple(clips),
+                model=self._model,
+                raw_response=raw[:1000],
+            )
+
+        if last_error is not None and "zero clips" in str(last_error).lower():
+            fallback = ClipCandidate(
+                start=0.0,
+                end=request.total_duration_seconds,
+                title="Full video",
+                hook="",
+                reason="Fallback: LLM returned no clips, using full video",
+            )
+            logger.info("clip_selector_fallback", total_seconds=request.total_duration_seconds)
+            return ClipSelection(
+                clips=(fallback,),
                 model=self._model,
                 raw_response=raw[:1000],
             )
