@@ -65,19 +65,74 @@ class MediaService:
         logger.info("ffmpeg_found", path=ffmpeg)
         return ffmpeg
 
-    async def _run_sar_fix(self, input_path: Path, output_path: Path, timeout: int = 60) -> None:
-        """Remux with square pixels (SAR=1:1) without full re-encode."""
-        cmd = [
-            self._ffmpeg_path, "-y", "-v", "error",
-            "-i", str(input_path),
-            "-c:v", "libx264", "-preset", "veryfast",
-            "-c:a", "copy",
-            "-movflags", "+faststart",
+    async def normalize_square_pixels(
+        self, input_path: Path, output_path: Path, timeout: int = 120,
+    ) -> Path:
+        """Make SAR 1:1 while PRESERVING the display aspect ratio.
+
+        Anamorphic source (SAR != 1): coded 720x576 SAR 16:15 displays as
+        768x576. We scale the coded pixels up to the DISPLAY size
+        (w='trunc(iw*sar/2)*2':h='ih') and set SAR 1:1 — the picture is
+        then square-pixel with IDENTICAL visual proportions, never
+        stretched. Square-pixel sources are stream-copied untouched.
+
+        Verified with ffprobe afterwards: output SAR must be 1:1.
+        """
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input not found: {input_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        from app.services.media.probe import get_probe_service
+        meta = await get_probe_service().probe(input_path)
+        is_square = abs(meta.sample_aspect_ratio - 1.0) <= 0.01
+
+        cmd = [self._ffmpeg_path, "-y", "-v", "error", "-i", str(input_path)]
+        if is_square:
+            # Already square pixels — remux only (no visual change).
+            cmd += ["-c", "copy"]
+        else:
+            # Expand coded pixels to display size, then force square SAR.
+            # scale expression `sar` = input sample aspect ratio.
+            cmd += [
+                "-vf", "scale=w='trunc(iw*sar/2)*2':h='ih',setsar=1",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-c:a", "copy",
+            ]
+        cmd += [
             "-map_metadata", "-1", "-map_chapters", "-1",
+            "-movflags", "+faststart",
             str(output_path),
         ]
-        proc = await asyncio.create_subprocess_exec(*cmd)
-        await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "normalize_square_pixels failed: "
+                + stderr.decode(errors="ignore")[:300]
+            )
+
+        # Verify: output SAR must be 1:1 (PART 4 acceptance).
+        out_meta = await get_probe_service().probe(output_path)
+        if abs(out_meta.sample_aspect_ratio - 1.0) > 0.01:
+            raise RuntimeError(
+                f"normalize_square_pixels: output SAR still "
+                f"{out_meta.sample_aspect_ratio}, expected 1:1"
+            )
+        logger.info(
+            "normalize_square_pixels_done",
+            input_sar=meta.sample_aspect_ratio,
+            output=f"{out_meta.width}x{out_meta.height}",
+            output_sar=out_meta.sample_aspect_ratio,
+            output_dar=out_meta.display_aspect_ratio,
+        )
+        return output_path
+
+    # Backwards-compatible alias (old name kept until all callers migrate).
+    async def _run_sar_fix(self, input_path: Path, output_path: Path, timeout: int = 120) -> None:
+        """Deprecated alias for normalize_square_pixels()."""
+        await self.normalize_square_pixels(input_path, output_path, timeout)
 
     async def extract_audio(
         self,
@@ -276,34 +331,36 @@ class MediaService:
                 logger.warning("black_bars_crop_failed_keep_original", error=str(e)[:200])
                 source = input_path
 
-        # Filter graph (Этап 4 templates):
-        # bg: 'blur' = blurred copy of source; 'dark'/'light'/'accent' =
-        # solid color from the registry (color=c=... source).
+        # Filter graph (PART 2/3 — geometry): scale uses reset_sar=1 so the
+        # contain/cover math runs on DISPLAY aspect ratio (coded × SAR),
+        # and force_divisible_by=2 for H.264-safe even dims. NO separate
+        # setsar afterwards (reset_sar already squares the pixels).
         from app.services.overlays.templates import BACKGROUNDS
         preset = BACKGROUNDS.get(background_id, BACKGROUNDS["blur"])
         if preset.kind == "color":
             filter_complex = (
                 f"color=c={preset.color}:s={target_width}x{target_height}:r={target_fps}[bg];"
                 f"[0:v]scale=w={target_width}:h={target_height}:"
-                f"force_original_aspect_ratio=decrease,"
-                f"setsar=1[fg];"
+                f"force_original_aspect_ratio=decrease:"
+                f"force_divisible_by=2:reset_sar=1[fg];"
                 # color source is INFINITE → shortest=1, else encode never ends
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]"
             )
         else:
             filter_complex = (
                 "[0:v]split=2[bg_src][fg_src];"
-                # Background: scale to cover target (increase), crop, blur, setsar=1.
+                # Background: cover target (increase) → crop exact → blur.
                 f"[bg_src]scale=w={target_width}:h={target_height}:"
-                f"force_original_aspect_ratio=increase,"
+                f"force_original_aspect_ratio=increase:"
+                f"force_divisible_by=2:reset_sar=1,"
                 f"crop={target_width}:{target_height},"
-                f"setsar=1,"
                 f"eq=brightness=0.0:contrast=1.1:saturation=1.2,"
                 f"gblur=sigma={blur_strength}[bg];"
-                # Foreground: scale CONTAIN target (decrease), setsar=1. NO pad/crop.
+                # Foreground: CONTAIN target (decrease), NO pad, NO crop,
+                # NEVER stretched (reset_sar keeps display proportions).
                 f"[fg_src]scale=w={target_width}:h={target_height}:"
-                f"force_original_aspect_ratio=decrease,"
-                f"setsar=1[fg];"
+                f"force_original_aspect_ratio=decrease:"
+                f"force_divisible_by=2:reset_sar=1[fg];"
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=0[v]"
             )
 
@@ -480,11 +537,36 @@ class MediaService:
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
 
+        # PART 11: sample frames spread across the WHOLE video (10-90%),
+        # not just the first sequential frames. select='not(mod(n,K))'
+        # picks every K-th decoded frame; K spreads sample_frames evenly
+        # over the estimated total frame count.
+        # NOTE: self.probe() returns a raw JSON dict (not VideoProbeResult).
+        info = await self.probe(video_path)
+        vstream = next(
+            (s for s in (info.get("streams") or []) if s.get("codec_type") == "video"), {},
+        )
+        fps = 30.0
+        try:
+            fr = vstream.get("avg_frame_rate") or vstream.get("r_frame_rate") or "30/1"
+            num, _, den = fr.partition("/")
+            fps = float(num) / max(float(den or 1), 1)
+        except (ValueError, ZeroDivisionError):
+            pass
+        fmt_dur = 0.0
+        try:
+            fmt_dur = float((info.get("format") or {}).get("duration") or 0)
+        except (ValueError, TypeError):
+            pass
+        total_frames = max(1, int(fps * max(fmt_dur, 0.1)))
+        step = max(1, total_frames // max(sample_frames, 1))
+        select_expr = f"select='not(mod(n\\,{step}))',cropdetect=limit=24:round=2:reset=0"
+
         cmd = [
             self._ffmpeg_path,
             "-v", "info",
             "-i", str(video_path),
-            "-vf", "cropdetect=limit=24:round=2:reset=0",
+            "-vf", select_expr,
             "-frames:v", str(sample_frames),
             "-f", "null", "-",
         ]
@@ -506,16 +588,9 @@ class MediaService:
         if not crops:
             return None
 
-        # Source dimensions from the cropdetect log itself (x+w etc.) —
-        # cropdetect's final line reflects the trimmed window; we instead
-        # get original dims from the first reported x/y offsets' frame:
-        # simpler — probe via streams.
-        info = await self.probe(video_path)
-        vstream = next(
-            (s for s in (info.get("streams") or []) if s.get("codec_type") == "video"), {},
-        )
-        src_w = int(vstream.get("width") or 0)
-        src_h = int(vstream.get("height") or 0)
+        # Source dimensions from the probe (already fetched above).
+        src_w = info.width
+        src_h = info.height
 
         n = len(crops)
         mode_wh: tuple[int, int] | None = None

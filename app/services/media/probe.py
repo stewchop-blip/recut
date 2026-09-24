@@ -24,16 +24,20 @@ class ProbeError(RuntimeError):
 class VideoProbeResult:
     """Structured metadata for one media file."""
     duration_seconds: float
-    width: int
-    height: int
+    width: int          # coded width (as stored)
+    height: int         # coded height (as stored)
+    coded_width: int    # == width (alias for geometry clarity)
+    coded_height: int   # == height
     fps: float
     has_audio: bool
     video_codec: str
     audio_codec: str | None
-    rotation: int        # 0/90/180/270 — applied rotation in degrees
+    rotation: int        # 0/90/180/270 — from rotate tag OR displaymatrix
     bitrate_kbps: int
     sample_aspect_ratio: float  # SAR (e.g. 1.0 for square pixels)
     display_aspect_ratio: float  # DAR (e.g. 1.777 for 16:9)
+    effective_width: int   # DISPLAY width: coded×SAR, rotation applied
+    effective_height: int  # DISPLAY height: coded×SAR, rotation applied
 
 
 _FPS_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
@@ -52,22 +56,28 @@ def _parse_fps(rate: str | None) -> float:
     return num / den if den else 0.0
 
 
-def _parse_rotation(tags: dict) -> int:
-    """Returns rotation in degrees (0/90/180/270).
-
-    Some sources put rotation in side_data_list as displaymatrix; we
-    intentionally keep this simple — most Telegram uploads are already
-    pre-rotated and have no rotation tag.
-    """
+def _parse_rotation(video: dict) -> int:
+    """Rotation from tags.rotate OR side_data_list displaymatrix (PART 5)."""
+    tags = video.get("tags") or {}
     val = tags.get("rotate") if isinstance(tags, dict) else None
-    if val is None:
-        return 0
-    try:
-        rot = int(float(val))
-    except (ValueError, TypeError):
-        return 0
-    rot = rot % 360
-    return rot if rot in (0, 90, 180, 270) else 0
+    if val is not None:
+        try:
+            rot = int(float(val))
+        except (ValueError, TypeError):
+            rot = 0
+        rot = rot % 360
+        if rot in (0, 90, 180, 270):
+            return rot
+    # displaymatrix: rotation = -displaymatrix value; norm 0/90/180/270.
+    for sd in video.get("side_data_list") or []:
+        if sd.get("rotation") is not None:
+            try:
+                rot = (int(float(sd["rotation"])) * -1) % 360
+            except (ValueError, TypeError):
+                rot = 0
+            if rot in (0, 90, 180, 270):
+                return rot
+    return 0
 
 
 class FFprobeService:
@@ -141,31 +151,38 @@ class FFprobeService:
             bitrate_kbps = 0
 
         # Rotation must be resolved BEFORE effective dims / DAR (audit #6).
-        rotation = _parse_rotation(video.get("tags") or {})
+        rotation = _parse_rotation(video)
         rot = rotation % 360
-        effective_w = height if rot in (90, 270) else width
-        effective_h = width if rot in (90, 270) else height
-
         # SAR: ONLY from sample_aspect_ratio (audit #5 — never reuse DAR as SAR).
-        # DAR: from display_aspect_ratio, else computed from effective dims.
         sar = 1.0
-        dar = 0.0
         try:
             sar_str = video.get("sample_aspect_ratio")
             if sar_str and isinstance(sar_str, str) and ":" in sar_str:
                 a, b = sar_str.split(":")
                 sar = float(a) / float(b) if float(b) else 1.0
             # "0:1" / "N/A" / missing → default 1.0 (square pixels).
+        except (ValueError, TypeError, ZeroDivisionError):
+            sar = 1.0
 
+        # EFFECTIVE DISPLAY GEOMETRY (PART 5): coded dims × SAR, rotation
+        # swaps w/h. All portrait/9:16/layout decisions use these.
+        disp_w = int(round(width * sar))
+        disp_h = height
+        eff_w = disp_h if rot in (90, 270) else disp_w
+        eff_h = disp_w if rot in (90, 270) else disp_h
+
+        # DAR: from display_aspect_ratio (ffprobe accounts for SAR),
+        # else computed from effective dims.
+        dar = 0.0
+        try:
             dar_str = video.get("display_aspect_ratio")
             if dar_str and isinstance(dar_str, str) and ":" in dar_str:
                 a, b = dar_str.split(":")
                 dar = float(a) / float(b) if float(b) else 0.0
-            else:
-                dar = (effective_w / max(effective_h, 1)) if effective_h > 0 else 1.0
+            if dar <= 0:
+                dar = eff_w / max(eff_h, 1)
         except (ValueError, TypeError, ZeroDivisionError):
-            sar = 1.0
-            dar = (effective_w / max(effective_h, 1)) if effective_h > 0 else 1.0
+            dar = eff_w / max(eff_h, 1)
 
         # Log extreme SAR for diagnosis of stretched files.
         if abs(sar - 1.0) > 0.5:
@@ -175,6 +192,8 @@ class FFprobeService:
             duration_seconds=duration,
             width=width,
             height=height,
+            coded_width=width,
+            coded_height=height,
             fps=fps,
             has_audio=audio is not None,
             video_codec=str(video.get("codec_name") or ""),
@@ -183,6 +202,8 @@ class FFprobeService:
             bitrate_kbps=bitrate_kbps,
             sample_aspect_ratio=round(sar, 3),
             display_aspect_ratio=round(dar, 3),
+            effective_width=eff_w,
+            effective_height=eff_h,
         )
 
 

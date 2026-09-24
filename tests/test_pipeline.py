@@ -100,11 +100,19 @@ def test_supported_mime_types_includes_mp4():
 def test_ffprobe_rotation_parser_tolerates_missing_tag():
     from app.services.media.probe import _parse_rotation
     assert _parse_rotation({}) == 0
-    assert _parse_rotation({"rotate": "90"}) == 90
-    assert _parse_rotation({"rotate": "180"}) == 180
-    assert _parse_rotation({"rotate": "270"}) == 270
-    assert _parse_rotation({"rotate": "999"}) == 0  # invalid → 0
-    assert _parse_rotation({"rotate": "abc"}) == 0
+    assert _parse_rotation({"tags": {"rotate": "90"}}) == 90
+    assert _parse_rotation({"tags": {"rotate": "180"}}) == 180
+    assert _parse_rotation({"tags": {"rotate": "270"}}) == 270
+    assert _parse_rotation({"tags": {"rotate": "999"}}) == 0  # invalid → 0
+    assert _parse_rotation({"tags": {"rotate": "abc"}}) == 0
+    # displaymatrix (side_data_list) — PART 5
+    assert _parse_rotation({"side_data_list": [{"rotation": -90}]}) == 90
+    assert _parse_rotation({"side_data_list": [{"rotation": 90}]}) == 270
+    # rotate tag wins over displaymatrix
+    assert _parse_rotation({
+        "tags": {"rotate": "90"},
+        "side_data_list": [{"rotation": 0}],
+    }) == 90
 
 
 def test_ffprobe_fps_parser():

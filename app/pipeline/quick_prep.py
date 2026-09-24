@@ -123,21 +123,35 @@ class QuickPrepPipeline:
             except Exception as e:
                 raise QuickPrepError(f"Re-probe after crop failed: {e}") from e
 
-        # 3. Vertical format (pass-through if already 9:16).
+        # 3. Vertical format — decisions on EFFECTIVE DISPLAY GEOMETRY
+        # (PART 5/6/7): coded × SAR, rotation applied. Never coded dims.
+        from app.services.media.geometry import get_display_geometry, is_near_aspect
+        geo = get_display_geometry(meta)
         current = input_video
-        is_portrait = meta.height >= meta.width  # loose check
+        # Already 9:16 (display ratio within 5%) → passthrough, but normalize
+        # SAR (preserving DAR) and rotation metadata if present.
+        target_ratio = target_width / max(target_height, 1)
         try:
-            if is_portrait and abs(meta.width / max(meta.height, 1) - target_width / target_height) < 0.05:
-                # Already 9:16 (within 5%) — copy as-is, but normalize SAR if needed.
+            if is_near_aspect(meta, target_ratio, tolerance=0.05):
                 vertical_path = job_dir / "vertical.mp4"
                 import shutil
-                shutil.copy2(current, vertical_path)
-                logger.info("quickprep_passthrough_vertical", path=str(vertical_path))
-                # If SAR not square, remux with setsar=1 via a quick ffmpeg copy pass.
-                if abs(meta.sample_aspect_ratio - 1.0) > 0.01:
-                    sar_fixed = job_dir / "vertical_sar_fixed.mp4"
-                    await get_media_service()._run_sar_fix(vertical_path, sar_fixed)
-                    vertical_path = sar_fixed
+                needs_norm = (
+                    abs(meta.sample_aspect_ratio - 1.0) > 0.01
+                    or geo.rotation in (90, 180, 270)
+                )
+                if needs_norm:
+                    await get_media_service().normalize_square_pixels(
+                        current, vertical_path,
+                    )
+                    logger.info(
+                        "quickprep_passthrough_normalized_sar",
+                        path=str(vertical_path),
+                        source_sar=meta.sample_aspect_ratio,
+                        source_rotation=geo.rotation,
+                    )
+                else:
+                    shutil.copy2(current, vertical_path)
+                    logger.info("quickprep_passthrough_vertical", path=str(vertical_path))
             else:
                 vertical_path = job_dir / "vertical.mp4"
                 await media.make_vertical(
@@ -222,9 +236,35 @@ class QuickPrepPipeline:
             if not current.exists():
                 raise QuickPrepError(f"No output produced: {e}") from e
 
-        # 5. Verify.
+        # 5. Verify + GEOMETRY VALIDATION (PART 9): never send a deformed
+        # clip — output SAR must be 1:1 and dims must match the canvas.
         try:
             final_meta = await probe.probe(current)
+            if abs(final_meta.sample_aspect_ratio - 1.0) > 0.01:
+                raise QuickPrepError(
+                    f"GeometryValidationError: output SAR="
+                    f"{final_meta.sample_aspect_ratio}, expected 1:1 "
+                    f"(would display stretched) — not sending"
+                )
+            if (output_width, output_height) != (final_meta.width, final_meta.height) \
+                    and (final_meta.width, final_meta.height) != (meta.effective_width, meta.effective_height):
+                logger.warning(
+                    "geometry_output_dims_unexpected",
+                    expected=f"{output_width}x{output_height}",
+                    got=f"{final_meta.width}x{final_meta.height}",
+                    source_effective=f"{meta.effective_width}x{meta.effective_height}",
+                )
+            logger.info(
+                "video_geometry_final",
+                source_coded=f"{meta.coded_width}x{meta.coded_height}",
+                source_effective=f"{meta.effective_width}x{meta.effective_height}",
+                source_sar=meta.sample_aspect_ratio,
+                source_dar=meta.display_aspect_ratio,
+                source_rotation=meta.rotation,
+                output=f"{final_meta.width}x{final_meta.height}",
+                output_sar=final_meta.sample_aspect_ratio,
+                output_dar=final_meta.display_aspect_ratio,
+            )
             return QuickPrepResult(
                 final_path=current,
                 size_bytes=current.stat().st_size,
