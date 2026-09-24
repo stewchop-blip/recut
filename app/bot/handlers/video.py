@@ -431,6 +431,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
         cta_duration_seconds = 4.0
         cta_start_seconds = 0.0
         cta_size = "medium"
+        overlay_type = "png"
 
         async with db_manager.session() as session:
             srepo = UserSettingsRepository(session)
@@ -442,6 +443,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
                 cta_duration_seconds = s.cta_duration_seconds
                 cta_start_seconds = s.cta_start_seconds
                 cta_size = getattr(s, "cta_size", None) or "medium"
+                overlay_type = getattr(s, "overlay_type", None) or "png"
 
             # Resolve CTA asset: ONLY the user's banner (telegram_file_id or
             # local path). No default "Recut" placeholder in production:
@@ -451,7 +453,8 @@ async def on_quick_prep(call: CallbackQuery) -> None:
                 if s is not None and s.cta_telegram_file_id:
                     try:
                         tg_file = await bot_instance.get_file(s.cta_telegram_file_id)
-                        banner_path = job_dir / "cta_user.png"
+                        ext = {"png": "png", "webp": "webp", "gif": "gif", "mp4": "mp4"}.get(overlay_type, "png")
+                        banner_path = job_dir / f"cta_user.{ext}"
                         await bot_instance.download_file(tg_file.file_path, destination=banner_path)
                         cta_asset = banner_path
                         logger.info("cta_loaded_from_telegram_file_id", user_id=user_id)
@@ -483,6 +486,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             output_width=settings.output_width,
             output_height=settings.output_height,
             cta_size_preset=cta_size,
+            cta_overlay_type=overlay_type,
         )
 
         await _edit_status(
@@ -721,6 +725,7 @@ async def on_url_recut(call: CallbackQuery) -> None:
     cta_duration_seconds = 4.0
     cta_start_seconds = 0.0
     cta_size = "medium"
+    overlay_type = "png"
     async with db_manager.session() as session:
         srepo = UserSettingsRepository(session)
         s = await srepo.get(user_id)
@@ -731,6 +736,7 @@ async def on_url_recut(call: CallbackQuery) -> None:
             cta_duration_seconds = s.cta_duration_seconds
             cta_start_seconds = s.cta_start_seconds
             cta_size = getattr(s, "cta_size", None) or "medium"
+            overlay_type = getattr(s, "overlay_type", None) or "png"
 
         # Resolve CTA asset: prefer telegram_file_id (Railway-safe),
         # then local path, then default static banner.
@@ -739,7 +745,8 @@ async def on_url_recut(call: CallbackQuery) -> None:
             if s is not None and s.cta_telegram_file_id:
                 try:
                     tg_file = await bot_instance.get_file(s.cta_telegram_file_id)
-                    banner_path = job_dir / "cta_user.png"
+                    ext = {"png": "png", "webp": "webp", "gif": "gif", "mp4": "mp4"}.get(overlay_type, "png")
+                    banner_path = job_dir / f"cta_user.{ext}"
                     await bot_instance.download_file(tg_file.file_path, destination=banner_path)
                     cta_asset = banner_path
                     logger.info("cta_loaded_from_telegram_file_id", user_id=user_id)
@@ -770,6 +777,7 @@ async def on_url_recut(call: CallbackQuery) -> None:
             output_width=settings.output_width,
             output_height=settings.output_height,
             cta_size_preset=cta_size,
+            cta_overlay_type=overlay_type,
         )
     except Exception as e:
         logger.error("quickprep_failed", user_id=user_id, job_id=pending.job_id, error=str(e)[:200])
@@ -1115,8 +1123,9 @@ async def on_preview_save(call: CallbackQuery) -> None:
 # Banner upload handler (user sends PNG)
 # ---------------------------------------------------------------------------
 
-@router.message(F.document, F.document.mime_type == "image/png")
+@router.message(F.document)
 async def on_banner_upload(message: types.Message, bot: Bot) -> None:
+    """Accept a universal overlay asset: PNG / WebP / GIF / MP4 (Этап 3)."""
     user_id = message.from_user.id if message.from_user else 0
     if user_id not in _awaiting_banner:
         return  # not waiting for a banner
@@ -1127,52 +1136,89 @@ async def on_banner_upload(message: types.Message, bot: Bot) -> None:
         await message.answer("❌ Не удалось получить файл.")
         return
 
-    # Download temporarily, validate with Pillow, then store file_id in DB.
+    mime = (doc.mime_type or "").lower()
+    # (mime prefix, overlay_type, is_animated)
+    accepted = [
+        ("image/png", "png", False),
+        ("image/webp", "webp", False),   # animated webp detected below
+        ("image/gif", "gif", True),
+        ("video/mp4", "mp4", True),
+    ]
+    entry = next((e for e in accepted if mime.startswith(e[0])), None)
+    if entry is None:
+        await message.answer(
+            "❌ Неподдерживаемый формат: " + (mime or "неизвестен") + ".\n\n"
+            "Поддерживаются: PNG, WebP, GIF или короткий MP4."
+        )
+        return
+    overlay_type, is_animated = entry[1], entry[2]
+
+    # Download temporarily, validate, then store file_id in DB.
     try:
         _USER_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+        ext = {"png": "png", "webp": "webp", "gif": "gif", "mp4": "mp4"}[overlay_type]
+        tmp_path = _USER_ASSETS_DIR / f"_tmp_banner_{user_id}.{ext}"
         file = await bot.get_file(doc.file_id)
-        tmp_png = _USER_ASSETS_DIR / f"_tmp_banner_{user_id}.png"
-        await bot.download_file(file.file_path, destination=tmp_png)
+        await bot.download_file(file.file_path, destination=tmp_path)
     except Exception as e:
         logger.error("banner_download_failed", user_id=user_id, error=str(e)[:200])
         await message.answer("❌ Не удалось скачать файл.")
         return
 
-    # Validate with Pillow: must be PNG RGBA with non-zero dimensions.
-    try:
-        from PIL import Image
-        img = Image.open(tmp_png)
-        if img.format != "PNG":
-            tmp_png.unlink(missing_ok=True)
-            await message.answer("❌ Отправь плашку именно как PNG-файл.")
+    # Validate with Pillow (images) — animated WebP detected here.
+    if overlay_type in ("png", "webp"):
+        try:
+            from PIL import Image
+            img = Image.open(tmp_path)
+            if overlay_type == "png" and img.format != "PNG":
+                tmp_path.unlink(missing_ok=True)
+                await message.answer("❌ Отправь плашку именно как PNG-файл.")
+                return
+            if overlay_type == "webp":
+                if img.format not in ("WEBP",):
+                    tmp_path.unlink(missing_ok=True)
+                    await message.answer("❌ Файл повреждён или это не WebP.")
+                    return
+                # Animated WebP: n_frames > 1
+                is_animated = getattr(img, "n_frames", 1) > 1
+            if img.mode not in ("RGBA", "RGB"):
+                img = img.convert("RGBA")
+            w, h = img.size
+            if w <= 0 or h <= 0:
+                tmp_path.unlink(missing_ok=True)
+                await message.answer("❌ Изображение повреждено.")
+                return
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            await message.answer("❌ Не удалось прочитать изображение.")
             return
-        if img.mode not in ("RGBA", "RGB"):
-            # Convert to RGBA for alpha support
-            img = img.convert("RGBA")
-        w, h = img.size
-        if w <= 0 or h <= 0:
-            tmp_png.unlink(missing_ok=True)
-            await message.answer("❌ Изображение повреждено.")
+    else:
+        # GIF / MP4: validate via probe (ffmpeg must read it).
+        try:
+            from app.services.media.probe import get_probe_service
+            m = await get_probe_service().probe(tmp_path)
+            if m.duration_seconds <= 0:
+                raise ValueError("no duration")
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            await message.answer("❌ Не удалось прочитать файл. Попробуй другой формат.")
             return
-    except Exception:
-        tmp_png.unlink(missing_ok=True)
-        await message.answer("❌ Не удалось прочитать изображение. Отправь PNG-файл.")
-        return
 
-    # Store Telegram file_id in DB (survives Railway redeploy).
+    # Store Telegram file_id + overlay meta in DB (survives Railway redeploy).
     async with db_manager.session() as session:
         await UserSettingsRepository(session).update_fields(
             user_id,
             cta_telegram_file_id=doc.file_id,
+            overlay_type=overlay_type,
+            overlay_is_animated=is_animated,
             cta_enabled=True,
         )
-    tmp_png.unlink(missing_ok=True)
+    tmp_path.unlink(missing_ok=True)
 
+    kind = "статичная" if not is_animated else "анимированная"
+    await message.answer(f"✅ Плашка сохранена ({kind})")
     from app.bot.keyboards.inline import banner_menu
-    await message.answer(
-        "✅ Плашка сохранена",
-        reply_markup=banner_menu(True),
-    )
+    await message.answer("Настройки плашки:", reply_markup=banner_menu(True))
 
 
 # ---------------------------------------------------------------------------
@@ -1191,21 +1237,6 @@ async def on_banner_photo_wrong_input(message: types.Message) -> None:
             "Это нужно, чтобы сохранить качество и прозрачность.",
             reply_markup=BANNER_CANCEL_MENU,
         )
-
-
-@router.message(F.document)
-async def on_banner_document_wrong_type(message: types.Message) -> None:
-    """Non-PNG document while waiting for banner — never stay silent."""
-    user_id = message.from_user.id if message.from_user else 0
-    if user_id not in _awaiting_banner:
-        return
-    doc = message.document
-    if doc and doc.mime_type == "image/png":
-        return  # handled by on_banner_upload
-    await message.answer(
-        "❌ Нужен PNG-файл.",
-        reply_markup=BANNER_CANCEL_MENU,
-    )
 
 
 @router.message(F.text)

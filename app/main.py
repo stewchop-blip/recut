@@ -42,6 +42,8 @@ async def run_schema_migrations() -> None:
     columns = [
         ("cta_telegram_file_id", "VARCHAR(200)"),
         ("cta_size", "VARCHAR(10)"),
+        ("overlay_type", "VARCHAR(10) DEFAULT 'png'"),
+        ("overlay_is_animated", "BOOLEAN DEFAULT FALSE"),
     ]
     is_sqlite = "sqlite" in str(db_manager.engine.url)
     try:

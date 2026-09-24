@@ -518,14 +518,20 @@ class MediaService:
         start_seconds: float,
         end_seconds: float,
         size_preset: str = "medium",
+        overlay_type: str = "png",
         timeout_seconds: float = 300.0,
     ) -> Path:
-        """Overlay a banner over a window of the video.
+        """Overlay a banner (static or animated) over a window of the video.
 
         Safe-area sizing (audit #6): banner max width by size preset
         (small 28% / medium 33% / large 38% of frame width), max height
         15% of frame height. Never full-screen, never upscaled.
         Positioning from actual main_w/main_h/overlay_w/overlay_h.
+
+        overlay_type: png/webp — static image input; gif/mp4 — animated
+        overlay, looped for the duration of the enable window
+        (-ignore_loop 0 + shortest=1 on the overlay so the banner
+        disappears when the window ends).
         """
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
@@ -605,17 +611,26 @@ class MediaService:
                 end_seconds=end_seconds,
             )
 
-        cta_chain = (
-            f"[1:v]format=rgba,scale={banner_out_w}:{banner_out_h}[cta];"
-            if banner_out_w > 0
-            else "[1:v]format=rgba[cta];"
+        is_animated = overlay_type in ("gif", "mp4")
+        # Animated overlays loop for the whole window:
+        # GIF: -ignore_loop 0; MP4/GIF: -stream_loop -1.
+        if banner_out_w > 0:
+            cta_chain = f"[1:v]format=rgba,scale={banner_out_w}:{banner_out_h}[cta];"
+        else:
+            # Probe failed — don't scale, use native overlay size.
+            cta_chain = "[1:v]format=rgba[cta];"
+        overlay_kwargs = (
+            "shortest=0:eof_action=repeat:repeatlast=1"
+            if not is_animated
+            # animated: banner stream ends with the enable window
+            else "shortest=1:eof_action=pass"
         )
         filter_expr = (
             cta_chain +
             f"[0:v][cta]overlay="
             f"x={x_expr}:y={y_expr}:"
             f"enable='between(t,%g,%g)':"
-            f"eof_action=repeat:repeatlast=1[v]"
+            f"{overlay_kwargs}[v]"
         ) % (start_seconds, end_seconds)
 
         cmd = [
@@ -623,6 +638,14 @@ class MediaService:
             "-y",
             "-v", "error",
             "-i", str(video_path),
+        ]
+        if is_animated:
+            # Loop the overlay stream forever; enable window bounds it.
+            # Input options must precede THEIR OWN -i (the overlay input).
+            if overlay_type == "gif":
+                cmd += ["-ignore_loop", "0"]
+            cmd += ["-stream_loop", "-1"]
+        cmd += [
             "-i", str(cta_path),
             "-filter_complex", filter_expr,
             "-map", "[v]",

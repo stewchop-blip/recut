@@ -69,6 +69,7 @@ class QuickPrepPipeline:
         output_width: int,
         output_height: int,
         cta_size_preset: str = "medium",
+        cta_overlay_type: str = "png",
     ) -> QuickPrepResult:
         media = self._media or get_media_service()
         probe = self._probe or get_probe_service()
@@ -192,6 +193,7 @@ class QuickPrepPipeline:
                         start_seconds=spec.start_seconds,
                         end_seconds=spec.end_seconds,
                         size_preset=cta_size_preset,
+                        overlay_type=cta_overlay_type,
                     )
                     current = cta_path
                     has_cta = True

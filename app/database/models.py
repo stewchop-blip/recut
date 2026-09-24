@@ -163,6 +163,11 @@ class UserSettings(Base):
     cta_start_seconds: Mapped[float] = mapped_column(default=0.0, nullable=False)
     # Banner size preset: small / medium / large → max width fraction of frame
     cta_size: Mapped[str] = mapped_column(String(10), default="medium", nullable=False)
+    # Universal overlay asset (Этап 3): png / webp / gif / mp4.
+    # The stored file_id is type-agnostic; these two columns tell the
+    # renderer how to overlay it (static vs looping animation).
+    overlay_type: Mapped[str] = mapped_column(String(10), default="png", nullable=False)
+    overlay_is_animated: Mapped[bool] = mapped_column(default=False, nullable=False)
 
     # Subtitles (default OFF — quick prep does NOT run Whisper automatically)
     subtitles_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
