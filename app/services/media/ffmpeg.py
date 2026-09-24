@@ -2,6 +2,7 @@
 
 import asyncio
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -25,6 +26,39 @@ def _find_font() -> str | None:
         if Path(p).exists():
             return p
     return None
+
+
+def _asset_pixel_size(path: Path, max_w: int, max_h: int) -> tuple[int, int]:
+    """Pixel size of an image/video asset, CONTAIN-fit into (max_w, max_h).
+
+    Even dims. Falls back to the box size itself when probing fails.
+    Synchronous ffprobe (short) — safe inside a running event loop.
+    """
+    try:
+        ffbin = _find_ffmpeg_bin()
+        ffprobe = str(Path(ffbin).with_name("ffprobe.exe"))
+        if not Path(ffprobe).exists():
+            ffprobe = str(Path(ffbin).with_name("ffprobe"))
+        r = subprocess.run(
+            [ffprobe, "-v", "error", "-print_format", "json",
+             "-show_streams", str(path)],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        import json as _json
+        data = _json.loads(r.stdout)
+        vs = next(s for s in data.get("streams", [])
+                  if s.get("codec_type") == "video")
+        w, h = int(vs.get("width") or 0), int(vs.get("height") or 0)
+        if w > 0 and h > 0:
+            scale = min(1.0, max_w / w, max_h / h)
+            return max(2, int(w * scale) // 2 * 2), max(2, int(h * scale) // 2 * 2)
+    except Exception:
+        pass
+    return max(2, max_w), max(2, max_h)
+
+
+def _find_ffmpeg_bin() -> str:
+    return shutil.which("ffmpeg") or "ffmpeg"
 
 
 def _drawtext(text: str, size_px: int, x: str, y: str,
@@ -287,6 +321,7 @@ class MediaService:
         background_id: str = "blur",
         title_text: str = "",
         brand_corner: bool = False,
+        decoration_id: str = "",
         timeout_seconds: float = 600.0,
     ) -> Path:
         """Convert source video to 9:16 vertical with a styled background.
@@ -411,11 +446,53 @@ class MediaService:
             else:
                 filter_complex += text_filters + "[v]"
 
+        # PHASE B: decorative insert (from DECORATIONS registry) overlaid
+        # above the video, below the banner. Animated assets loop forever;
+        # enable is the whole clip. Skips silently when not bundled yet.
+        extra_inputs: list[str] = []
+        if decoration_id:
+            from app.services.overlays.templates import DECORATIONS
+            dec = DECORATIONS.get(decoration_id)
+            if dec is None:
+                logger.warning("decoration_unknown_skipped", decoration_id=decoration_id)
+            else:
+                dec_path = Path(dec.path)
+                if not dec_path.exists():
+                    logger.warning("decoration_asset_missing_skipped", path=str(dec_path))
+                else:
+                    from app.services.overlays.compositor import TemplateSpec
+                    spec = TemplateSpec(target_width, target_height)
+                    dbox = spec.decoration_box(
+                        dec.max_width_frac, dec.max_height_frac, dec.anchor,
+                    )
+                    dec_w, dec_h = _asset_pixel_size(dec_path, dbox.width, dbox.height)
+                    input_idx = 1  # decoration becomes ffmpeg input #1
+                    dec_kind = (dec.kind or "").lower()
+                    is_anim = dec_kind in ("gif", "mp4", "webp")
+                    chain = (
+                        f"[{input_idx}:v]format=rgba,"
+                        f"scale={dec_w}:{dec_h}[dec];"
+                        f"[v][dec]overlay={dbox.x}:{dbox.y}:"
+                        + ("shortest=1:eof_action=pass[v]" if is_anim
+                           else "eof_action=repeat:repeatlast=1[v]")
+                    )
+                    filter_complex += ";" + chain
+                    if is_anim:
+                        # Only animated assets loop; a static PNG with
+                        # -stream_loop -1 + shortest=0 never terminates.
+                        if dec_kind == "gif":
+                            extra_inputs += ["-ignore_loop", "0"]
+                        extra_inputs += ["-stream_loop", "-1"]
+                    extra_inputs += ["-i", str(dec_path)]
+
         cmd = [
             self._ffmpeg_path,
             "-y",
             "-v", "error",
             "-i", str(source),
+        ]
+        cmd += extra_inputs
+        cmd += [
             "-filter_complex", filter_complex,
             "-map", "[v]",
             "-map", "0:a?",
