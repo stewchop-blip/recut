@@ -44,6 +44,9 @@ async def run_schema_migrations() -> None:
         ("cta_size", "VARCHAR(10)"),
         ("overlay_type", "VARCHAR(10) DEFAULT 'png'"),
         ("overlay_is_animated", "BOOLEAN DEFAULT FALSE"),
+        ("background_id", "VARCHAR(20) DEFAULT 'blur'"),
+        ("title_id", "VARCHAR(20) DEFAULT 'none'"),
+        ("brand_corner", "BOOLEAN DEFAULT FALSE"),
     ]
     is_sqlite = "sqlite" in str(db_manager.engine.url)
     try:

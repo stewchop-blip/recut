@@ -6,6 +6,8 @@ Two main menus:
 """
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.services.overlays.templates import BACKGROUNDS, TITLES
+
 
 # Action menu after the user sends a video
 ACTION_MENU = InlineKeyboardMarkup(inline_keyboard=[
@@ -133,6 +135,9 @@ SETTINGS_MENU = InlineKeyboardMarkup(inline_keyboard=[
         InlineKeyboardButton(text="🖼 Плашка", callback_data="banner:menu"),
     ],
     [
+        InlineKeyboardButton(text="🎨 Фон и заголовок", callback_data="style:menu"),
+    ],
+    [
         InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open"),
     ],
     [
@@ -157,6 +162,43 @@ POSITION_MENU = InlineKeyboardMarkup(inline_keyboard=[
         InlineKeyboardButton(text="🔙 Назад", callback_data="settings:back"),
     ],
 ])
+
+
+def style_menu(background_id: str, title_id: str, brand_corner: bool) -> InlineKeyboardMarkup:
+    """Этап 4: style constructor (background / title / brand corner)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"🎨 Фон: {background_id}",
+            callback_data="style:bg",
+        )],
+        [InlineKeyboardButton(
+            text=f"🏷 Заголовок: {title_id}",
+            callback_data="style:title",
+        )],
+        [InlineKeyboardButton(
+            text=f"🏷 Бренд-уголок: {'ВКЛ' if brand_corner else 'ВЫКЛ'}",
+            callback_data="style:brand",
+        )],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
+    ])
+
+
+def background_menu(current: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=("✅ " if bg.id == current else "") + bg.label,
+            callback_data=f"style_bg:{bg.id}",
+        )] for bg in BACKGROUNDS.values()
+    ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="style:menu")]])
+
+
+def title_menu(current: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=("✅ " if t.id == current else "") + t.label,
+            callback_data=f"style_title:{t.id}",
+        )] for t in TITLES.values()
+    ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="style:menu")]])
 
 
 # CTA size picker (width fraction of the frame, height capped 15%)

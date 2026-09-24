@@ -44,11 +44,15 @@ from app.bot.keyboards.inline import (
     SHORT_ACTION_MENU,
     SIZE_MENU,
     TIMING_MENU,
+    background_menu,
     banner_menu,
     mode_input_menu,
     preview_keyboard,
+    style_menu,
+    title_menu,
 )
 from app.core.config import get_settings
+from app.services.overlays.templates import TITLES
 from app.core.logging import get_logger
 from app.database.repositories import (
     JobRepository,
@@ -487,6 +491,9 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             output_height=settings.output_height,
             cta_size_preset=cta_size,
             cta_overlay_type=overlay_type,
+            background_id=getattr(s, "background_id", "blur") if s else "blur",
+            title_text=_resolve_title_text(s),
+            brand_corner=bool(getattr(s, "brand_corner", False)) if s else False,
         )
 
         await _edit_status(
@@ -778,6 +785,9 @@ async def on_url_recut(call: CallbackQuery) -> None:
             output_height=settings.output_height,
             cta_size_preset=cta_size,
             cta_overlay_type=overlay_type,
+            background_id=getattr(s, "background_id", "blur") if s else "blur",
+            title_text=_resolve_title_text(s),
+            brand_corner=bool(getattr(s, "brand_corner", False)) if s else False,
         )
     except Exception as e:
         logger.error("quickprep_failed", user_id=user_id, job_id=pending.job_id, error=str(e)[:200])
@@ -1024,6 +1034,95 @@ async def on_settings_timing(call: CallbackQuery) -> None:
 
 
 CTA_SIZES = {"small": "Маленькая (~28%)", "medium": "Средняя (~33%)", "large": "Большая (~38%)"}
+
+
+def _resolve_title_text(s) -> str:
+    """Title preset id → burned text (empty when none/unknown)."""
+    if s is None:
+        return ""
+    t = TITLES.get(getattr(s, "title_id", "none") or "none")
+    return t.text if t else ""
+
+
+@router.callback_query(F.data == "style:menu")
+async def on_style_menu(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    async with db_manager.session() as session:
+        s = await UserSettingsRepository(session).get_or_create(user_id)
+    await call.message.edit_text(
+        "🎨 <b>Стиль оформления</b>\n\nФон + заголовок + бренд-уголок.",
+        parse_mode="HTML",
+        reply_markup=style_menu(
+            getattr(s, "background_id", "blur"),
+            getattr(s, "title_id", "none"),
+            bool(getattr(s, "brand_corner", False)),
+        ),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "style:bg")
+async def on_style_bg(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    async with db_manager.session() as session:
+        s = await UserSettingsRepository(session).get_or_create(user_id)
+    await call.message.edit_text(
+        "🎨 Выбери фон:",
+        reply_markup=background_menu(getattr(s, "background_id", "blur")),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "style:title")
+async def on_style_title(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    async with db_manager.session() as session:
+        s = await UserSettingsRepository(session).get_or_create(user_id)
+    await call.message.edit_text(
+        "🏷 Выбери заголовок:",
+        reply_markup=title_menu(getattr(s, "title_id", "none")),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "style:brand")
+async def on_style_brand_toggle(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    async with db_manager.session() as session:
+        repo = UserSettingsRepository(session)
+        s = await repo.get_or_create(user_id)
+        new_val = not bool(s.brand_corner)
+        await repo.update_fields(user_id, brand_corner=new_val)
+    await call.answer(f"Бренд-уголок {'включён' if new_val else 'выключен'}")
+    await on_style_menu(call)
+
+
+@router.callback_query(F.data.startswith("style_bg:"))
+async def on_set_background(call: CallbackQuery) -> None:
+    from app.services.overlays.templates import BACKGROUNDS
+    bg_id = call.data.split(":", 1)[1]
+    user_id = call.from_user.id if call.from_user else 0
+    if bg_id not in BACKGROUNDS:
+        await call.answer("Неизвестный фон")
+        return
+    async with db_manager.session() as session:
+        await UserSettingsRepository(session).update_fields(user_id, background_id=bg_id)
+    await call.answer(f"Фон: {BACKGROUNDS[bg_id].label}")
+    await on_style_menu(call)
+
+
+@router.callback_query(F.data.startswith("style_title:"))
+async def on_set_title(call: CallbackQuery) -> None:
+    from app.services.overlays.templates import TITLES
+    title_id = call.data.split(":", 1)[1]
+    user_id = call.from_user.id if call.from_user else 0
+    if title_id not in TITLES:
+        await call.answer("Неизвестный заголовок")
+        return
+    async with db_manager.session() as session:
+        await UserSettingsRepository(session).update_fields(user_id, title_id=title_id)
+    await call.answer(f"Заголовок: {TITLES[title_id].label}")
+    await on_style_menu(call)
 
 
 @router.callback_query(F.data == "settings:size")

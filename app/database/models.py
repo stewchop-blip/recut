@@ -169,6 +169,11 @@ class UserSettings(Base):
     overlay_type: Mapped[str] = mapped_column(String(10), default="png", nullable=False)
     overlay_is_animated: Mapped[bool] = mapped_column(default=False, nullable=False)
 
+    # Этап 4: template-based processing
+    background_id: Mapped[str] = mapped_column(String(20), default="blur", nullable=False)
+    title_id: Mapped[str] = mapped_column(String(20), default="none", nullable=False)
+    brand_corner: Mapped[bool] = mapped_column(default=False, nullable=False)
+
     # Subtitles (default OFF — quick prep does NOT run Whisper automatically)
     subtitles_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
 

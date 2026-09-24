@@ -10,6 +10,45 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+_FONT_CANDIDATES = [
+    # Debian (Railway Docker: fonts-dejavu-core)
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    # Windows dev machine
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/seguisb.ttf",
+]
+
+
+def _find_font() -> str | None:
+    """First existing TTF for drawtext (None → ffmpeg default)."""
+    for p in _FONT_CANDIDATES:
+        if Path(p).exists():
+            return p
+    return None
+
+
+def _drawtext(text: str, size_px: int, x: str, y: str,
+              alpha: str = "1.0", borderw: int = 2) -> str:
+    """drawtext filter with escaping and explicit fontfile when found."""
+    safe = (
+        text.replace("\\", "\\\\").replace(":", "\\:")
+        .replace("'", "\\'").replace("%", "\\%")
+    )
+    parts = [
+        f"drawtext=text='{safe}'",
+        f"fontsize={size_px}",
+        f"fontcolor=white@{alpha}",
+        f"borderw={borderw}",
+        "bordercolor=black",
+        f"x={x}",
+        f"y={y}",
+    ]
+    font = _find_font()
+    if font:
+        # ':' inside the filtergraph must be escaped even inside quotes.
+        parts.insert(1, f"fontfile='{font.replace(':', chr(92) + ':')}'")
+    return ":".join(parts)
+
 
 class MediaService:
     """FFmpeg wrapper for media processing."""
@@ -190,23 +229,24 @@ class MediaService:
         video_bitrate: str = "4M",
         audio_bitrate: str = "128k",
         blur_strength: int = 30,
+        background_id: str = "blur",
+        title_text: str = "",
+        brand_corner: bool = False,
         timeout_seconds: float = 600.0,
     ) -> Path:
-        """Convert source video to 9:16 vertical with a blurred background.
+        """Convert source video to 9:16 vertical with a styled background.
+
+        background_id: 'blur' (default) — blurred copy of the source;
+        'dark'/'light'/'accent' — solid color canvas (templates registry).
+        title_text: burned at top safe area via drawtext (empty = off).
+        brand_corner: small 'ReCut' tag in the top-right corner.
 
         Strategy (single ffmpeg filter_complex pass):
-        - If source is already portrait (height >= width * (target_h/target_w)):
-          just scale the source to target resolution (no crop, no blur).
-        - Otherwise (landscape or square wider than portrait):
-          1. background: scale source so it fully covers target_width×target_height
-             AND blur it heavily (gblur sigma=blur_strength).
-          2. foreground: scale source to fit target_height (keeping aspect),
-             centered.
-          3. overlay foreground on top of background.
+        - bg: blurred source copy OR solid color (templates registry)
+        - fg: scale CONTAIN target (decrease, preserve aspect), setsar=1
+        - overlay fg on bg (centred); optional title + brand corner text
 
-        Audio is passed through with light normalization to mono AAC.
-
-        Output codec: H.264 + AAC, yuv420p (mobile-safe), +faststart.
+        Audio is passed through; output H.264 + AAC, yuv420p, +faststart.
         """
         if not input_path.exists():
             raise FileNotFoundError(f"Input not found: {input_path}")
@@ -236,30 +276,59 @@ class MediaService:
                 logger.warning("black_bars_crop_failed_keep_original", error=str(e)[:200])
                 source = input_path
 
-        # Filter graph:
-        # - split source into [bg][fg]
-        # - bg: scale to fully cover target (increase), crop, heavy blur
-        # - fg: scale to fit inside target (decrease, never exceed)
-        # - overlay fg over bg (centred)
-        # Foreground: fit inside target (no upscaling past source res).
-        # NO pad — overlay directly; background fills the gaps.
-        filter_complex = (
-            "[0:v]split=2[bg_src][fg_src];"
-            # Background: scale to cover target (force_original_aspect_ratio=increase),
-            # crop to exact target, then normalize SAR to 1:1 and blur.
-            f"[bg_src]scale=w={target_width}:h={target_height}:"
-            f"force_original_aspect_ratio=increase,"
-            f"crop={target_width}:{target_height},"
-            f"setsar=1,"  # normalize sample aspect ratio to square pixels
-            f"eq=brightness=0.0:contrast=1.1:saturation=1.2,"
-            f"gblur=sigma={blur_strength}[bg];"
-            # Foreground: scale CONTAIN target (force_original_aspect_ratio=decrease),
-            # preserve aspect ratio, then normalize SAR to 1:1. NO pad, NO crop.
-            f"[fg_src]scale=w={target_width}:h={target_height}:"
-            f"force_original_aspect_ratio=decrease,"
-            f"setsar=1[fg];"
-            "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=0[v]"
-        )
+        # Filter graph (Этап 4 templates):
+        # bg: 'blur' = blurred copy of source; 'dark'/'light'/'accent' =
+        # solid color from the registry (color=c=... source).
+        from app.services.overlays.templates import BACKGROUNDS
+        preset = BACKGROUNDS.get(background_id, BACKGROUNDS["blur"])
+        if preset.kind == "color":
+            filter_complex = (
+                f"color=c={preset.color}:s={target_width}x{target_height}:r={target_fps}[bg];"
+                f"[0:v]scale=w={target_width}:h={target_height}:"
+                f"force_original_aspect_ratio=decrease,"
+                f"setsar=1[fg];"
+                # color source is INFINITE → shortest=1, else encode never ends
+                "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]"
+            )
+        else:
+            filter_complex = (
+                "[0:v]split=2[bg_src][fg_src];"
+                # Background: scale to cover target (increase), crop, blur, setsar=1.
+                f"[bg_src]scale=w={target_width}:h={target_height}:"
+                f"force_original_aspect_ratio=increase,"
+                f"crop={target_width}:{target_height},"
+                f"setsar=1,"
+                f"eq=brightness=0.0:contrast=1.1:saturation=1.2,"
+                f"gblur=sigma={blur_strength}[bg];"
+                # Foreground: scale CONTAIN target (decrease), setsar=1. NO pad/crop.
+                f"[fg_src]scale=w={target_width}:h={target_height}:"
+                f"force_original_aspect_ratio=decrease,"
+                f"setsar=1[fg];"
+                "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=0[v]"
+            )
+
+        # Optional title (top safe area) / brand corner via drawtext.
+        text_filters = ""
+        if title_text:
+            # font size ~4.5% of height, top margin ~5%
+            text_filters += "," + _drawtext(
+                title_text, int(target_height * 0.045),
+                x="(w-text_w)/2", y=f"h*0.05",
+            )
+        if brand_corner:
+            text_filters += "," + _drawtext(
+                "ReCut", int(target_height * 0.018),
+                x=f"w-text_w-{int(target_width * 0.03)}",
+                y=f"{int(target_height * 0.025)}",
+                alpha="0.75", borderw=1,
+            )
+        if text_filters:
+            # NOTE: ffmpeg 8.1.2 filtergraph parser rejects intermediate
+            # labels ("[v_pre]" style) — chain drawtext directly instead.
+            if filter_complex.endswith("[v]"):
+                filter_complex = filter_complex[:-3] + text_filters + "[v]"
+            else:
+                filter_complex += text_filters + "[v]"
 
         cmd = [
             self._ffmpeg_path,

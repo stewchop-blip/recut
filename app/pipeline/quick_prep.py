@@ -70,6 +70,9 @@ class QuickPrepPipeline:
         output_height: int,
         cta_size_preset: str = "medium",
         cta_overlay_type: str = "png",
+        background_id: str = "blur",
+        title_text: str = "",
+        brand_corner: bool = False,
     ) -> QuickPrepResult:
         media = self._media or get_media_service()
         probe = self._probe or get_probe_service()
@@ -145,6 +148,9 @@ class QuickPrepPipeline:
                     target_fps=target_fps,
                     video_bitrate=video_bitrate,
                     audio_bitrate=audio_bitrate,
+                    background_id=background_id,
+                    title_text=title_text,
+                    brand_corner=brand_corner,
                 )
             current = vertical_path
             # Output geometry log (audit #22).
