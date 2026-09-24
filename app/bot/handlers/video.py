@@ -1082,10 +1082,16 @@ CTA_SIZES = {"small": "Маленькая (~28%)", "medium": "Средняя (~3
 
 
 def _resolve_title_text(s) -> str:
-    """Title preset id → burned text (empty when none/unknown)."""
+    """Title preset id → burned text (empty when none/unknown).
+
+    PHASE D: title_id == "custom" → user-defined text from DB.
+    """
     if s is None:
         return ""
-    t = TITLES.get(getattr(s, "title_id", "none") or "none")
+    title_id = getattr(s, "title_id", "none") or "none"
+    if title_id == "custom":
+        return (getattr(s, "custom_title", None) or "").strip()[:100]
+    t = TITLES.get(title_id)
     return t.text if t else ""
 
 
@@ -1267,15 +1273,23 @@ async def on_set_background(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("style_title:"))
 async def on_set_title(call: CallbackQuery) -> None:
-    from app.services.overlays.templates import TITLES
     title_id = call.data.split(":", 1)[1]
     user_id = call.from_user.id if call.from_user else 0
     if title_id not in TITLES:
         await call.answer("Неизвестный заголовок")
         return
+    if title_id == "custom":
+        # PHASE D: ask for user text; saved by on_banner_text_while_waiting.
+        _awaiting_title.add(user_id)
+        await call.message.edit_text(
+            "✏️ Пришли свой текст заголовка (до 100 символов).",
+            reply_markup=BANNER_CANCEL_MENU,
+        )
+        await call.answer()
+        return
     async with db_manager.session() as session:
         await UserSettingsRepository(session).update_fields(user_id, title_id=title_id)
-    await call.answer(f"Заголовок: {TITLES[title_id].label}")
+    await _safe_answer(call, f"Заголовок: {TITLES[title_id].label}")
     await on_fine_menu(call)
 
 
@@ -1309,6 +1323,8 @@ async def on_settings_upload_cta(call: CallbackQuery) -> None:
 
 
 _awaiting_banner: set[int] = set()
+# PHASE D: users sending a custom title text
+_awaiting_title: set[int] = set()
 
 
 @router.callback_query(F.data.startswith("cta_pos:"))
@@ -1488,8 +1504,23 @@ async def on_banner_photo_wrong_input(message: types.Message) -> None:
 
 @router.message(F.text)
 async def on_banner_text_while_waiting(message: types.Message) -> None:
-    """Text while waiting for a banner file — respond, never stay silent."""
+    """Text while waiting for a banner file OR a custom title (PHASE D)."""
     user_id = message.from_user.id if message.from_user else 0
+    if user_id in _awaiting_title:
+        _awaiting_title.discard(user_id)
+        text = (message.text or "").strip()
+        if not text:
+            await message.answer("❌ Пустой текст. Попробуй ещё раз.")
+            return
+        async with db_manager.session() as session:
+            await UserSettingsRepository(session).update_fields(
+                user_id, title_id="custom", custom_title=text[:100],
+            )
+        await message.answer(
+            f"✅ Заголовок сохранён: «{text[:100]}»",
+            reply_markup=None,
+        )
+        return
     if user_id in _awaiting_banner:
         await message.answer(
             "📎 Жду файл плашки: PNG, WebP, GIF или короткий MP4.",

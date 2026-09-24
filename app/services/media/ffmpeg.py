@@ -331,14 +331,37 @@ class MediaService:
                 logger.warning("black_bars_crop_failed_keep_original", error=str(e)[:200])
                 source = input_path
 
-        # Filter graph (PART 2/3 — geometry): scale uses reset_sar=1 so the
-        # contain/cover math runs on DISPLAY aspect ratio (coded × SAR),
-        # and force_divisible_by=2 for H.264-safe even dims. NO separate
-        # setsar afterwards (reset_sar already squares the pixels).
+        # Filter graph (PART 2/3 — geometry + PHASE A backgrounds):
+        # scale uses reset_sar=1 so the contain/cover math runs on DISPLAY
+        # aspect ratio (coded × SAR), and force_divisible_by=2 for
+        # H.264-safe even dims. NO separate setsar afterwards.
         from app.services.overlays.templates import BACKGROUNDS
         preset = BACKGROUNDS.get(background_id, BACKGROUNDS["blur"])
-        if preset.kind == "color":
-            filter_complex = (
+        canvas = None
+        if preset.kind == "gradient":
+            # PHASE A: two-color animated gradient canvas. The gradients
+            # source is INFINITE (no d=) → overlay needs shortest=1.
+            canvas = (
+                f"gradients=s={target_width}x{target_height}:"
+                f"c0={preset.color}:c1={preset.color2}:speed={preset.speed or 0.03}:r={target_fps},"
+                f"format=yuv420p[bg];"
+                f"[0:v]scale=w={target_width}:h={target_height}:"
+                f"force_original_aspect_ratio=decrease:"
+                f"force_divisible_by=2:reset_sar=1[fg];"
+                "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]"
+            )
+        elif preset.kind == "vignette":
+            # PHASE A: solid base + radial darkening.
+            canvas = (
+                f"color=c={preset.color}:s={target_width}x{target_height}:r={target_fps},"
+                f"vignette=PI/4.5,format=yuv420p[bg];"
+                f"[0:v]scale=w={target_width}:h={target_height}:"
+                f"force_original_aspect_ratio=decrease:"
+                f"force_divisible_by=2:reset_sar=1[fg];"
+                "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]"
+            )
+        elif preset.kind == "color":
+            canvas = (
                 f"color=c={preset.color}:s={target_width}x{target_height}:r={target_fps}[bg];"
                 f"[0:v]scale=w={target_width}:h={target_height}:"
                 f"force_original_aspect_ratio=decrease:"
@@ -347,7 +370,7 @@ class MediaService:
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]"
             )
         else:
-            filter_complex = (
+            canvas = (
                 "[0:v]split=2[bg_src][fg_src];"
                 # Background: cover target (increase) → crop exact → blur.
                 f"[bg_src]scale=w={target_width}:h={target_height}:"
@@ -363,6 +386,7 @@ class MediaService:
                 f"force_divisible_by=2:reset_sar=1[fg];"
                 "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=0[v]"
             )
+        filter_complex = canvas
 
         # Optional title (top safe area) / brand corner via drawtext.
         text_filters = ""

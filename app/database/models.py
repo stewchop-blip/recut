@@ -174,6 +174,8 @@ class UserSettings(Base):
     title_id: Mapped[str] = mapped_column(String(20), default="none", nullable=False)
     brand_corner: Mapped[bool] = mapped_column(default=False, nullable=False)
     style_id: Mapped[str] = mapped_column(String(20), default="clean", nullable=False)
+    # PHASE D: user-defined title text (used when title_id == "custom")
+    custom_title: Mapped[str] = mapped_column(String(200), default="", nullable=False)
 
     # Subtitles (default OFF — quick prep does NOT run Whisper automatically)
     subtitles_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
