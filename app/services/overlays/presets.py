@@ -53,7 +53,7 @@ BUILTIN_PRESETS = {
 PRESET_KEYS = list(BUILTIN_PRESETS.keys())
 
 
-def resolve_preset(preset_id: str | None) -> TransformationPreset:
-    """Resolve preset id -> TransformationPreset; falls back to custom/DB."""
+def resolve_preset(preset_id: str | None) -> TransformationPreset | None:
+    """Resolve preset id -> TransformationPreset; 'custom' -> None."""
     p = BUILTIN_PRESETS.get(preset_id) if preset_id else None
-    return p or BUILTIN_PRESETS["clean"]
+    return p

@@ -53,7 +53,7 @@ from app.bot.keyboards.inline import (
     title_menu,
 )
 from app.core.config import get_settings
-from app.services.overlays.templates import TITLES
+from app.services.overlays.templates import BACKGROUNDS, TITLES
 from app.core.logging import get_logger
 from app.database.repositories import (
     JobRepository,
@@ -963,7 +963,12 @@ async def on_banner_upload_request(call: CallbackQuery) -> None:
 async def on_banner_cancel(call: CallbackQuery) -> None:
     user_id = call.from_user.id if call.from_user else 0
     _awaiting_banner.discard(user_id)
-    await call.message.edit_text("Отменено.", reply_markup=banner_menu(False))
+    # BUG 8: read DB for existing banner state
+    has_banner = False
+    async with db_manager.session() as session:
+        s = await UserSettingsRepository(session).get_or_create(user_id)
+        has_banner = bool(s.cta_telegram_file_id)
+    await call.message.edit_text("Отменено.", reply_markup=banner_menu(has_banner))
     await call.answer()
 
 
@@ -1041,9 +1046,13 @@ async def on_banner_preview(call: CallbackQuery) -> None:
         await call.message.answer_video(
             video, caption="Так плашка будет выглядеть на видео (3 сек).",
         )
+        await call.answer()
         return
     except Exception as e:
         logger.warning("banner_preview_render_failed", error=str(e)[:200])
+        # BUG 7 fix: don't fake MIME — show clear failure message.
+        await call.answer("❌ Не удалось сделать предпросмотр. Попробуй другой файл или меньший размер.", show_alert=True)
+        return
 
     photo = types.BufferedInputFile(buf.getvalue(), filename="banner.png")
     await call.message.answer_photo(photo, caption="Так выглядит твоя плашка.")
@@ -1138,10 +1147,10 @@ async def on_style_pick(call: CallbackQuery) -> None:
     user_id = call.from_user.id if call.from_user else 0
     async with db_manager.session() as session:
         s = await UserSettingsRepository(session).get_or_create(user_id)
-    current = _STYLE_LABELS.get(getattr(s, "style_id", None) or "", "Свой")
+    current_id = getattr(s, "style_id", None) or "custom"
     await call.message.edit_text(
         "🎭 Выбери стиль:",
-        reply_markup=style_pick_menu(current),
+        reply_markup=style_pick_menu(current_id),
     )
     await call.answer()
 

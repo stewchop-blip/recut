@@ -234,6 +234,10 @@ class ThreeVersionsPipeline:
         cta_position: str,
         cta_margin_px: int,
         cta_last_seconds: float = 4.0,
+        overlay_type: str = "png",
+        overlay_is_animated: bool = False,
+        cta_size_preset: str = "medium",
+        cta_mode: str = "end",
     ) -> list[VersionResult]:
         media = self._media_or_default()
         job_dir.mkdir(parents=True, exist_ok=True)
@@ -268,6 +272,7 @@ class ThreeVersionsPipeline:
                 await media.make_vertical(
                     current, vertical,
                     background_id=preset_style["background_id"],
+                    overlay_type=overlay_type,
                     title_text=preset_style["title_text"],
                     brand_corner=preset_style["brand_corner"],
                 )

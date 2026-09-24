@@ -129,7 +129,7 @@ class QuickPrepPipeline:
         # Overrides per-style settings when using a built-in preset.
         from app.services.overlays.presets import resolve_preset
         preset_cfg = resolve_preset(transformation_preset)
-        if preset_cfg.name != "custom":
+        if preset_cfg is not None:
             # Apply preset's visual/audio settings; keep user banner config
             # (cta_size overrides only when preset specifies different size).
             if preset_cfg.background_id != "blur" or preset_cfg.name in ("clean", "meme", "brand"):

@@ -73,8 +73,8 @@ def appearance_menu(style_id: str, banner: bool) -> InlineKeyboardMarkup:
     ])
 
 
-def style_pick_menu(current: str) -> InlineKeyboardMarkup:
-    """Style presets (PART 16)."""
+def style_pick_menu(current_id: str) -> InlineKeyboardMarkup:
+    """Style presets (PART 16) — compares by preset id, not label."""
     presets = [
         ("clean", "⚪️ Чистый"),
         ("meme", "😎 Мем"),
@@ -83,7 +83,7 @@ def style_pick_menu(current: str) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=("✅ " if pid == current else "") + label,
+            text=("✅ " if pid == current_id else "") + label,
             callback_data=f"style_set:{pid}",
         )] for pid, label in presets
     ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="appearance:menu")]])

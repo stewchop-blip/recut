@@ -814,6 +814,7 @@ class MediaService:
         end_seconds: float,
         size_preset: str = "medium",
         overlay_type: str = "png",
+        overlay_is_animated: bool = False,
         timeout_seconds: float = 300.0,
     ) -> Path:
         """Overlay a banner (static or animated) over a window of the video.
@@ -906,7 +907,7 @@ class MediaService:
                 end_seconds=end_seconds,
             )
 
-        is_animated = overlay_type in ("gif", "mp4")
+        is_animated = overlay_is_animated or overlay_type in ("gif", "mp4")
         # Animated overlays loop for the whole window:
         # GIF: -ignore_loop 0; MP4/GIF: -stream_loop -1.
         if banner_out_w > 0:
