@@ -173,6 +173,7 @@ class UserSettings(Base):
     background_id: Mapped[str] = mapped_column(String(20), default="blur", nullable=False)
     title_id: Mapped[str] = mapped_column(String(20), default="none", nullable=False)
     brand_corner: Mapped[bool] = mapped_column(default=False, nullable=False)
+    style_id: Mapped[str] = mapped_column(String(20), default="clean", nullable=False)
 
     # Subtitles (default OFF — quick prep does NOT run Whisper automatically)
     subtitles_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)

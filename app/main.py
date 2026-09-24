@@ -47,6 +47,7 @@ async def run_schema_migrations() -> None:
         ("background_id", "VARCHAR(20) DEFAULT 'blur'"),
         ("title_id", "VARCHAR(20) DEFAULT 'none'"),
         ("brand_corner", "BOOLEAN DEFAULT FALSE"),
+        ("style_id", "VARCHAR(20) DEFAULT 'clean'"),
     ]
     is_sqlite = "sqlite" in str(db_manager.engine.url)
     try:

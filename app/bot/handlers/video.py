@@ -33,22 +33,22 @@ from aiogram import Bot, F, Router, types
 from aiogram.types import CallbackQuery
 
 from app.bot.keyboards.inline import (
-    ACTION_MENU,
     BANNER_CANCEL_MENU,
     HOME_MENU,
+    MORE_MENU,
     POSITION_MENU,
     RESULT_MENU_MOMENTS,
     RESULT_MENU_PREPARE,
     RESULT_MENU_VERSIONS,
-    SETTINGS_MENU,
-    SHORT_ACTION_MENU,
     SIZE_MENU,
     TIMING_MENU,
+    appearance_menu,
     background_menu,
     banner_menu,
+    fine_menu,
     mode_input_menu,
     preview_keyboard,
-    style_menu,
+    style_pick_menu,
     title_menu,
 )
 from app.core.config import get_settings
@@ -243,14 +243,14 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         text += f"\U0001f4d0 {res_str}\n"
     text += "\n\u0412\u044b\u0431\u0435\u0440\u0438 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435:"
 
-    # Decide menu: chosen mode wins; short videos get Quick Prep only.
+    # Decide menu: chosen mode wins; long videos get Smart Clips option.
     SMART_CLIPS_MIN_SECONDS = 120
     selected_mode = get_selected_mode(user_id)
     if selected_mode:
         menu = mode_input_menu(selected_mode)
         _mode_state.pop(user_id, None)
     else:
-        menu = ACTION_MENU if duration_sec >= SMART_CLIPS_MIN_SECONDS else SHORT_ACTION_MENU
+        menu = mode_input_menu("moments" if duration_sec >= SMART_CLIPS_MIN_SECONDS else "prepare")
     await status_msg.edit_text(text, reply_markup=menu)
 
     # Stash the job info on a tiny in-memory store so callbacks can find it
@@ -371,7 +371,7 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
         menu = mode_input_menu(selected_mode)
         _mode_state.pop(user_id, None)
     else:
-        menu = ACTION_MENU if duration_sec >= SMART_CLIPS_MIN_SECONDS else SHORT_ACTION_MENU
+        menu = mode_input_menu("moments" if duration_sec >= SMART_CLIPS_MIN_SECONDS else "prepare")
     logger.info("url_ready_for_actions", user_id=user_id, job_id=job_id, menu=type(menu).__name__)
     await status_msg.edit_text(text_out, reply_markup=menu)
 
@@ -839,8 +839,8 @@ async def on_url_recut(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "action:settings")
 async def on_settings(call: CallbackQuery) -> None:
-    await _show_settings(call.message, call.from_user.id if call.from_user else 0)
-    await call.answer()
+    # Legacy alias -> Тонкая настройка (PART 18: no duplicate CTA settings).
+    await on_fine_menu(call)
 
 
 @router.callback_query(F.data == "settings:back")
@@ -854,7 +854,7 @@ async def on_settings_back(call: CallbackQuery) -> None:
             actual_size = input_path.stat().st_size
             await call.message.edit_text(
                 f"✅ Видео загружено ({actual_size // 1024 // 1024} МБ).\n\nВыбери действие:",
-                reply_markup=ACTION_MENU,
+                reply_markup=mode_input_menu("prepare"),
             )
             await call.answer()
             return
@@ -946,9 +946,9 @@ async def on_banner_upload_request(call: CallbackQuery) -> None:
     user_id = call.from_user.id if call.from_user else 0
     _awaiting_banner.add(user_id)
     await call.message.edit_text(
-        "📎 Пришли PNG-файл с плашкой.\n\n"
-        "Важно: отправь его как <b>ФАЙЛ</b>, а не как фото —\n"
-        "так сохранится прозрачность.",
+        "📎 Пришли плашку: <b>PNG, WebP, GIF или короткий MP4</b>.\n\n"
+        "Важно: отправь её как <b>ФАЙЛ</b>, а не как фото —\n"
+        "так сохранится качество и прозрачность.",
         parse_mode="HTML",
         reply_markup=BANNER_CANCEL_MENU,
     )
@@ -996,6 +996,51 @@ async def on_banner_preview(call: CallbackQuery) -> None:
         await call.answer("Не удалось загрузить плашку", show_alert=True)
         return
     buf.seek(0)
+
+    # PART 19: preview as a real 3s clip (same renderer as production) so
+    # static AND animated overlays preview identically. Falls back to a
+    # plain photo preview if rendering fails.
+    try:
+        tmp_dir = _USER_ASSETS_DIR / f"preview_{user_id}"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        ext = {"png": "png", "webp": "webp", "gif": "gif", "mp4": "mp4"}.get(
+            getattr(s, "overlay_type", None) or "png", "png")
+        asset_path = tmp_dir / f"banner.{ext}"
+        asset_path.write_bytes(buf.getvalue())
+
+        # Tiny color clip as the background canvas.
+        import asyncio as _asyncio
+        base = tmp_dir / "base.mp4"
+        from app.services.media.ffmpeg import MediaService as _MS
+        ms = _MS()
+        cmd = [
+            ms._ffmpeg_path, "-y", "-v", "error",
+            "-f", "lavfi", "-i", f"color=c=#202028:s=540x960:r=30:d=3",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(base),
+        ]
+        proc = await _asyncio.create_subprocess_exec(*cmd)
+        await _asyncio.wait_for(proc.communicate(), timeout=60)
+
+        preview = tmp_dir / "preview.mp4"
+        overlay_type = getattr(s, "overlay_type", None) or "png"
+        await ms.burn_cta(
+            base, asset_path, preview,
+            position=s.cta_position,
+            margin=0,
+            start_seconds=0.0,
+            end_seconds=3.0,
+            size_preset=getattr(s, "cta_size", None) or "medium",
+            overlay_type=overlay_type if overlay_type in ("gif", "mp4") else "png",
+            timeout_seconds=60.0,
+        )
+        video = types.FSInputFile(preview)
+        await call.message.answer_video(
+            video, caption="Так плашка будет выглядеть на видео (3 сек).",
+        )
+        return
+    except Exception as e:
+        logger.warning("banner_preview_render_failed", error=str(e)[:200])
+
     photo = types.BufferedInputFile(buf.getvalue(), filename="banner.png")
     await call.message.answer_photo(photo, caption="Так выглядит твоя плашка.")
     await call.answer()
@@ -1007,8 +1052,8 @@ async def on_toggle_cta(call: CallbackQuery) -> None:
     async with db_manager.session() as session:
         s = await UserSettingsRepository(session).update_fields(user_id)
         s.cta_enabled = not s.cta_enabled
-    await _show_settings(call.message, user_id)
-    await call.answer(f"CTA {'включён' if s.cta_enabled else 'выключен'}")
+    await on_fine_menu(call)
+    await _safe_answer(call, f"Плашка {'включена' if s.cta_enabled else 'выключена'}")
 
 
 @router.callback_query(F.data == "settings:toggle_subs")
@@ -1017,19 +1062,19 @@ async def on_toggle_subs(call: CallbackQuery) -> None:
     async with db_manager.session() as session:
         s = await UserSettingsRepository(session).update_fields(user_id)
         s.subtitles_enabled = not s.subtitles_enabled
-    await _show_settings(call.message, user_id)
-    await call.answer(f"Субтитры {'включены' if s.subtitles_enabled else 'выключены'}")
+    await on_fine_menu(call)
+    await _safe_answer(call, f"Субтитры {'включены' if s.subtitles_enabled else 'выключены'}")
 
 
 @router.callback_query(F.data == "settings:position")
 async def on_settings_position(call: CallbackQuery) -> None:
-    await call.message.edit_text("📍 Выбери позицию CTA:", reply_markup=POSITION_MENU)
+    await call.message.edit_text("📍 Положение плашки:", reply_markup=POSITION_MENU)
     await call.answer()
 
 
 @router.callback_query(F.data == "settings:timing")
 async def on_settings_timing(call: CallbackQuery) -> None:
-    await call.message.edit_text("⏱ Когда показывать CTA?", reply_markup=TIMING_MENU)
+    await call.message.edit_text("⏱ Когда показывать плашку?", reply_markup=TIMING_MENU)
     await call.answer()
 
 
@@ -1044,20 +1089,129 @@ def _resolve_title_text(s) -> str:
     return t.text if t else ""
 
 
-@router.callback_query(F.data == "style:menu")
-async def on_style_menu(call: CallbackQuery) -> None:
+@router.callback_query(F.data == "appearance:menu")
+async def on_appearance_menu(call: CallbackQuery) -> None:
+    """🎨 Оформление — summary + presets + плашка (PART 15)."""
     user_id = call.from_user.id if call.from_user else 0
     async with db_manager.session() as session:
         s = await UserSettingsRepository(session).get_or_create(user_id)
+    bg = BACKGROUNDS.get(getattr(s, "background_id", "blur"))
+    title = TITLES.get(getattr(s, "title_id", "none") or "none")
+    style_label = _STYLE_LABELS.get(getattr(s, "style_id", None) or "", "Свой")
+    has_banner = bool(s.cta_telegram_file_id)
+    text = (
+        "🎨 <b>Оформление</b>\n\n"
+        f"Стиль: {style_label}\n"
+        f"Фон: {bg.label if bg else getattr(s, 'background_id', 'blur')}\n"
+        f"Плашка: {'✅' if has_banner else 'нет'}\n"
+        f"Заголовок: {title.label if title else 'без текста'}\n"
+        "Вставка: нет"
+    )
     await call.message.edit_text(
-        "🎨 <b>Стиль оформления</b>\n\nФон + заголовок + бренд-уголок.",
-        parse_mode="HTML",
-        reply_markup=style_menu(
-            getattr(s, "background_id", "blur"),
-            getattr(s, "title_id", "none"),
+        text, parse_mode="HTML",
+        reply_markup=appearance_menu(style_label, has_banner),
+    )
+    await call.answer()
+
+
+_STYLE_LABELS = {"clean": "Чистый", "meme": "Мем", "brand": "Бренд", "custom": "Свой"}
+
+_STYLE_PRESETS = {
+    "clean": dict(background_id="blur", title_id="none", brand_corner=False, cta_size="small"),
+    "meme": dict(background_id="dark", title_id="look", brand_corner=False, cta_size="large"),
+    "brand": dict(background_id="accent", title_id="none", brand_corner=True, cta_size="medium"),
+}
+
+
+@router.callback_query(F.data == "style:pick")
+async def on_style_pick(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    async with db_manager.session() as session:
+        s = await UserSettingsRepository(session).get_or_create(user_id)
+    current = _STYLE_LABELS.get(getattr(s, "style_id", None) or "", "Свой")
+    await call.message.edit_text(
+        "🎭 Выбери стиль:",
+        reply_markup=style_pick_menu(current),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("style_set:"))
+async def on_style_set(call: CallbackQuery) -> None:
+    """Apply a style preset to DB (PART 16)."""
+    pid = call.data.split(":", 1)[1]
+    user_id = call.from_user.id if call.from_user else 0
+    if pid not in _STYLE_LABELS:
+        await call.answer("Неизвестный стиль")
+        return
+    async with db_manager.session() as session:
+        if pid in _STYLE_PRESETS:
+            await UserSettingsRepository(session).update_fields(
+                user_id, style_id=pid, **_STYLE_PRESETS[pid],
+            )
+            label = _STYLE_LABELS[pid]
+        else:
+            # «Свой» — keep current fine settings, just mark as custom.
+            await UserSettingsRepository(session).update_fields(user_id, style_id="custom")
+            label = "Свой"
+    await call.answer(f"Стиль: {label}")
+    await on_appearance_menu(call)
+
+
+@router.callback_query(F.data == "fine:menu")
+async def on_fine_menu(call: CallbackQuery) -> None:
+    """⚙️ Тонкая настройка — advanced screen (PART 17)."""
+    user_id = call.from_user.id if call.from_user else 0
+    async with db_manager.session() as session:
+        s = await UserSettingsRepository(session).get_or_create(user_id)
+    bg = BACKGROUNDS.get(getattr(s, "background_id", "blur"))
+    ti = TITLES.get(getattr(s, "title_id", "none") or "none")
+    text = (
+        "⚙️ <b>Тонкая настройка</b>\n\n"
+        f"Фон: {bg.label if bg else '—'}\n"
+        f"Заголовок: {ti.label if ti else '—'}\n"
+        f"Бренд-уголок: {'ВКЛ' if s.brand_corner else 'ВЫКЛ'}\n"
+        f"Плашка: {'ВКЛ' if s.cta_enabled else 'ВЫКЛ'}\n"
+        f"Субтитры: {'ВКЛ' if s.subtitles_enabled else 'ВЫКЛ'}"
+    )
+    await call.message.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=fine_menu(
+            bg.label if bg else "—",
+            ti.label if ti else "—",
             bool(getattr(s, "brand_corner", False)),
+            bool(s.cta_enabled),
         ),
     )
+    await call.answer()
+
+
+@router.callback_query(F.data == "more:menu")
+async def on_more_menu(call: CallbackQuery) -> None:
+    """••• Ещё — advanced options for the pending video (PART 14)."""
+    user_id = call.from_user.id if call.from_user else 0
+    if user_id not in _pending_jobs:
+        await call.answer("Сначала пришли видео", show_alert=True)
+        return
+    await call.message.edit_text(
+        "••• <b>Ещё</b>\n\nДополнительные варианты для этого видео:",
+        parse_mode="HTML",
+        reply_markup=MORE_MENU,
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "more:back")
+async def on_more_back(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    pending = _pending_jobs.get(user_id)
+    if pending is not None and Path(pending.input_path).exists():
+        await call.message.edit_text(
+            "✅ Видео загружено.\n\nВыбери действие:",
+            reply_markup=mode_input_menu("prepare"),
+        )
+    else:
+        await call.message.edit_text(HOME_TEXT, parse_mode="HTML", reply_markup=HOME_MENU)
     await call.answer()
 
 
@@ -1094,7 +1248,7 @@ async def on_style_brand_toggle(call: CallbackQuery) -> None:
         new_val = not bool(s.brand_corner)
         await repo.update_fields(user_id, brand_corner=new_val)
     await call.answer(f"Бренд-уголок {'включён' if new_val else 'выключен'}")
-    await on_style_menu(call)
+    await on_fine_menu(call)
 
 
 @router.callback_query(F.data.startswith("style_bg:"))
@@ -1108,7 +1262,7 @@ async def on_set_background(call: CallbackQuery) -> None:
     async with db_manager.session() as session:
         await UserSettingsRepository(session).update_fields(user_id, background_id=bg_id)
     await call.answer(f"Фон: {BACKGROUNDS[bg_id].label}")
-    await on_style_menu(call)
+    await on_fine_menu(call)
 
 
 @router.callback_query(F.data.startswith("style_title:"))
@@ -1122,7 +1276,7 @@ async def on_set_title(call: CallbackQuery) -> None:
     async with db_manager.session() as session:
         await UserSettingsRepository(session).update_fields(user_id, title_id=title_id)
     await call.answer(f"Заголовок: {TITLES[title_id].label}")
-    await on_style_menu(call)
+    await on_fine_menu(call)
 
 
 @router.callback_query(F.data == "settings:size")
@@ -1150,14 +1304,8 @@ async def on_set_size(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "settings:upload_cta")
 async def on_settings_upload_cta(call: CallbackQuery) -> None:
-    await call.message.edit_text(
-        "📎 Отправь мне свой баннер (PNG с прозрачностью).\n\n"
-        "Я сохраню его и буду использовать при подготовке видео.\n\n"
-        "/cancel — отмена"
-    )
-    await call.answer()
-    # Mark user as waiting for banner upload
-    _awaiting_banner.add(call.from_user.id if call.from_user else 0)
+    # Legacy alias — same flow as banner:upload (PART 20 wording).
+    await on_banner_upload_request(call)
 
 
 _awaiting_banner: set[int] = set()
@@ -1214,8 +1362,8 @@ async def on_set_timing(call: CallbackQuery) -> None:
 @router.callback_query(F.data == "preview:save")
 async def on_preview_save(call: CallbackQuery) -> None:
     user_id = call.from_user.id if call.from_user else 0
-    await _show_settings(call.message, user_id)
-    await call.answer("✅ Сохранено")
+    await on_fine_menu(call)
+    await _safe_answer(call, "✅ Сохранено")
 
 
 # ---------------------------------------------------------------------------
@@ -1344,7 +1492,7 @@ async def on_banner_text_while_waiting(message: types.Message) -> None:
     user_id = message.from_user.id if message.from_user else 0
     if user_id in _awaiting_banner:
         await message.answer(
-            "📎 Жду PNG-файл.",
+            "📎 Жду файл плашки: PNG, WebP, GIF или короткий MP4.",
             reply_markup=BANNER_CANCEL_MENU,
         )
 
@@ -1367,33 +1515,13 @@ def _pick_attachment(message: types.Message):
     return max(candidates, key=lambda a: getattr(a, "file_size", 0) or 0)
 
 
-async def _show_settings(message: types.Message, user_id: int) -> None:
-    """Render the Settings menu based on current DB state."""
-    async with db_manager.session() as session:
-        s = await UserSettingsRepository(session).get_or_create(user_id)
-
-    pos = CTA_POSITIONS.get(s.cta_position, s.cta_position)
-    size = CTA_SIZES.get(getattr(s, "cta_size", None) or "medium", "Средняя (~33%)")
-    timing = (
-        f"Весь ролик" if s.cta_mode == "full"
-        else f"Последние {s.cta_duration_seconds:g} сек" if s.cta_mode == "end"
-        else f"Первые {s.cta_duration_seconds:g} сек" if s.cta_mode == "start"
-        else f"С {s.cta_start_seconds:g}с ({s.cta_duration_seconds:g}с)"
-    )
-    has_banner = bool(s.cta_telegram_file_id or s.cta_asset_path)
-    banner = "✅ Загружена" if has_banner else "❌ Не загружена"
-
-    text = (
-        f"⚙️ <b>Настройки</b>\n\n"
-        f"Плашка: {'✅ ВКЛ' if s.cta_enabled else '❌ ВЫКЛ'}\n"
-        f"Файл плашки: {banner}\n"
-        f"Позиция: {pos}\n"
-        f"Размер: {size}\n"
-        f"Время: {timing}\n"
-        f"Субтитры: {'✅ ВКЛ' if s.subtitles_enabled else '❌ ВЫКЛ'}\n\n"
-        f"Формат вывода: 9:16 ({get_settings().output_width}×{get_settings().output_height})"
-    )
-    await _safe_edit_text(message, text, reply_markup=SETTINGS_MENU, parse_mode="HTML")
+async def _safe_answer(call: CallbackQuery, text: str | None = None,
+                       show_alert: bool = False) -> None:
+    """Answer a callback, ignoring expired-query errors."""
+    try:
+        await call.answer(text, show_alert=show_alert)
+    except Exception as e:
+        logger.warning("callback_answer_failed", error=str(e)[:120])
 
 
 async def _safe_edit_text(

@@ -1,110 +1,133 @@
-"""Inline keyboards for the Quick Prep UX.
+"""Inline keyboards — simplified UX (PART 12-22).
 
-Two main menus:
-- Initial action menu after video receipt (Quick Prep / Settings / Analyze)
-- Settings menu (CTA on/off, position, timing, subtitle on/off, change banner)
+Progressive disclosure:
+- HOME: only «Сделать ролик» / «Нарезать длинное видео» / «Оформление»
+- «Сделать 3 варианта» lives in ••• Ещё (advanced short-video option)
+- ALL styling lives in 🎨 Оформление (summary + presets + плашка +
+  тонкая настройка). No duplicated CTA controls anywhere.
+- Every submenu has ⬅️ Назад; sections have 🏠 Главное меню.
 """
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.services.overlays.templates import BACKGROUNDS, TITLES
 
 
-# Action menu after the user sends a video
-ACTION_MENU = InlineKeyboardMarkup(inline_keyboard=[
-    [
-        InlineKeyboardButton(
-            text="🚀 Подготовить к публикации",
-            callback_data="action:quick_prep",
-        ),
-    ],
-    [
-        InlineKeyboardButton(
-            text="✂️ Найти лучшие моменты",
-            callback_data="action:analyze_long",
-        ),
-    ],
-    [
-        InlineKeyboardButton(
-            text="⚙️ Настройки",
-            callback_data="action:settings",
-        ),
-    ],
-])
-
-SHORT_ACTION_MENU = InlineKeyboardMarkup(inline_keyboard=[
-    [
-        InlineKeyboardButton(
-            text="🚀 Подготовить к публикации",
-            callback_data="action:quick_prep",
-        ),
-    ],
-    [
-        InlineKeyboardButton(
-            text="⚙️ Настройки",
-            callback_data="action:settings",
-        ),
-    ],
-])
-
 # ---------------------------------------------------------------------------
-# HOME screen (audit: result-named modes, banner is its own section)
+# HOME — maximum simplicity (PART 13)
 # ---------------------------------------------------------------------------
 
 HOME_MENU = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="🚀 Подготовить к публикации", callback_data="mode:prepare")],
-    [InlineKeyboardButton(text="✨ Сделать 3 версии", callback_data="mode:versions")],
-    [InlineKeyboardButton(text="✂️ Найти лучшие моменты", callback_data="mode:moments")],
-    [InlineKeyboardButton(text="🖼 Плашка", callback_data="banner:menu")],
-    [InlineKeyboardButton(text="⚙️ Настройки", callback_data="action:settings")],
+    [InlineKeyboardButton(text="🎬 Сделать ролик", callback_data="mode:prepare")],
+    [InlineKeyboardButton(text="✂️ Нарезать длинное видео", callback_data="mode:moments")],
+    [InlineKeyboardButton(text="🎨 Оформление", callback_data="appearance:menu")],
 ])
 
-HOME_BACK_MENU = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
-])
 
 def mode_input_menu(mode: str) -> InlineKeyboardMarkup:
-    """Menu shown after video input in the chosen mode (audit #3-5)."""
-    if mode == "prepare":
-        rows = [[InlineKeyboardButton(text="🚀 Подготовить", callback_data="action:quick_prep")]]
-    elif mode == "versions":
+    """Menu after video input in the chosen mode."""
+    if mode == "versions":
         rows = [[InlineKeyboardButton(text="✨ Сделать 3 версии", callback_data="action:versions")]]
-    else:  # moments
-        rows = [[InlineKeyboardButton(text="✂️ Найти лучшие моменты", callback_data="action:analyze_long")]]
-    rows.append([InlineKeyboardButton(text="🖼 Плашка", callback_data="banner:menu")])
-    rows.append([InlineKeyboardButton(text="⚙️ Настройки", callback_data="action:settings")])
-    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")])
+    else:  # prepare / moments
+        rows = [[InlineKeyboardButton(
+            text="✨ Сделать" if mode == "prepare" else "✂️ Найти моменты",
+            callback_data="action:quick_prep" if mode == "prepare" else "action:analyze_long",
+        )]]
+    rows.append([InlineKeyboardButton(text="🎨 Оформление", callback_data="appearance:menu")])
+    rows.append([InlineKeyboardButton(text="••• Ещё", callback_data="more:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+# ••• Ещё — advanced options for a pending short video (PART 14)
+MORE_MENU = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🎞 Сделать 3 варианта", callback_data="action:versions")],
+    [InlineKeyboardButton(text="💬 Субтитры", callback_data="settings:toggle_subs")],
+    [InlineKeyboardButton(text="⚙️ Дополнительно", callback_data="fine:menu")],
+    [InlineKeyboardButton(text="⬅️ Назад", callback_data="more:back")],
+])
+
+
+# ---------------------------------------------------------------------------
+# 🎨 Оформление — one style section with summary (PART 15/16)
+# ---------------------------------------------------------------------------
+
+def appearance_menu(style_id: str, banner: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🎭 Стиль: {style_id}", callback_data="style:pick")],
+        [InlineKeyboardButton(text=f"🖼 Плашка: {'✅' if banner else 'нет'}", callback_data="banner:menu")],
+        [InlineKeyboardButton(text="⚙️ Тонкая настройка", callback_data="fine:menu")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
+    ])
+
+
+def style_pick_menu(current: str) -> InlineKeyboardMarkup:
+    """Style presets (PART 16)."""
+    presets = [
+        ("clean", "⚪️ Чистый"),
+        ("meme", "😎 Мем"),
+        ("brand", "🏷 Бренд"),
+        ("custom", "🔧 Свой"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=("✅ " if pid == current else "") + label,
+            callback_data=f"style_set:{pid}",
+        )] for pid, label in presets
+    ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="appearance:menu")]])
+
+
+# ⚙️ Тонкая настройка — advanced screen (PART 17)
+def fine_menu(background_id: str, title_id: str, brand: bool,
+              cta_enabled: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🎨 Фон: {background_id}", callback_data="style:bg")],
+        [InlineKeyboardButton(text=f"🏷 Заголовок: {title_id}", callback_data="style:title")],
+        [InlineKeyboardButton(text=f"🏷 Бренд-уголок: {'ВКЛ' if brand else 'ВЫКЛ'}", callback_data="style:brand")],
+        [InlineKeyboardButton(text=f"🔘 Плашка: {'ВКЛ' if cta_enabled else 'ВЫКЛ'}", callback_data="settings:toggle_cta")],
+        [InlineKeyboardButton(text="🖼 Плашка (размер/позиция/время)", callback_data="banner:menu")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="appearance:menu")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
+    ])
+
+
+# ---------------------------------------------------------------------------
+# 🖼 Плашка — own section (PART 18: no duplicates elsewhere)
+# ---------------------------------------------------------------------------
+
 def banner_menu(exists: bool) -> InlineKeyboardMarkup:
-    """Banner section: status screen when a banner exists, else empty state."""
     if exists:
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📎 Загрузить новую", callback_data="banner:upload")],
+            [InlineKeyboardButton(text="👁 Предпросмотр", callback_data="banner:preview")],
             [InlineKeyboardButton(text="📍 Положение", callback_data="settings:position")],
             [InlineKeyboardButton(text="📏 Размер", callback_data="settings:size")],
             [InlineKeyboardButton(text="⏱ Время показа", callback_data="settings:timing")],
-            [InlineKeyboardButton(text="👁 Предпросмотр", callback_data="banner:preview")],
             [InlineKeyboardButton(text="🗑 Удалить", callback_data="banner:delete")],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="appearance:menu")],
         ])
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📎 Загрузить PNG", callback_data="banner:upload")],
-        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
+        [InlineKeyboardButton(text="📎 Загрузить плашку", callback_data="banner:upload")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="appearance:menu")],
     ])
+
 
 BANNER_CANCEL_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="❌ Отмена", callback_data="banner:cancel")],
 ])
 
+
+# ---------------------------------------------------------------------------
+# Result screens
+# ---------------------------------------------------------------------------
+
 RESULT_MENU_PREPARE = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="🚀 Ещё одно видео", callback_data="mode:prepare")],
-    [InlineKeyboardButton(text="🖼 Изменить плашку", callback_data="banner:menu")],
+    [InlineKeyboardButton(text="🎬 Ещё одно видео", callback_data="mode:prepare")],
+    [InlineKeyboardButton(text="🎨 Оформление", callback_data="appearance:menu")],
     [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
 ])
 
 RESULT_MENU_VERSIONS = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="✨ Сделать ещё варианты", callback_data="mode:versions")],
-    [InlineKeyboardButton(text="🖼 Изменить плашку", callback_data="banner:menu")],
+    [InlineKeyboardButton(text="🎞 Ещё варианты", callback_data="action:versions")],
+    [InlineKeyboardButton(text="🎨 Оформление", callback_data="appearance:menu")],
     [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
 ])
 
@@ -114,39 +137,39 @@ RESULT_MENU_MOMENTS = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 
-# Settings menu
-SETTINGS_MENU = InlineKeyboardMarkup(inline_keyboard=[
+# ---------------------------------------------------------------------------
+# Fine-setting pickers (back → fine:menu)
+# ---------------------------------------------------------------------------
+
+def background_menu(current: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=("✅ " if bg.id == current else "") + bg.label,
+            callback_data=f"style_bg:{bg.id}",
+        )] for bg in BACKGROUNDS.values()
+    ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="fine:menu")]])
+
+
+def title_menu(current: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=("✅ " if t.id == current else "") + t.label,
+            callback_data=f"style_title:{t.id}",
+        )] for t in TITLES.values()
+    ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="fine:menu")]])
+
+
+SIZE_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [
-        InlineKeyboardButton(text="🔘 CTA вкл/выкл", callback_data="settings:toggle_cta"),
+        InlineKeyboardButton(text="🔷 Маленькая (~28%)", callback_data="cta_size:small"),
+        InlineKeyboardButton(text="🔶 Средняя (~33%)", callback_data="cta_size:medium"),
     ],
     [
-        InlineKeyboardButton(text="📍 Позиция", callback_data="settings:position"),
+        InlineKeyboardButton(text="🔸 Большая (~38%)", callback_data="cta_size:large"),
     ],
-    [
-        InlineKeyboardButton(text="📏 Размер", callback_data="settings:size"),
-    ],
-    [
-        InlineKeyboardButton(text="⏱ Когда показывать", callback_data="settings:timing"),
-    ],
-    [
-        InlineKeyboardButton(text="💬 Субтитры вкл/выкл", callback_data="settings:toggle_subs"),
-    ],
-    [
-        InlineKeyboardButton(text="🖼 Плашка", callback_data="banner:menu"),
-    ],
-    [
-        InlineKeyboardButton(text="🎨 Фон и заголовок", callback_data="style:menu"),
-    ],
-    [
-        InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open"),
-    ],
-    [
-        InlineKeyboardButton(text="🔙 Назад", callback_data="settings:back"),
-    ],
+    [InlineKeyboardButton(text="⬅️ Назад", callback_data="banner:menu")],
 ])
 
-
-# CTA position picker
 POSITION_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [
         InlineKeyboardButton(text="↖️ Сверху слева", callback_data="cta_pos:top_left"),
@@ -158,101 +181,33 @@ POSITION_MENU = InlineKeyboardMarkup(inline_keyboard=[
         InlineKeyboardButton(text="⬇️ Снизу", callback_data="cta_pos:bottom"),
         InlineKeyboardButton(text="↘️ Снизу справа", callback_data="cta_pos:bottom_right"),
     ],
-    [
-        InlineKeyboardButton(text="🔙 Назад", callback_data="settings:back"),
-    ],
+    [InlineKeyboardButton(text="⬅️ Назад", callback_data="banner:menu")],
 ])
 
-
-def style_menu(background_id: str, title_id: str, brand_corner: bool) -> InlineKeyboardMarkup:
-    """Этап 4: style constructor (background / title / brand corner)."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"🎨 Фон: {background_id}",
-            callback_data="style:bg",
-        )],
-        [InlineKeyboardButton(
-            text=f"🏷 Заголовок: {title_id}",
-            callback_data="style:title",
-        )],
-        [InlineKeyboardButton(
-            text=f"🏷 Бренд-уголок: {'ВКЛ' if brand_corner else 'ВЫКЛ'}",
-            callback_data="style:brand",
-        )],
-        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
-    ])
-
-
-def background_menu(current: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=("✅ " if bg.id == current else "") + bg.label,
-            callback_data=f"style_bg:{bg.id}",
-        )] for bg in BACKGROUNDS.values()
-    ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="style:menu")]])
-
-
-def title_menu(current: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=("✅ " if t.id == current else "") + t.label,
-            callback_data=f"style_title:{t.id}",
-        )] for t in TITLES.values()
-    ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="style:menu")]])
-
-
-# CTA size picker (width fraction of the frame, height capped 15%)
-SIZE_MENU = InlineKeyboardMarkup(inline_keyboard=[
-    [
-        InlineKeyboardButton(text="🔷 Маленькая (~28%)", callback_data="cta_size:small"),
-        InlineKeyboardButton(text="🔶 Средняя (~33%)", callback_data="cta_size:medium"),
-    ],
-    [
-        InlineKeyboardButton(text="🔸 Большая (~38%)", callback_data="cta_size:large"),
-    ],
-    [
-        InlineKeyboardButton(text="🔙 Назад", callback_data="settings:back"),
-    ],
-])
-
-
-# CTA timing picker
 TIMING_MENU = InlineKeyboardMarkup(inline_keyboard=[
-    [
-        InlineKeyboardButton(text="🎬 Весь ролик", callback_data="cta_time:full"),
-    ],
+    [InlineKeyboardButton(text="🎬 Весь ролик", callback_data="cta_time:full")],
     [
         InlineKeyboardButton(text="▶️ Первые 3 сек", callback_data="cta_time:start_3"),
         InlineKeyboardButton(text="⏸ Последние 3 сек", callback_data="cta_time:end_3"),
     ],
-    [
-        InlineKeyboardButton(text="⏸ Последние 5 сек", callback_data="cta_time:end_5"),
-    ],
-    [
-        InlineKeyboardButton(text="🔙 Назад", callback_data="settings:back"),
-    ],
+    [InlineKeyboardButton(text="⏸ Последние 5 сек", callback_data="cta_time:end_5")],
+    [InlineKeyboardButton(text="⬅️ Назад", callback_data="banner:menu")],
 ])
 
 
 def preview_keyboard() -> InlineKeyboardMarkup:
-    """Shown after CTA preview generation."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Сохранить", callback_data="preview:save"),
-            InlineKeyboardButton(text="🔄 Изменить", callback_data="settings:position"),
-        ],
-        [
-            InlineKeyboardButton(text="🔙 Назад", callback_data="settings:back"),
-        ],
+        [InlineKeyboardButton(text="🔄 Изменить", callback_data="banner:menu")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="banner:menu")],
     ])
+
+
+# Legacy aliases (kept until all references migrate)
+ACTION_MENU = mode_input_menu("prepare")
 
 
 # Menu shown after URL download: original vs recut
 URL_ACTION_MENU = InlineKeyboardMarkup(inline_keyboard=[
-    [
-        InlineKeyboardButton(text="📥 Скачать оригинал", callback_data="url:original"),
-    ],
-    [
-        InlineKeyboardButton(text="🎬 Сделать Recut", callback_data="url:recut"),
-    ],
+    [InlineKeyboardButton(text="📥 Скачать оригинал", callback_data="url:original")],
+    [InlineKeyboardButton(text="🎬 Сделать Recut", callback_data="url:recut")],
 ])
