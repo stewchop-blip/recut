@@ -74,6 +74,7 @@ class QuickPrepPipeline:
         title_text: str = "",
         brand_corner: bool = False,
         audio_preset: str = "original",
+        transformation_preset: str = "custom",  # PART 23: clean / meme / brand / custom
     ) -> QuickPrepResult:
         media = self._media or get_media_service()
         probe = self._probe or get_probe_service()
@@ -123,6 +124,26 @@ class QuickPrepPipeline:
                 meta = await probe.probe(input_video)
             except Exception as e:
                 raise QuickPrepError(f"Re-probe after crop failed: {e}") from e
+
+        # 2b. TransformationPreset resolution (PART 23-24) — single settings object.
+        # Overrides per-style settings when using a built-in preset.
+        from app.services.overlays.presets import resolve_preset
+        preset_cfg = resolve_preset(transformation_preset)
+        if preset_cfg.name != "custom":
+            # Apply preset's visual/audio settings; keep user banner config
+            # (cta_size overrides only when preset specifies different size).
+            if preset_cfg.background_id != "blur" or preset_cfg.name in ("clean", "meme", "brand"):
+                background_id = preset_cfg.background_id
+            # Title: for meme/brand use preset title id; custom uses _resolve_title_text(s)
+            if preset_cfg.title_id != "none":
+                from app.services.overlays.templates import TITLES
+                title_text = TITLES.get(preset_cfg.title_id, TITLES.get("none")).text
+            else:
+                title_text = ""
+            brand_corner = preset_cfg.brand_corner
+            audio_preset = preset_cfg.audio_preset
+        # (cta_size remains from user DB settings unless preset explicitly
+        # overrides — kept at user value for simplicity.)
 
         # 3. Vertical format — decisions on EFFECTIVE DISPLAY GEOMETRY
         # (PART 5/6/7): coded × SAR, rotation applied. Never coded dims.

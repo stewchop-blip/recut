@@ -496,6 +496,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             title_text=_resolve_title_text(s),
             brand_corner=bool(getattr(s, "brand_corner", False)) if s else False,
             audio_preset=getattr(s, "audio_preset", "original") if s else "original",
+            transformation_preset=getattr(s, "style_id", "custom") if s else "custom",
         )
 
         await _edit_status(
