@@ -52,6 +52,10 @@ class VerticalRenderer:
         video_bitrate: str | None = None,
         audio_bitrate: str | None = None,
         blur_strength: int = 30,
+        *,
+        background_id: str = "blur",
+        title_text: str = "",
+        brand_corner: bool = False,
     ) -> None:
         s = get_settings()
         self._w = target_width or s.output_width
@@ -60,6 +64,11 @@ class VerticalRenderer:
         self._vbr = video_bitrate or s.output_video_bitrate
         self._abr = audio_bitrate or s.output_audio_bitrate
         self._blur = blur_strength
+        # PHASE F: user style travels with the renderer (same engine as
+        # QuickPrep — one layout, one aspect implementation everywhere).
+        self._background_id = background_id
+        self._title_text = title_text
+        self._brand_corner = brand_corner
 
     async def render(self, cut_job: CutJob, output_dir: Path) -> VerticalJob:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -89,6 +98,9 @@ class VerticalRenderer:
                     video_bitrate=self._vbr,
                     audio_bitrate=self._abr,
                     blur_strength=self._blur,
+                    background_id=self._background_id,
+                    title_text=self._title_text,
+                    brand_corner=self._brand_corner,
                 )
             except (RuntimeError, FileNotFoundError) as e:
                 logger.error(

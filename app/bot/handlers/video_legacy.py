@@ -21,6 +21,7 @@ from app.database.repositories import JobRepository, UserSettingsRepository
 from app.database.session import db_manager
 from app.pipeline.analyser import Analyser, AnalyserError
 from app.pipeline.clip_cutter import ClipCutter, ClipCutterError
+from app.services.overlays.templates import TITLES
 from app.pipeline.extractor import AudioExtractionError, AudioExtractor
 from app.pipeline.final_renderer import FinalClip, FinalJob, FinalRenderer
 from app.pipeline.transcriber import Transcriber, TranscriberError
@@ -96,52 +97,88 @@ async def run_long_pipeline(
             await edit_status(f"❌ Не удалось нарезать: {e}")
             return
 
-        # 6. Vertical render
+        # 6. Vertical render (PHASE F: user style from DB — same engine
+        # as QuickPrep).
         await edit_status("📱 Конвертирую в вертикальный…")
-        vertical_dir = job_dir / "vertical"
-        try:
-            vertical_job = await VerticalRenderer().render(cut_job, vertical_dir)
-        except VerticalRenderError as e:
-            await edit_status(f"❌ Не удалось сделать вертикаль: {e}")
-            return
-
-        # 7. Final render (subs + CTA + clean)
-        await edit_status("💬 Субтитры, CTA, чистый экспорт…")
+        user_style = dict(background_id="blur", title_text="", brand_corner=False)
+        cta_settings = dict(
+            cta_position="bottom", cta_mode="end",
+            cta_duration_seconds=4.0, cta_start_seconds=0.0,
+            cta_size_preset="medium", cta_overlay_type="png",
+            cta_enabled=False,
+        )
         cta_asset: Path | None = None
-        cta_enabled = False
-        cta_position = "bottom"
-        cta_mode = "end"
-        cta_duration_seconds = 4.0
-        cta_start_seconds = 0.0
         async with db_manager.session() as session:
             s = await UserSettingsRepository(session).get(user_id)
             if s is not None:
-                cta_enabled = s.cta_enabled
-                cta_position = s.cta_position
-                cta_mode = s.cta_mode
-                cta_duration_seconds = s.cta_duration_seconds
-                cta_start_seconds = s.cta_start_seconds
-                if s.cta_asset_path:
+                # Style for the vertical render (one engine everywhere).
+                from app.services.overlays.templates import BACKGROUNDS
+                user_style["background_id"] = (
+                    getattr(s, "background_id", None) or "blur")
+                # PHASE D: custom title text support
+                tid = getattr(s, "title_id", "none") or "none"
+                if tid == "custom":
+                    user_style["title_text"] = (getattr(s, "custom_title", "") or "").strip()[:100]
+                else:
+                    t = TITLES.get(tid)
+                    user_style["title_text"] = t.text if t else ""
+                user_style["brand_corner"] = bool(getattr(s, "brand_corner", False))
+                # CTA settings (explicit pass-through, no env dependency)
+                cta_settings.update(
+                    cta_position=s.cta_position,
+                    cta_mode=s.cta_mode,
+                    cta_duration_seconds=s.cta_duration_seconds,
+                    cta_start_seconds=s.cta_start_seconds,
+                    cta_size_preset=getattr(s, "cta_size", None) or "medium",
+                    cta_overlay_type=getattr(s, "overlay_type", None) or "png",
+                    cta_enabled=bool(s.cta_enabled),
+                )
+                # Resolve the user's banner (telegram_file_id first —
+                # Railway-safe; local path second).
+                if cta_settings["cta_enabled"] and s.cta_telegram_file_id:
+                    try:
+                        tg_file = await bot.get_file(s.cta_telegram_file_id)
+                        ot = cta_settings["cta_overlay_type"]
+                        ext = {"png": "png", "webp": "webp", "gif": "gif", "mp4": "mp4"}.get(ot := getattr(s, "overlay_type", None) or "png", "png")
+                        banner_path = job_dir / f"cta_user.{ext}"
+                        await bot.download_file(tg_file.file_path, destination=banner_path)
+                        cta_asset = banner_path
+                        cta_settings["cta_overlay_type"] = ot
+                        logger.info("long_cta_loaded_from_telegram_file_id", user_id=user_id)
+                    except Exception as e:
+                        logger.warning("long_cta_download_failed", error=str(e)[:200])
+                elif cta_settings["cta_enabled"] and s.cta_asset_path:
                     p = Path(s.cta_asset_path)
                     if p.exists():
                         cta_asset = p
 
+        vertical_dir = job_dir / "vertical"
+        try:
+            vertical_job = await VerticalRenderer(
+                background_id=user_style["background_id"],
+                title_text=user_style["title_text"],
+                brand_corner=user_style["brand_corner"],
+            ).render(cut_job, vertical_dir)
+        except VerticalRenderError as e:
+            await edit_status(f"❌ Не удалось сделать вертикаль: {e}")
+            return
+
+        # 7. Final render (subs + CTA + clean) — PHASE F explicit params.
+        await edit_status("💬 Субтитры, плашка, чистый экспорт…")
+
         final_dir = job_dir / "final"
         try:
-            # We pass CTA settings through env for the legacy path
-            from app.core.config import Settings as _S
-            # Override env-derived settings via an in-place settings snapshot
-            # by directly passing them to FinalRenderer's runtime. For
-            # simplicity, the legacy path uses the env-driven CTA when
-            # DB settings are absent (and ignores them when present
-            # via CTA_ASSET_PATH in the FinalRenderer's CTAService
-            # which already reads CTA_ASSET_PATH). Here we pass
-            # cta_asset via the FinalRenderer's render().
             final_job = await FinalRenderer().render(
                 vertical_clips=vertical_job.clips,
                 transcribed=transcribed,
                 output_dir=final_dir,
                 cta_configured_asset=str(cta_asset) if cta_asset else "",
+                cta_position=cta_settings["cta_position"],
+                cta_mode=cta_settings["cta_mode"],
+                cta_duration_seconds=cta_settings["cta_duration_seconds"],
+                cta_start_seconds=cta_settings["cta_start_seconds"],
+                cta_size_preset=cta_settings["cta_size_preset"],
+                cta_overlay_type=cta_settings["cta_overlay_type"],
             )
         except Exception as e:
             await edit_status(f"❌ Не удалось финализировать: {e}")

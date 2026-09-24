@@ -54,6 +54,14 @@ class FinalRenderer:
         transcribed: TranscribedJob,    # from Stage D
         output_dir: Path,
         cta_configured_asset: str,
+        *,
+        cta_position: str = "bottom",
+        cta_margin: int = 0,
+        cta_mode: str = "end",
+        cta_duration_seconds: float = 4.0,
+        cta_start_seconds: float = 0.0,
+        cta_size_preset: str = "medium",
+        cta_overlay_type: str = "png",
     ) -> FinalJob:
         output_dir.mkdir(parents=True, exist_ok=True)
         media = get_media_service()
@@ -79,6 +87,13 @@ class FinalRenderer:
                     subtitle_builder=subtitle_builder,
                     cta_configured_asset=cta_configured_asset,
                     media=media,
+                    cta_position=cta_position,
+                    cta_margin=cta_margin,
+                    cta_mode=cta_mode,
+                    cta_duration_seconds=cta_duration_seconds,
+                    cta_start_seconds=cta_start_seconds,
+                    cta_size_preset=cta_size_preset,
+                    cta_overlay_type=cta_overlay_type,
                 )
                 final_path, has_subs, has_cta = result
                 out.append(FinalClip(
@@ -119,6 +134,14 @@ class FinalRenderer:
         subtitle_builder: AssSubtitleBuilder,
         cta_configured_asset: str,
         media,
+        *,
+        cta_position: str = "bottom",
+        cta_margin: int = 0,
+        cta_mode: str = "end",
+        cta_duration_seconds: float = 4.0,
+        cta_start_seconds: float = 0.0,
+        cta_size_preset: str = "medium",
+        cta_overlay_type: str = "png",
     ) -> tuple[Path, bool, bool]:
         current = vertical_path
         has_subs = False
@@ -155,27 +178,35 @@ class FinalRenderer:
             except Exception as e:
                 logger.warning("burn_subtitles_failed", index=index, error=str(e)[:200])
 
-        # 3. CTA overlay (if enabled).
-        clip_duration = max(0.1, clip_end - clip_start)
-        cta_spec = cta_service.resolve(
-            clip_duration=clip_duration,
-            configured_asset=cta_configured_asset,
-            fallback_dir=output_dir,
-        )
-        if cta_spec is not None:
-            cta_path = output_dir / f"cta_{index:02d}.mp4"
-            try:
-                await media.burn_cta(
-                    current, cta_spec.asset_path, cta_path,
-                    position=cta_service._position,
-                    margin=cta_service._margin,
-                    start_seconds=cta_spec.start_seconds,
-                    end_seconds=cta_spec.end_seconds,
-                )
-                current = cta_path
-                has_cta = True
-            except Exception as e:
-                logger.warning("burn_cta_failed", index=index, error=str(e)[:200])
+        # 3. CTA overlay (PHASE F — explicit params, per-user DB settings).
+        if cta_configured_asset:
+            from app.services.overlays.cta import CTAService as _CS
+            spec = _CS()._make_spec(
+                clip_duration=max(0.1, clip_end - clip_start),
+                mode=cta_mode,
+                duration_seconds=cta_duration_seconds,
+                start_seconds=cta_start_seconds,
+                position=cta_position,
+                margin=cta_margin,
+                output_w=0, output_h=0,
+                asset=Path(cta_configured_asset),
+            ) if cta_configured_asset else None
+            if spec is not None:
+                cta_path = output_dir / f"cta_{index:02d}.mp4"
+                try:
+                    await media.burn_cta(
+                        current, spec.asset_path, cta_path,
+                        position=cta_position,
+                        margin=cta_margin,
+                        start_seconds=spec.start_seconds,
+                        end_seconds=spec.end_seconds,
+                        size_preset=cta_size_preset,
+                        overlay_type=cta_overlay_type,
+                    )
+                    current = cta_path
+                    has_cta = True
+                except Exception as e:
+                    logger.warning("burn_cta_failed", index=index, error=str(e)[:200])
 
         # 4. Final clean export (loudnorm + strip metadata).
         final_path = output_dir / f"final_{index:02d}.mp4"
