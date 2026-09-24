@@ -259,7 +259,18 @@ class ThreeVersionsPipeline:
             )
             if not is_916:
                 vertical = job_dir / f"version_{plan.name}_vertical.mp4"
-                await media.make_vertical(current, vertical)
+                # PART 25: each version uses a different visual preset.
+                preset_style = {
+                    "A": {"background_id": "blur",  "title_text": "",          "brand_corner": False},
+                    "B": {"background_id": "dark",  "title_text": "Вот это момент", "brand_corner": False},
+                    "C": {"background_id": "accent","title_text": "",          "brand_corner": True},
+                }.get(plan.name, {"background_id":"blur","title_text":"","brand_corner":False})
+                await media.make_vertical(
+                    current, vertical,
+                    background_id=preset_style["background_id"],
+                    title_text=preset_style["title_text"],
+                    brand_corner=preset_style["brand_corner"],
+                )
                 current = vertical
 
             # CTA on the LAST seconds (shared burn_cta).
