@@ -270,6 +270,25 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
     user_id: int = message.from_user.id if message.from_user else 0
     if not user_id:
         return
+    # 1. Active input states take priority
+    if user_id in _awaiting_title:
+        _awaiting_title.discard(user_id)
+        text_input = (message.text or "").strip()
+        if not text_input:
+            await message.answer("❌ Пустой текст. Попробуй ещё раз.")
+            return
+        async with db_manager.session() as session:
+            await UserSettingsRepository(session).update_fields(
+                user_id, title_id="custom", custom_title=text_input[:100],
+            )
+        await message.answer(f"✅ Заголовок сохранён: «{text_input[:100]}»")
+        return
+    if user_id in _awaiting_banner:
+        await message.answer(
+            "📎 Жду файл плашки: PNG, JPG, WebP, GIF или короткий MP4.",
+            reply_markup=BANNER_CANCEL_MENU,
+        )
+        return
     text = (message.text or "").strip()
     if not text.lower().startswith("https://"):
         return
@@ -1546,32 +1565,6 @@ async def on_banner_photo_wrong_input(message: types.Message) -> None:
             "Пришли PNG через:\n"
             "Скрепка → Файл\n\n"
             "Это нужно, чтобы сохранить качество и прозрачность.",
-            reply_markup=BANNER_CANCEL_MENU,
-        )
-
-
-@router.message(F.text)
-async def on_banner_text_while_waiting(message: types.Message) -> None:
-    """Text while waiting for a banner file OR a custom title (PHASE D)."""
-    user_id = message.from_user.id if message.from_user else 0
-    if user_id in _awaiting_title:
-        _awaiting_title.discard(user_id)
-        text = (message.text or "").strip()
-        if not text:
-            await message.answer("❌ Пустой текст. Попробуй ещё раз.")
-            return
-        async with db_manager.session() as session:
-            await UserSettingsRepository(session).update_fields(
-                user_id, title_id="custom", custom_title=text[:100],
-            )
-        await message.answer(
-            f"✅ Заголовок сохранён: «{text[:100]}»",
-            reply_markup=None,
-        )
-        return
-    if user_id in _awaiting_banner:
-        await message.answer(
-            "📎 Жду файл плашки: PNG, WebP, GIF или короткий MP4.",
             reply_markup=BANNER_CANCEL_MENU,
         )
 
