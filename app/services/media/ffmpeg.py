@@ -322,6 +322,7 @@ class MediaService:
         title_text: str = "",
         brand_corner: bool = False,
         decoration_id: str = "",
+        audio_preset: str = "original",
         timeout_seconds: float = 600.0,
     ) -> Path:
         """Convert source video to 9:16 vertical with a styled background.
@@ -366,13 +367,63 @@ class MediaService:
                 logger.warning("black_bars_crop_failed_keep_original", error=str(e)[:200])
                 source = input_path
 
-        # Filter graph (PART 2/3 — geometry + PHASE A backgrounds):
-        # scale uses reset_sar=1 so the contain/cover math runs on DISPLAY
-        # aspect ratio (coded × SAR), and force_divisible_by=2 for
-        # H.264-safe even dims. NO separate setsar afterwards.
+        # PART 2/4 — TemplateCompositor is the ONLY layout engine.
+        # Python computes the foreground box from the DISPLAY aspect ratio
+        # (probe → geometry.fit_inside); FFmpeg just executes
+        # scale=FG_W:FG_H + overlay=x:y. No force_original_aspect_ratio,
+        # no reset_sar on the foreground — Python decides the pixels.
+        from app.services.media.geometry import get_display_geometry
+        from app.services.overlays.compositor import TemplateSpec
+        probe_svc = None
+        try:
+            from app.services.media.probe import get_probe_service
+            probe_svc = get_probe_service()
+            src_meta = await probe_svc.probe(source)
+            src_geo = get_display_geometry(src_meta)
+            fg_ratio = (src_geo.effective_width_after_rotation /
+                        max(src_geo.effective_height_after_rotation, 1))
+        except Exception as e:
+            logger.warning("make_vertical_probe_failed_default_contain", error=str(e)[:200])
+            # Square-pixel fallback: coded dims define the ratio.
+            src_geo = None
+            fg_ratio = 16 / 9  # resolved below via ffprobe fallback
+
+        if src_geo is None:
+            # Last resort: square-pixel coded dims define the ratio
+            # (better a slightly wrong contain than any stretch).
+            ffprobe = str(Path(self._ffmpeg_path).with_name("ffprobe.exe"))
+            if not Path(ffprobe).exists():
+                ffprobe = "ffprobe"
+            r = await asyncio.create_subprocess_exec(
+                ffprobe, "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height", "-of", "csv=p=0",
+                str(source), stdout=asyncio.subprocess.PIPE,
+            )
+            out, _ = await r.communicate()
+            try:
+                cw, ch = (int(x) for x in out.decode().strip().split(",")[:2])
+                fg_ratio = cw / max(ch, 1)
+            except Exception:
+                fg_ratio = target_width / target_height
+        fg = TemplateSpec(target_width, target_height).fit_video(fg_ratio)
+
+        logger.info(
+            "make_vertical_layout",
+            source_coded=f"{src_geo.coded_width}x{src_geo.coded_height}" if src_geo else "?",
+            source_sar=src_geo.sar if src_geo else None,
+            source_dar=src_geo.dar if src_geo else round(fg_ratio, 3),
+            source_rotation=src_geo.rotation if src_geo else 0,
+            canvas=f"{target_width}x{target_height}",
+            fg_box=f"{fg.width}x{fg.height}@{fg.x},{fg.y}",
+        )
+
         from app.services.overlays.templates import BACKGROUNDS
         preset = BACKGROUNDS.get(background_id, BACKGROUNDS["blur"])
-        canvas = None
+        # Foreground: EXPLICIT pixel size computed in Python (PART 4) —
+        # FFmpeg performs, never re-decides aspect. bg keeps reset_sar=1
+        # (cover-crop of a blurred canvas is aspect-agnostic).
+        fg_scale = f"scale={fg.width}:{fg.height},setsar=1"
+        fg_pos = f"{fg.x}:{fg.y}"
         if preset.kind == "gradient":
             # PHASE A: two-color animated gradient canvas. The gradients
             # source is INFINITE (no d=) → overlay needs shortest=1.
@@ -380,29 +431,23 @@ class MediaService:
                 f"gradients=s={target_width}x{target_height}:"
                 f"c0={preset.color}:c1={preset.color2}:speed={preset.speed or 0.03}:r={target_fps},"
                 f"format=yuv420p[bg];"
-                f"[0:v]scale=w={target_width}:h={target_height}:"
-                f"force_original_aspect_ratio=decrease:"
-                f"force_divisible_by=2:reset_sar=1[fg];"
-                "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]"
+                f"[0:v]{fg_scale}[fg];"
+                f"[bg][fg]overlay={fg_pos}:shortest=1[v]"
             )
         elif preset.kind == "vignette":
             # PHASE A: solid base + radial darkening.
             canvas = (
                 f"color=c={preset.color}:s={target_width}x{target_height}:r={target_fps},"
                 f"vignette=PI/4.5,format=yuv420p[bg];"
-                f"[0:v]scale=w={target_width}:h={target_height}:"
-                f"force_original_aspect_ratio=decrease:"
-                f"force_divisible_by=2:reset_sar=1[fg];"
-                "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]"
+                f"[0:v]{fg_scale}[fg];"
+                f"[bg][fg]overlay={fg_pos}:shortest=1[v]"
             )
         elif preset.kind == "color":
             canvas = (
                 f"color=c={preset.color}:s={target_width}x{target_height}:r={target_fps}[bg];"
-                f"[0:v]scale=w={target_width}:h={target_height}:"
-                f"force_original_aspect_ratio=decrease:"
-                f"force_divisible_by=2:reset_sar=1[fg];"
+                f"[0:v]{fg_scale}[fg];"
                 # color source is INFINITE → shortest=1, else encode never ends
-                "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[v]"
+                f"[bg][fg]overlay={fg_pos}:shortest=1[v]"
             )
         else:
             canvas = (
@@ -414,12 +459,9 @@ class MediaService:
                 f"crop={target_width}:{target_height},"
                 f"eq=brightness=0.0:contrast=1.1:saturation=1.2,"
                 f"gblur=sigma={blur_strength}[bg];"
-                # Foreground: CONTAIN target (decrease), NO pad, NO crop,
-                # NEVER stretched (reset_sar keeps display proportions).
-                f"[fg_src]scale=w={target_width}:h={target_height}:"
-                f"force_original_aspect_ratio=decrease:"
-                f"force_divisible_by=2:reset_sar=1[fg];"
-                "[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=0[v]"
+                # Foreground: EXPLICIT size from compositor. NO AR math here.
+                f"[fg_src]{fg_scale}[fg];"
+                f"[bg][fg]overlay={fg_pos}:shortest=0[v]"
             )
         filter_complex = canvas
 
@@ -492,10 +534,18 @@ class MediaService:
             "-i", str(source),
         ]
         cmd += extra_inputs
+        # PART 20-21: audio through AudioProcessor presets.
+        from app.services.media.audio import AudioConfig, AudioProcessor
+        audio_args, audio_map = AudioProcessor().audio_args(
+            AudioConfig(preset=audio_preset), audio_bitrate=audio_bitrate)
+        cmd += audio_args
         cmd += [
             "-filter_complex", filter_complex,
             "-map", "[v]",
-            "-map", "0:a?",
+        ]
+        if audio_map:
+            cmd += ["-map", audio_map]
+        cmd += [
             "-r", str(target_fps),
             "-c:v", "libx264",
             "-preset", "veryfast",

@@ -176,6 +176,8 @@ class UserSettings(Base):
     style_id: Mapped[str] = mapped_column(String(20), default="clean", nullable=False)
     # PHASE D: user-defined title text (used when title_id == "custom")
     custom_title: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    # PART 20-21: audio preset (original|dynamic|music|none)
+    audio_preset: Mapped[str] = mapped_column(String(10), default="original", nullable=False)
 
     # Subtitles (default OFF — quick prep does NOT run Whisper automatically)
     subtitles_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)

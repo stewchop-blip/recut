@@ -47,6 +47,7 @@ from app.bot.keyboards.inline import (
     banner_menu,
     fine_menu,
     mode_input_menu,
+    audio_menu,
     preview_keyboard,
     style_pick_menu,
     title_menu,
@@ -494,6 +495,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             background_id=getattr(s, "background_id", "blur") if s else "blur",
             title_text=_resolve_title_text(s),
             brand_corner=bool(getattr(s, "brand_corner", False)) if s else False,
+            audio_preset=getattr(s, "audio_preset", "original") if s else "original",
         )
 
         await _edit_status(
@@ -788,6 +790,7 @@ async def on_url_recut(call: CallbackQuery) -> None:
             background_id=getattr(s, "background_id", "blur") if s else "blur",
             title_text=_resolve_title_text(s),
             brand_corner=bool(getattr(s, "brand_corner", False)) if s else False,
+            audio_preset=getattr(s, "audio_preset", "original") if s else "original",
         )
     except Exception as e:
         logger.error("quickprep_failed", user_id=user_id, job_id=pending.job_id, error=str(e)[:200])
@@ -1219,6 +1222,41 @@ async def on_more_back(call: CallbackQuery) -> None:
     else:
         await call.message.edit_text(HOME_TEXT, parse_mode="HTML", reply_markup=HOME_MENU)
     await call.answer()
+
+
+@router.callback_query(F.data == "audio:menu")
+async def on_audio_menu(call: CallbackQuery) -> None:
+    """🔊 Звук — audio presets (PART 22)."""
+    user_id = call.from_user.id if call.from_user else 0
+    current = "original"
+    async with db_manager.session() as session:
+        s = await UserSettingsRepository(session).get(user_id)
+        if s is not None:
+            current = getattr(s, "audio_preset", "original") or "original"
+    await call.message.edit_text(
+        "🔊 <b>Звук</b>\n\nВыбери режим обработки звука:",
+        parse_mode="HTML",
+        reply_markup=audio_menu(current),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("audio_set:"))
+async def on_audio_set(call: CallbackQuery) -> None:
+    preset = call.data.split(":", 1)[1]
+    if preset not in ("original", "dynamic", "music", "none"):
+        await call.answer("Неизвестный режим", show_alert=True)
+        return
+    user_id = call.from_user.id if call.from_user else 0
+    async with db_manager.session() as session:
+        repo = UserSettingsRepository(session)
+        s = await repo.get_or_create(user_id)
+        s.audio_preset = preset
+        await session.commit()
+    from app.services.media.audio import AUDIO_PRESETS
+    label = AUDIO_PRESETS[preset]["label"]
+    await call.message.edit_reply_markup(reply_markup=audio_menu(preset))
+    await call.answer(f"Звук: {label}")
 
 
 @router.callback_query(F.data == "style:bg")

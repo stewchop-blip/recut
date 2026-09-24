@@ -16,16 +16,25 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True, frozen=True)
 class DisplayGeometry:
-    """Effective display geometry of one file."""
+    """Effective display geometry of one file (PART 3 — unambiguous fields)."""
     coded_width: int
     coded_height: int
-    display_width: int     # coded × SAR (rotation NOT applied)
-    display_height: int
+    display_width_before_rotation: int   # coded × SAR
+    display_height_before_rotation: int
     rotation: int
-    effective_width: int   # display, rotation applied
-    effective_height: int
+    effective_width_after_rotation: int
+    effective_height_after_rotation: int
     sar: float
     dar: float
+
+    @property
+    def display_width(self) -> int:
+        """Deprecated alias — rotation-applied display width."""
+        return self.effective_width_after_rotation
+
+    @property
+    def display_height(self) -> int:
+        return self.effective_height_after_rotation
 
 
 def get_display_geometry(meta) -> DisplayGeometry:
@@ -33,11 +42,11 @@ def get_display_geometry(meta) -> DisplayGeometry:
     return DisplayGeometry(
         coded_width=meta.coded_width,
         coded_height=meta.coded_height,
-        display_width=meta.effective_width,
-        display_height=meta.effective_height,
+        display_width_before_rotation=meta.coded_width * round(meta.sample_aspect_ratio * 1000) // 1000,
+        display_height_before_rotation=meta.coded_height,
         rotation=meta.rotation,
-        effective_width=meta.effective_width,
-        effective_height=meta.effective_height,
+        effective_width_after_rotation=meta.effective_width,
+        effective_height_after_rotation=meta.effective_height,
         sar=meta.sample_aspect_ratio,
         dar=meta.display_aspect_ratio,
     )

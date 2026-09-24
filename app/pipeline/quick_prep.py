@@ -73,6 +73,7 @@ class QuickPrepPipeline:
         background_id: str = "blur",
         title_text: str = "",
         brand_corner: bool = False,
+        audio_preset: str = "original",
     ) -> QuickPrepResult:
         media = self._media or get_media_service()
         probe = self._probe or get_probe_service()
@@ -165,6 +166,7 @@ class QuickPrepPipeline:
                     background_id=background_id,
                     title_text=title_text,
                     brand_corner=brand_corner,
+                    audio_preset=audio_preset,
                 )
             current = vertical_path
             # Output geometry log (audit #22).
@@ -179,8 +181,10 @@ class QuickPrepPipeline:
             except Exception:
                 pass
         except Exception as e:
-            logger.warning("quickprep_vertical_failed_using_source", error=str(e)[:200])
-            current = input_video  # fall back to source
+            # PART 9: NEVER silently fall back to a deformed source —
+            # a geometry/render failure must fail the job clearly.
+            logger.error("quickprep_vertical_failed_no_fallback", error=str(e)[:300])
+            raise QuickPrepError(f"Vertical render failed: {e}") from e
 
         # 3. CTA overlay — ONLY the user's asset. No default "Recut"
         # placeholder: no user banner → no overlay (audit: no stubs).

@@ -37,13 +37,27 @@ def mode_input_menu(mode: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-# ••• Ещё — advanced options for a pending short video (PART 14)
+# ••• Ещё — advanced options for a pending short video (PART 12)
 MORE_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🎞 Сделать 3 варианта", callback_data="action:versions")],
+    [InlineKeyboardButton(text="🔊 Звук", callback_data="audio:menu")],
     [InlineKeyboardButton(text="💬 Субтитры", callback_data="settings:toggle_subs")],
     [InlineKeyboardButton(text="⚙️ Дополнительно", callback_data="fine:menu")],
     [InlineKeyboardButton(text="⬅️ Назад", callback_data="more:back")],
 ])
+
+
+# 🔊 Звук — audio presets (PART 21/22)
+def audio_menu(current: str) -> InlineKeyboardMarkup:
+    from app.services.media.audio import AUDIO_PRESETS
+    rows = []
+    for pid, info in AUDIO_PRESETS.items():
+        rows.append([InlineKeyboardButton(
+            text=("✅ " if pid == current else "") + info["label"],
+            callback_data=f"audio_set:{pid}",
+        )])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="more:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +68,7 @@ def appearance_menu(style_id: str, banner: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🎭 Стиль: {style_id}", callback_data="style:pick")],
         [InlineKeyboardButton(text=f"🖼 Плашка: {'✅' if banner else 'нет'}", callback_data="banner:menu")],
-        [InlineKeyboardButton(text="⚙️ Тонкая настройка", callback_data="fine:menu")],
+        [InlineKeyboardButton(text="🔧 Настроить вручную", callback_data="fine:menu")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
     ])
 
