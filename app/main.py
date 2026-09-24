@@ -38,20 +38,25 @@ async def run_schema_migrations() -> None:
     pre-existing tables. We explicitly apply ALTER TABLE statements here.
     """
     from sqlalchemy import text
+    # (column, SQL type) pairs added to user_settings over time.
+    columns = [
+        ("cta_telegram_file_id", "VARCHAR(200)"),
+        ("cta_size", "VARCHAR(10)"),
+    ]
+    is_sqlite = "sqlite" in str(db_manager.engine.url)
     try:
         async with db_manager.engine.begin() as conn:
-            # 1. Add cta_telegram_file_id column if it doesn't exist
-            # Note: SQLite in tests uses table_info; Postgres supports ADD COLUMN IF NOT EXISTS
-            is_sqlite = "sqlite" in str(db_manager.engine.url)
             if is_sqlite:
                 res = await conn.execute(text("PRAGMA table_info(user_settings)"))
                 cols = [row[1] for row in res.fetchall()]
-                if cols and "cta_telegram_file_id" not in cols:
-                    await conn.execute(text("ALTER TABLE user_settings ADD COLUMN cta_telegram_file_id VARCHAR(200)"))
-                    logger.info("schema_migration_ok", dialect="sqlite", column="cta_telegram_file_id")
+                for name, sqltype in columns:
+                    if cols and name not in cols:
+                        await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN {name} {sqltype}"))
+                        logger.info("schema_migration_ok", dialect="sqlite", column=name)
             else:
-                await conn.execute(text("ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS cta_telegram_file_id VARCHAR(200)"))
-                logger.info("schema_migration_ok", dialect="postgres", column="cta_telegram_file_id")
+                for name, sqltype in columns:
+                    await conn.execute(text(f"ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS {name} {sqltype}"))
+                    logger.info("schema_migration_ok", dialect="postgres", column=name)
     except Exception as e:
         logger.error("schema_migration_failed", error=str(e)[:200])
 

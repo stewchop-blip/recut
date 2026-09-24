@@ -68,6 +68,7 @@ class QuickPrepPipeline:
         cta_min_margin_px: int,
         output_width: int,
         output_height: int,
+        cta_size_preset: str = "medium",
     ) -> QuickPrepResult:
         media = self._media or get_media_service()
         probe = self._probe or get_probe_service()
@@ -160,20 +161,14 @@ class QuickPrepPipeline:
             logger.warning("quickprep_vertical_failed_using_source", error=str(e)[:200])
             current = input_video  # fall back to source
 
-        # 3. CTA overlay.
+        # 3. CTA overlay — ONLY the user's asset. No default "Recut"
+        # placeholder: no user banner → no overlay (audit: no stubs).
         has_cta = False
-        # cta_asset may be:
-        # - a user-uploaded PNG path (from DB) — pass through
-        # - empty/None but CTA_ENABLED=true — fall back to ensure_cta_asset
-        #   which generates a default "Recut" PNG on the fly
         effective_cta_asset: Path | None = None
         if cta_asset is not None and cta_asset.exists():
             effective_cta_asset = cta_asset
         elif cta_asset is not None:
-            # DB has a path but file is gone — generate a default in the
-            # job_dir so the user still gets an overlay.
-            from app.services.overlays.cta_generator import ensure_cta_asset
-            effective_cta_asset, _ = ensure_cta_asset("", job_dir)
+            logger.warning("cta_asset_missing_no_fallback", path=str(cta_asset))
         if effective_cta_asset is not None and effective_cta_asset.exists():
             from app.services.overlays.cta import CTAService, CTAOverlaySpec
             spec = CTAService()._make_spec(
@@ -196,6 +191,7 @@ class QuickPrepPipeline:
                         margin=cta_min_margin_px,
                         start_seconds=spec.start_seconds,
                         end_seconds=spec.end_seconds,
+                        size_preset=cta_size_preset,
                     )
                     current = cta_path
                     has_cta = True

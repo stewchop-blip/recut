@@ -161,6 +161,8 @@ class UserSettings(Base):
     cta_mode: Mapped[str] = mapped_column(String(20), default="end", nullable=False)
     cta_duration_seconds: Mapped[float] = mapped_column(default=4.0, nullable=False)
     cta_start_seconds: Mapped[float] = mapped_column(default=0.0, nullable=False)
+    # Banner size preset: small / medium / large → max width fraction of frame
+    cta_size: Mapped[str] = mapped_column(String(10), default="medium", nullable=False)
 
     # Subtitles (default OFF — quick prep does NOT run Whisper automatically)
     subtitles_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)

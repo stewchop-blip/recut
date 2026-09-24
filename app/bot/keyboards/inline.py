@@ -79,6 +79,7 @@ def banner_menu(exists: bool) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📎 Загрузить новую", callback_data="banner:upload")],
             [InlineKeyboardButton(text="📍 Положение", callback_data="settings:position")],
+            [InlineKeyboardButton(text="📏 Размер", callback_data="settings:size")],
             [InlineKeyboardButton(text="⏱ Время показа", callback_data="settings:timing")],
             [InlineKeyboardButton(text="👁 Предпросмотр", callback_data="banner:preview")],
             [InlineKeyboardButton(text="🗑 Удалить", callback_data="banner:delete")],
@@ -120,6 +121,9 @@ SETTINGS_MENU = InlineKeyboardMarkup(inline_keyboard=[
         InlineKeyboardButton(text="📍 Позиция", callback_data="settings:position"),
     ],
     [
+        InlineKeyboardButton(text="📏 Размер", callback_data="settings:size"),
+    ],
+    [
         InlineKeyboardButton(text="⏱ Когда показывать", callback_data="settings:timing"),
     ],
     [
@@ -148,6 +152,21 @@ POSITION_MENU = InlineKeyboardMarkup(inline_keyboard=[
         InlineKeyboardButton(text="↙️ Снизу слева", callback_data="cta_pos:bottom_left"),
         InlineKeyboardButton(text="⬇️ Снизу", callback_data="cta_pos:bottom"),
         InlineKeyboardButton(text="↘️ Снизу справа", callback_data="cta_pos:bottom_right"),
+    ],
+    [
+        InlineKeyboardButton(text="🔙 Назад", callback_data="settings:back"),
+    ],
+])
+
+
+# CTA size picker (width fraction of the frame, height capped 15%)
+SIZE_MENU = InlineKeyboardMarkup(inline_keyboard=[
+    [
+        InlineKeyboardButton(text="🔷 Маленькая (~28%)", callback_data="cta_size:small"),
+        InlineKeyboardButton(text="🔶 Средняя (~33%)", callback_data="cta_size:medium"),
+    ],
+    [
+        InlineKeyboardButton(text="🔸 Большая (~38%)", callback_data="cta_size:large"),
     ],
     [
         InlineKeyboardButton(text="🔙 Назад", callback_data="settings:back"),

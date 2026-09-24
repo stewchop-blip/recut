@@ -61,12 +61,18 @@ class CTAService:
         configured_asset: str,
         fallback_dir: Path,
     ) -> CTAOverlaySpec | None:
-        """Return None if CTA is disabled."""
+        """Return None if CTA is disabled or no user asset exists.
+
+        No default "Recut" placeholder: without a user banner the CTA is
+        simply skipped (production rule — never burn a stub).
+        """
         if not self._enabled:
             return None
 
-        from app.services.overlays.cta_generator import ensure_cta_asset
-        asset, _ = ensure_cta_asset(configured_asset, fallback_dir)
+        asset = Path(configured_asset) if configured_asset else None
+        if asset is None or not asset.exists():
+            logger.warning("cta_no_user_asset_skipping", configured=str(configured_asset))
+            return None
 
         # Determine time window.
         if self._mode == "full":

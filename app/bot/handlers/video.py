@@ -42,6 +42,7 @@ from app.bot.keyboards.inline import (
     RESULT_MENU_VERSIONS,
     SETTINGS_MENU,
     SHORT_ACTION_MENU,
+    SIZE_MENU,
     TIMING_MENU,
     banner_menu,
     mode_input_menu,
@@ -429,6 +430,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
         cta_mode = "end"
         cta_duration_seconds = 4.0
         cta_start_seconds = 0.0
+        cta_size = "medium"
 
         async with db_manager.session() as session:
             srepo = UserSettingsRepository(session)
@@ -439,9 +441,11 @@ async def on_quick_prep(call: CallbackQuery) -> None:
                 cta_mode = s.cta_mode
                 cta_duration_seconds = s.cta_duration_seconds
                 cta_start_seconds = s.cta_start_seconds
+                cta_size = getattr(s, "cta_size", None) or "medium"
 
-            # Resolve CTA asset: prefer telegram_file_id (Railway-safe),
-            # then local path, then default static banner.
+            # Resolve CTA asset: ONLY the user's banner (telegram_file_id or
+            # local path). No default "Recut" placeholder in production:
+            # no banner → no overlay.
             if cta_enabled:
                 bot_instance = call.bot
                 if s is not None and s.cta_telegram_file_id:
@@ -458,9 +462,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
                     if p.exists():
                         cta_asset = p
             if cta_enabled and cta_asset is None:
-                from app.services.overlays.cta_generator import ensure_cta_asset
-                cta_asset, _ = ensure_cta_asset("", job_dir)
-                logger.info("cta_default_asset_generated", path=str(cta_asset))
+                logger.info("cta_no_user_banner_skipping_overlay", user_id=user_id)
 
         # Run QuickPrep
         pipeline = QuickPrepPipeline()
@@ -480,6 +482,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             cta_min_margin_px=settings.cta_min_margin_px,
             output_width=settings.output_width,
             output_height=settings.output_height,
+            cta_size_preset=cta_size,
         )
 
         await _edit_status(
@@ -717,6 +720,7 @@ async def on_url_recut(call: CallbackQuery) -> None:
     cta_mode = "end"
     cta_duration_seconds = 4.0
     cta_start_seconds = 0.0
+    cta_size = "medium"
     async with db_manager.session() as session:
         srepo = UserSettingsRepository(session)
         s = await srepo.get(user_id)
@@ -726,6 +730,7 @@ async def on_url_recut(call: CallbackQuery) -> None:
             cta_mode = s.cta_mode
             cta_duration_seconds = s.cta_duration_seconds
             cta_start_seconds = s.cta_start_seconds
+            cta_size = getattr(s, "cta_size", None) or "medium"
 
         # Resolve CTA asset: prefer telegram_file_id (Railway-safe),
         # then local path, then default static banner.
@@ -745,9 +750,7 @@ async def on_url_recut(call: CallbackQuery) -> None:
                 if p.exists():
                     cta_asset = p
         if cta_enabled and cta_asset is None:
-            from app.services.overlays.cta_generator import ensure_cta_asset
-            cta_asset, _ = ensure_cta_asset("", job_dir)
-            logger.info("cta_default_asset_generated", path=str(cta_asset))
+            logger.info("cta_no_user_banner_skipping_overlay", user_id=user_id)
     pipeline = QuickPrepPipeline()
     try:
         result = await pipeline.run(
@@ -766,6 +769,7 @@ async def on_url_recut(call: CallbackQuery) -> None:
             cta_min_margin_px=settings.cta_min_margin_px,
             output_width=settings.output_width,
             output_height=settings.output_height,
+            cta_size_preset=cta_size,
         )
     except Exception as e:
         logger.error("quickprep_failed", user_id=user_id, job_id=pending.job_id, error=str(e)[:200])
@@ -1011,6 +1015,32 @@ async def on_settings_timing(call: CallbackQuery) -> None:
     await call.answer()
 
 
+CTA_SIZES = {"small": "Маленькая (~28%)", "medium": "Средняя (~33%)", "large": "Большая (~38%)"}
+
+
+@router.callback_query(F.data == "settings:size")
+async def on_settings_size(call: CallbackQuery) -> None:
+    await call.message.edit_text("📏 Размер плашки:", reply_markup=SIZE_MENU)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("cta_size:"))
+async def on_set_size(call: CallbackQuery) -> None:
+    size = call.data.split(":", 1)[1]
+    user_id = call.from_user.id if call.from_user else 0
+    if size not in CTA_SIZES:
+        await call.answer("Неизвестный размер")
+        return
+    async with db_manager.session() as session:
+        await UserSettingsRepository(session).update_fields(user_id, cta_size=size)
+    await call.message.edit_text(
+        f"✅ Размер сохранён: {CTA_SIZES[size]}\n\n"
+        f"Хочешь посмотреть как будет выглядеть?",
+        reply_markup=preview_keyboard(),
+    )
+    await call.answer()
+
+
 @router.callback_query(F.data == "settings:upload_cta")
 async def on_settings_upload_cta(call: CallbackQuery) -> None:
     await call.message.edit_text(
@@ -1138,9 +1168,10 @@ async def on_banner_upload(message: types.Message, bot: Bot) -> None:
         )
     tmp_png.unlink(missing_ok=True)
 
+    from app.bot.keyboards.inline import banner_menu
     await message.answer(
-        "✅ Плашка сохранена\n\n"
-        "Открой /start → ⚙️ Настройки чтобы выбрать позицию и время показа."
+        "✅ Плашка сохранена",
+        reply_markup=banner_menu(True),
     )
 
 
@@ -1212,6 +1243,7 @@ async def _show_settings(message: types.Message, user_id: int) -> None:
         s = await UserSettingsRepository(session).get_or_create(user_id)
 
     pos = CTA_POSITIONS.get(s.cta_position, s.cta_position)
+    size = CTA_SIZES.get(getattr(s, "cta_size", None) or "medium", "Средняя (~33%)")
     timing = (
         f"Весь ролик" if s.cta_mode == "full"
         else f"Последние {s.cta_duration_seconds:g} сек" if s.cta_mode == "end"
@@ -1226,6 +1258,7 @@ async def _show_settings(message: types.Message, user_id: int) -> None:
         f"Плашка: {'✅ ВКЛ' if s.cta_enabled else '❌ ВЫКЛ'}\n"
         f"Файл плашки: {banner}\n"
         f"Позиция: {pos}\n"
+        f"Размер: {size}\n"
         f"Время: {timing}\n"
         f"Субтитры: {'✅ ВКЛ' if s.subtitles_enabled else '❌ ВЫКЛ'}\n\n"
         f"Формат вывода: 9:16 ({get_settings().output_width}×{get_settings().output_height})"

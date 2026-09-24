@@ -517,12 +517,15 @@ class MediaService:
         margin: int,
         start_seconds: float,
         end_seconds: float,
+        size_preset: str = "medium",
         timeout_seconds: float = 300.0,
     ) -> Path:
-        """Overlay a PNG over a window of the video.
+        """Overlay a banner over a window of the video.
 
-        CTA positioning is computed INSIDE the FFmpeg filtergraph from
-        actual video/overlay dimensions — no hardcoded 720x200 assumption.
+        Safe-area sizing (audit #6): banner max width by size preset
+        (small 28% / medium 33% / large 38% of frame width), max height
+        15% of frame height. Never full-screen, never upscaled.
+        Positioning from actual main_w/main_h/overlay_w/overlay_h.
         """
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
@@ -558,15 +561,17 @@ class MediaService:
             logger.warning("cta_probe_failed", error=str(e)[:200])
 
         if video_w > 0 and video_h > 0 and banner_in_w > 0 and banner_in_h > 0:
-            # Effective margin: caller value if given, else ~9.5% of frame
-            # height (audit range 160-220 px for 1080x1920 → 182 px).
-            margin_px = margin if margin > 0 else int(video_h * 0.095)
+            # Effective margin: caller value if given, else ~4% of frame
+            # height (audit #6: bottom margin 3-5%).
+            margin_px = margin if margin > 0 else int(video_h * 0.04)
             side_margin = int(video_w * 0.04)
 
+            # Size preset (audit #6): width 28-38% of frame width.
+            width_frac = {"small": 0.28, "medium": 0.33, "large": 0.38}.get(size_preset, 0.33)
             if position == "full_width_bottom":
                 max_w = video_w - 2 * side_margin
             else:
-                max_w = video_w * 0.85
+                max_w = video_w * width_frac
             max_h = video_h * 0.15
 
             scale = min(1.0, max_w / banner_in_w, max_h / banner_in_h)
