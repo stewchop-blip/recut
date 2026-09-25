@@ -465,14 +465,36 @@ class MediaService:
             )
         filter_complex = canvas
 
-        # Optional title (top safe area) / brand corner via drawtext.
-        text_filters = ""
+        # Title via TitleRenderer (Phase 7 wiring, audit #31-32): Pillow
+        # transparent PNG rendered inside title_box, overlaid — replaces
+        # raw drawtext (which was visually raw, no wrap/fit). Brand corner
+        # stays drawtext (tiny text, no wrap needed).
+        extra_inputs: list[str] = []
+        title_used = False
         if title_text:
-            # font size ~4.5% of height, top margin ~5%
-            text_filters += "," + _drawtext(
-                title_text, int(target_height * 0.045),
-                x="(w-text_w)/2", y=f"h*0.05",
-            )
+            try:
+                from app.services.rendering.title import TitleRenderer, TitleStyle
+                from app.services.overlays.compositor import TemplateSpec
+                tbox = TemplateSpec(target_width, target_height).title_box()
+                png_bytes = TitleRenderer().render(
+                    title_text, tbox, style=TitleStyle(variant="plate"))
+                import tempfile as _tmp
+                title_png = Path(_tmp.gettempdir()) / f"title_{id(output_path)}.png"
+                title_png.write_bytes(png_bytes)
+                # Input registry (audit #12): source=0, title=1, decoration=2.
+                title_input_idx = len(extra_inputs) // 2 + 1  # 1
+                extra_inputs += ["-i", str(title_png)]
+                title_chain = (
+                    f"[{title_input_idx}:v]format=rgba[t_logo];"
+                    f"[v][t_logo]overlay={tbox.x}:{tbox.y}:eof_action=repeat:repeatlast=1[v]"
+                )
+                filter_complex += ";" + title_chain
+                title_used = True
+                logger.info("title_rendered_pillow", box=f"{tbox.width}x{tbox.height}@{tbox.x},{tbox.y}")
+            except Exception as e:
+                logger.warning("title_png_failed_fallback_drawtext", error=str(e)[:150])
+
+        text_filters = ""
         if brand_corner:
             text_filters += "," + _drawtext(
                 "ReCut", int(target_height * 0.018),
@@ -491,7 +513,6 @@ class MediaService:
         # PHASE B: decorative insert (from DECORATIONS registry) overlaid
         # above the video, below the banner. Animated assets loop forever;
         # enable is the whole clip. Skips silently when not bundled yet.
-        extra_inputs: list[str] = []
         if decoration_id:
             from app.services.overlays.templates import DECORATIONS
             dec = DECORATIONS.get(decoration_id)
@@ -508,7 +529,9 @@ class MediaService:
                         dec.max_width_frac, dec.max_height_frac, dec.anchor,
                     )
                     dec_w, dec_h = _asset_pixel_size(dec_path, dbox.width, dbox.height)
-                    input_idx = 1  # decoration becomes ffmpeg input #1
+                    # Input registry (audit #12): source=0, title=1 (if used),
+                    # decoration = next. No hardcoded indexes.
+                    input_idx = 1 + (1 if title_used else 0)
                     dec_kind = (dec.kind or "").lower()
                     is_anim = dec_kind in ("gif", "mp4", "webp")
                     chain = (

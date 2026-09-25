@@ -86,18 +86,17 @@ class TitleRenderer:
 
         y0 = (box.height - block_h) // 2 - (pad_y if style.variant == "plate" else 0)
         x_text = (box.width - self._width(lines, size)) // 2
+        yy = y0
         if style.shadow:
-            sh = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
+            from PIL import ImageFilter, ImageChops, Image as PILImage
+            sh = PILImage.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
             sd = ImageDraw.Draw(sh)
-            yy = y0
             for ln in lines:
                 sd.text((x_text + 3, yy + 3), ln, font=font, fill=(0, 0, 0, 160))
                 yy += line_h
-            sh = sh.filter(__import__("PIL.ImageFilter", fromlist=["GaussianBlur"]).GaussianBlur(4))
-            img = __import__("PIL.ImageChops", fromlist=["composite"]).ImageChops.composite(
-                sh, img, __import__("PIL.Image", fromlist=["new"]).Image.new("L", (img_w, img_h), 255))
+            sh = sh.filter(ImageFilter.GaussianBlur(4))
+            img = ImageChops.alpha_composite(sh, img)
             draw = ImageDraw.Draw(img)
-        yy = y0
         for ln in lines:
             draw.text((x_text, yy), ln, font=font, fill=style.color)
             yy += line_h
