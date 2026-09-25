@@ -143,6 +143,20 @@ class QuickPrepPipeline:
                 title_text = ""
             brand_corner = preset_cfg.brand_corner
             audio_preset = preset_cfg.audio_preset
+        speed = getattr(preset_cfg, "speed", 1.0) if preset_cfg is not None else 1.0
+        # TZ Phase 19: log what actually applied (verify preset worked).
+        logger.info(
+            "transformations_applied",
+            preset=transformation_preset,
+            layout="compositor",
+            background=background_id,
+            speed=speed,
+            color="original",
+            title=bool(title_text),
+            brand_corner=brand_corner,
+            banner_size=cta_size_preset,
+            audio=audio_preset,
+        )
         # (cta_size remains from user DB settings unless preset explicitly
         # overrides — kept at user value for simplicity.)
 
@@ -165,6 +179,7 @@ class QuickPrepPipeline:
                 title_text=title_text,
                 brand_corner=brand_corner,
                 audio_preset=audio_preset,
+                speed=speed,
             )
             current = vertical_path
             # Output geometry log (audit #22).

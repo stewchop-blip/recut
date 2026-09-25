@@ -323,6 +323,7 @@ class MediaService:
         brand_corner: bool = False,
         decoration_id: str = "",
         audio_preset: str = "original",
+        speed: float = 1.0,  # TZ Phase 16: setpts/atempo, pitch preserved
         timeout_seconds: float = 600.0,
     ) -> Path:
         """Convert source video to 9:16 vertical with a styled background.
@@ -556,11 +557,26 @@ class MediaService:
             "-v", "error",
             "-i", str(source),
         ]
+        # TZ Phase 16: video speed via container timestamps (donor
+        # ffmpeg-video-bot change_speed pattern); audio atempo comes from
+        # AudioProcessor with the SAME factor — synchronized.
+        if abs(speed - 1.0) > 0.001:
+            i_idx = cmd.index("-i")
+            cmd = (cmd[:i_idx]
+                   + ["-itsscale", f"{1.0 / speed:.5f}"]
+                   + cmd[i_idx:])
         cmd += extra_inputs
         # PART 20-21: audio through AudioProcessor presets.
         from app.services.media.audio import AudioConfig, AudioProcessor
         audio_args, audio_map = AudioProcessor().audio_args(
-            AudioConfig(preset=audio_preset), audio_bitrate=audio_bitrate)
+            AudioConfig(preset=audio_preset, speed=speed),
+            audio_bitrate=audio_bitrate)
+        # TZ Phase 16: video speed via setpts (donor ffmpeg-video-bot
+        # change_speed pattern). Audio atempo comes from AudioProcessor —
+        # both use the same factor so they stay synchronized.
+        if abs(speed - 1.0) > 0.001:
+            filter_complex = filter_complex.replace(
+                "[v_pre]", f"[v_pre]setpts=(1/{speed:.5f})*PTS[v_pre]")
         cmd += audio_args
         cmd += [
             "-filter_complex", filter_complex,

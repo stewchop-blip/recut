@@ -10,6 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+class GeometryValidationError(ValueError):
+    """Raised when a geometry invariant is violated (TZ Phase 8)."""
+    error_code = "GEOMETRY_VALIDATION_FAILED"
+
+
+
 if TYPE_CHECKING:
     from app.services.media.probe import VideoProbeResult
 

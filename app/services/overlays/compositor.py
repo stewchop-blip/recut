@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.services.media.geometry import fit_inside
+from app.services.media.geometry import fit_inside, GeometryValidationError
 
 
 @dataclass(slots=True, frozen=True)
@@ -88,6 +88,14 @@ class TemplateSpec:
         """CONTAIN the source inside video_box — centered. NEVER stretched."""
         box = self.video_box()
         w, h = fit_inside(source_display_ratio, box.width, box.height)
+        # TZ Phase 8: geometry invariant — the fitted box must preserve the
+        # source ratio (±1%). Violation = bug, fail loudly, never send.
+        fitted_ratio = w / max(h, 1)
+        if abs(fitted_ratio - source_display_ratio) >= 0.01:
+            raise GeometryValidationError(
+                f"compositor invariant violated: fitted {w}x{h} "
+                f"ratio={fitted_ratio:.4f} != source ratio="
+                f"{source_display_ratio:.4f}")
         return Box(
             x=box.x + (box.width - w) // 2,
             y=box.y + (box.height - h) // 2,
