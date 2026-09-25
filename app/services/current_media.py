@@ -50,7 +50,7 @@ class CurrentMediaService:
                 status=getattr(s, "current_media_status", "READY"),
                 source_type=getattr(s, "current_media_source_type", "unknown"),
                 source_path=path,
-                telegram_file_id=getattr(s, "cta_telegram_file_id", None) or None,
+                telegram_file_id=getattr(s, "current_media_telegram_file_id", None) or None,
                 source_url=getattr(s, "current_media_url", None) or None,
                 duration=getattr(s, "current_media_duration", 0.0),
                 width=0,
@@ -71,6 +71,7 @@ class CurrentMediaService:
                 current_media_status="READY",
                 current_media_source_type="telegram" if telegram_file_id else ("url" if source_url else "file"),
                 current_media_url=source_url,
+                current_media_telegram_file_id=telegram_file_id,
             )
         return CurrentMedia(
             user_id=user_id,
@@ -96,6 +97,7 @@ class CurrentMediaService:
                 current_media_status=None,
                 current_media_source_type=None,
                 current_media_url=None,
+                current_media_telegram_file_id=None,
                 current_media_normalized=False,
             )
 

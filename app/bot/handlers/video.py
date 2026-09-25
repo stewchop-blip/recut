@@ -26,6 +26,7 @@ before starting any work.
 """
 import io
 import shutil
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -227,6 +228,11 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
             status=__import__("app.database.models", fromlist=["JobStatus"]).JobStatus.PENDING,
             status_message_id=status_msg.message_id,
         )
+        # TZ Phase 25: media present → READY (not counted as active processing)
+        await repo.set_status(
+            job_id=job_id,
+            status=__import__("app.database.models", fromlist=["JobStatus"]).JobStatus.READY,
+        )
         # Persist a small metadata note (actual size)
         from sqlalchemy import update as _u
         from app.database.models import Job as _Job
@@ -384,6 +390,11 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
             status=__import__("app.database.models", fromlist=["JobStatus"]).JobStatus.PENDING,
             status_message_id=status_msg.message_id,
         )
+        # TZ Phase 25: media present → READY (not counted as active processing)
+        await repo.set_status(
+            job_id=job_id,
+            status=__import__("app.database.models", fromlist=["JobStatus"]).JobStatus.READY,
+        )
         from sqlalchemy import update as _u
         from app.database.models import Job as _Job
         await session.execute(
@@ -470,6 +481,27 @@ async def on_quick_prep(call: CallbackQuery) -> None:
         try:
             from app.services.current_media import get_current_media_service
             cm = await get_current_media_service().get(user_id)
+            if cm is not None and cm.source_path and cm.source_path.exists():
+                pass  # local file alive
+            elif cm is not None and (cm.telegram_file_id or cm.source_url):
+                # TZ Phase 24: /tmp is ephemeral on Railway — re-download.
+                redl = Path(tempfile.gettempdir()) / f"redl_{user_id}.mp4"
+                try:
+                    if cm.telegram_file_id and call.message is not None:
+                        tg = await call.message.bot.get_file(cm.telegram_file_id)
+                        await call.message.bot.download_file(tg.file_path, str(redl))
+                    elif cm.source_url:
+                                            from app.pipeline.url_downloader import DownloaderService
+                                            await DownloaderService().download(
+                                                cm.source_url, redl)
+                    if redl.exists():
+                        await get_current_media_service().set_ready(
+                            user_id, redl, job_id=cm.job_id,
+                            telegram_file_id=cm.telegram_file_id,
+                            source_url=cm.source_url)
+                        cm = await get_current_media_service().get(user_id)
+                except Exception as e2:
+                    logger.warning("current_media_redownload_failed", error=str(e2)[:150])
             if cm is not None and cm.source_path and cm.source_path.exists():
                 pending = _PendingJob(
                     job_id=cm.job_id or 0,
@@ -1200,11 +1232,20 @@ async def on_appearance_menu(call: CallbackQuery) -> None:
 
 _STYLE_LABELS = {"clean": "Чистый", "meme": "Мем", "brand": "Бренд", "custom": "Свой"}
 
-_STYLE_PRESETS = {
-    "clean": dict(background_id="blur", title_id="none", brand_corner=False, cta_size="small"),
-    "meme": dict(background_id="dark", title_id="look", brand_corner=False, cta_size="large"),
-    "brand": dict(background_id="accent", title_id="none", brand_corner=True, cta_size="medium"),
-}
+def _preset_to_fields(preset_id: str) -> dict:
+    """Phase 12 (TZ 12-32-41): ONE registry — BUILTIN_PRESETS in
+    services/overlays/presets.py. The handler reads the same objects the
+    renderer uses; no separate look/wow dict here."""
+    from app.services.overlays.presets import BUILTIN_PRESETS, TransformationPreset
+    p: TransformationPreset | None = BUILTIN_PRESETS.get(preset_id)
+    if p is None:
+        return {}
+    return dict(
+        background_id=p.background_id,
+        title_id=p.title_id,
+        brand_corner=p.brand_corner,
+        cta_size=getattr(p, "cta_size", None) or "medium",
+    )
 
 
 @router.callback_query(F.data == "style:pick")
@@ -1229,9 +1270,10 @@ async def on_style_set(call: CallbackQuery) -> None:
         await call.answer("Неизвестный стиль")
         return
     async with db_manager.session() as session:
-        if pid in _STYLE_PRESETS:
+        fields = _preset_to_fields(pid)
+        if fields:
             await UserSettingsRepository(session).update_fields(
-                user_id, style_id=pid, **_STYLE_PRESETS[pid],
+                user_id, style_id=pid, **fields,
             )
             label = _STYLE_LABELS[pid]
         else:

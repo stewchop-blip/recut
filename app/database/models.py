@@ -73,6 +73,7 @@ class Generation(Base):
 class JobStatus(str, enum.Enum):
     """Status of one source-video processing run."""
     PENDING = "pending"          # accepted, queued
+    READY = "ready"              # video uploaded/downloaded, waiting for user choice
     DOWNLOADING = "downloading"  # downloading from Telegram
     PROBING = "probing"          # ffprobe validation
     TRANSCRIBING = "transcribing"
@@ -178,6 +179,18 @@ class UserSettings(Base):
     custom_title: Mapped[str] = mapped_column(String(200), default="", nullable=False)
     # PART 20-21: audio preset (original|dynamic|music|none)
     audio_preset: Mapped[str] = mapped_column(String(10), default="original", nullable=False)
+
+    # Phase 22/23 (TZ 12-32-41): current media persistence (mapped columns
+    # for the raw migration columns — without these hasattr() in
+    # UserSettingsRepository.update_fields() silently ignores updates).
+    current_media_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    current_media_job_id: Mapped[Optional[int]] = mapped_column(nullable=True)
+    current_media_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    current_media_source_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    current_media_url: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    # Phase 23: file_id of the SOURCE VIDEO (NOT the banner cta_telegram_file_id)
+    current_media_telegram_file_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    current_media_normalized: Mapped[Optional[bool]] = mapped_column(nullable=True)
 
     # Subtitles (default OFF — quick prep does NOT run Whisper automatically)
     subtitles_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)

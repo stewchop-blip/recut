@@ -291,6 +291,9 @@ class ThreeVersionsPipeline:
                         margin=cta_margin_px,
                         start_seconds=start,
                         end_seconds=dur2,
+                        size_preset=cta_size_preset,
+                        overlay_type=overlay_type,
+                        overlay_is_animated=overlay_is_animated,
                     )
                     current = cta_out
                 except Exception as e:

@@ -1,12 +1,13 @@
-"""SourceNormalizer (Phase 3) — explicit normalization stage (audit #17-20).
+"""SourceNormalizer (Phase 3-5, two-pass) — audit TZ 12-32-41.
 
-Output contract: SAR 1:1, rotation BAKED into pixels (metadata removed),
-black bars cropped when stable. Downstream renderers see only square-pixel
-frames.
+PASS A: raw → (noautorotate if needed) → transpose bake → SAR expand →
+        setsar=1 → metadata strip → normalized_base.mp4
+PASS B: detect black bars ON normalized_base (coordinates now match
+        pixels); stable bars → crop → normalized_source.mp4, else rename.
 
-CRITICAL (audit #20): if rotation != 0, NEVER stream-copy even when SAR=1 —
-pixels must actually be transposed, otherwise portrait sources render
-landscape (the real stretch bug).
+Contract after both passes: rotation == 0, SAR == 1:1 (audit Phase 4/5).
+Crop is NEVER computed on the raw file (Phase 5: raw coordinates would be
+invalid after transpose/SAR).
 """
 from __future__ import annotations
 
@@ -26,97 +27,118 @@ class NormalizationError(RuntimeError):
 
 @dataclass(slots=True, frozen=True)
 class NormalizationResult:
-    source: Path
+    source: Path                  # normalized_source.mp4
+    base: Path                    # normalized_base.mp4 (post PASS A)
     rotation_before: int
     sar_before: float
-    rotation_after: int = 0
-    sar_after: float = 1.0
+    coded_before: tuple[int, int]
+    base_dims: tuple[int, int]
     crop_applied: bool = False
-    coded_before: tuple[int, int] = (0, 0)
-    coded_after: tuple[int, int] = (0, 0)
 
 
 class SourceNormalizer:
-    """RAW → rotate bake → SAR 1:1 → (optional) black-bar crop → normalized.mp4."""
+    """Two-pass: (A) rotate+SAR → base; (B) bars → crop → source."""
 
     def __init__(self) -> None:
-        import shutil
         self._ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
         self._ffprobe = shutil.which("ffprobe") or "ffprobe"
 
-    async def probe(self, path: Path) -> tuple[dict, dict]:
-        """Return (video_stream, format) json dicts."""
+    async def _probe(self, path: Path) -> tuple[int, int, float, int]:
+        """(width, height, sar, rotation) of the video stream."""
+        from app.services.media.probe import _parse_rotation
         proc = await asyncio.create_subprocess_exec(
             self._ffprobe, "-v", "error", "-print_format", "json",
-            "-show_streams", "-show_format", str(path),
+            "-show_streams", str(path),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         out, err = await proc.communicate()
         if proc.returncode != 0:
             raise NormalizationError(f"probe failed: {err.decode(errors='ignore')[:200]}")
         import json
         data = json.loads(out.decode())
-        video = next((s for s in data.get("streams", [])
-                      if s.get("codec_type") == "video"), None)
-        if video is None:
+        v = next((s for s in data.get("streams", [])
+                  if s.get("codec_type") == "video"), None)
+        if v is None:
             raise NormalizationError("no video stream")
-        return video, data.get("format", {})
-
-    async def normalize(self, input_path: Path, output_path: Path,
-                        *, crop_black_bars: bool = True,
-                        timeout_seconds: float = 600.0) -> NormalizationResult:
-        if not input_path.exists():
-            raise NormalizationError(f"input missing: {input_path}")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        video, fmt = await self.probe(input_path)
-        w = int(video.get("width") or 0)
-        h = int(video.get("height") or 0)
-        sar_txt = video.get("sample_aspect_ratio") or "1:1"
+        sar_txt = v.get("sample_aspect_ratio") or "1:1"
         try:
             a, b = sar_txt.split(":")
             sar = float(a) / float(b) if float(b) else 1.0
         except (ValueError, ZeroDivisionError):
             sar = 1.0
-        rotation = self._rotation(video)
-        coded_before = (w, h)
+        return (int(v.get("width") or 0), int(v.get("height") or 0),
+                round(sar, 3), _parse_rotation(v))
 
-        # Rotation bake (audit #19-20): transpose mapping; -noautorotate so
-        # ffmpeg does NOT rotate twice. 180 = transpose twice.
-        vf_parts: list[str] = []
-        if rotation == 90:      # displaymatrix 90 = shot rotated right
-            vf_parts.append("transpose=1")
+    async def normalize(self, input_path: Path, output_path: Path, *,
+                        timeout_seconds: float = 900.0) -> NormalizationResult:
+        if not input_path.exists():
+            raise NormalizationError(f"input missing: {input_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        base = output_path.with_name(output_path.stem + "_base.mp4")
+
+        # ---------- PASS A: rotation bake + SAR normalize ----------
+        w, h, sar, rotation = await self._probe(input_path)
+        vf: list[str] = []
+        if rotation == 90:
+            vf.append("transpose=1")
         elif rotation == 270:
-            vf_parts.append("transpose=2")
+            vf.append("transpose=2")
         elif rotation == 180:
-            vf_parts.append("transpose=1,transpose=1")
-        # SAR normalization: expand coded pixels to display size, then square.
+            vf.append("transpose=1,transpose=1")
         if abs(sar - 1.0) > 0.01:
-            vf_parts.append(f"scale=w='trunc(iw*{sar:.6f}/2)*2':h='ih'")
-        vf_parts.append("setsar=1")
+            vf.append(f"scale=w='trunc(iw*{sar:.6f}/2)*2':h='ih'")
+        vf.append("setsar=1")
 
-        # Black-bar crop (stable detection shared with make_vertical).
-        crop_applied = False
-        if crop_black_bars:
-            bars = await self._detect_bars(input_path)
-            if bars is not None:
-                cw, ch, cx, cy = bars
-                vf_parts.append(f"crop={cw}:{ch}:{cx}:{cy}")
-                crop_applied = True
-
-        # Bake rotation into pixels and DROP rotation metadata (audit #18):
-        # remux with -noautorotate input option + removemetatags for rotate.
         cmd = [self._ffmpeg, "-y", "-v", "error"]
         if rotation != 0:
-            # decode WITHOUT autorotate; we transpose explicitly
-            cmd += ["-noautorotate"]
-        cmd += ["-i", str(input_path), "-vf", ",".join(vf_parts),
+            cmd += ["-noautorotate"]   # we transpose explicitly (TZ Phase 19)
+        cmd += ["-i", str(input_path), "-vf", ",".join(vf),
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                 "-c:a", "copy", "-map_metadata", "-1", "-movflags", "+faststart",
-                str(output_path)]
+                str(base)]
+        await self._run(cmd, timeout_seconds)
+        bw, bh, bsar, brot = await self._probe(base)
+        if brot or abs(bsar - 1.0) > 0.02:
+            raise NormalizationError(f"PASS A failed: rot={brot} sar={bsar}")
+
+        # ---------- PASS B: black bars ON normalized_base ----------
+        crop_applied = False
+        bars = await self._detect_bars(base)
+        if bars is not None:
+            cw, ch, cx, cy = bars
+            cmd2 = [self._ffmpeg, "-y", "-v", "error", "-i", str(base),
+                    "-vf", f"crop={cw}:{ch}:{cx}:{cy}",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                    "-c:a", "copy", str(output_path)]
+            await self._run(cmd2, timeout_seconds)
+            crop_applied = True
+            base.unlink(missing_ok=True)   # temp intermediate
+        else:
+            shutil.move(base, output_path)
+
+        fw, fh, fsar, frot = await self._probe(output_path)
+        if frot or abs(fsar - 1.0) > 0.02:
+            raise NormalizationError(f"PASS B failed: rot={frot} sar={fsar}")
+
+        res = NormalizationResult(
+            source=output_path, base=base,
+            rotation_before=rotation, sar_before=sar,
+            coded_before=(w, h), base_dims=(bw, bh),
+            crop_applied=crop_applied,
+        )
+        logger.info(
+            "source_normalized",
+            input=str(input_path),
+            raw_coded=(w, h), raw_sar=sar, raw_rot=rotation,
+            base_dims=(bw, bh), crop=crop_applied,
+            final=(fw, fh), sar=fsar, rot=frot,
+        )
+        return res
+
+    async def _run(self, cmd: list[str], timeout: float) -> None:
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
-            _, err = await asyncio.wait_for(proc.communicate(), timeout_seconds)
+            _, err = await asyncio.wait_for(proc.communicate(), timeout)
         except asyncio.TimeoutError as e:
             proc.kill()
             raise NormalizationError("normalize timed out") from e
@@ -124,65 +146,10 @@ class SourceNormalizer:
             raise NormalizationError(
                 f"ffmpeg failed: {err.decode(errors='ignore')[:300]}")
 
-        # Verify (audit #18: probe again after normalization).
-        v2, _ = await self.probe(output_path)
-        rot_after = self._rotation(v2)
-        sar_txt2 = v2.get("sample_aspect_ratio") or "1:1"
-        try:
-            a2, b2 = sar_txt2.split(":")
-            sar_after = float(a2) / float(b2) if float(b2) else 1.0
-        except (ValueError, ZeroDivisionError):
-            sar_after = 1.0
-        if rot_after := self._rotation(v2):
-            # metadata slipped through — second pass to strip rotate tag
-            strip = output_path.with_suffix(".strip.mp4")
-            await self._strip_rotation(output_path, strip)
-            shutil.move(strip, output_path)
-            v3, _ = await self.probe(output_path)
-            rot_after = self._rotation(v3)
-        if rot_after or abs(sar_after - 1.0) > 0.02:
-            raise NormalizationError(
-                f"post-normalize check failed: rot={rot_after} sar={sar_after}")
-
-        res = NormalizationResult(
-            source=output_path,
-            rotation_before=rotation,
-            sar_before=sar,
-            rotation_after=rot_after,
-            sar_after=sar_after,
-            crop_applied=crop_applied,
-            coded_before=coded_before,
-            coded_after=(int(v2.get("width") or 0), int(v2.get("height") or 0)),
-        )
-        logger.info(
-            "source_normalized",
-            input=str(input_path), rotation=rotation, sar=round(sar, 3),
-            coded=coded_before, after=res.coded_after, crop=crop_applied,
-        )
-        return res
-
     async def _detect_bars(self, path: Path) -> tuple[int, int, int, int] | None:
-        """Reuse MediaService.detect_black_bars (stable spread sampling)."""
         try:
             from app.services.media.ffmpeg import MediaService
             return await MediaService().detect_black_bars(path)
         except Exception as e:
             logger.warning("normalizer_cropdetect_failed", error=str(e)[:150])
             return None
-
-    async def _strip_rotation(self, src: Path, dst: Path) -> None:
-        proc = await asyncio.create_subprocess_exec(
-            self._ffmpeg, "-y", "-v", "error", "-i", str(src),
-            "-c", "copy", "-map_metadata", "-1",
-            "-metadata:s:v", "rotate=0",
-            "-bsf:v", "h264_metadata=display_matrix=delete",
-            str(dst))
-        _, err = await proc.communicate()
-        if proc.returncode != 0:
-            raise NormalizationError("strip rotation failed")
-
-    @staticmethod
-    def _rotation(video: dict) -> int:
-        """0/90/180/270 from tags.rotate OR displaymatrix (probe._parse_rotation)."""
-        from app.services.media.probe import _parse_rotation
-        return _parse_rotation(video)

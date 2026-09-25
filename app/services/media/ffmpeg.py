@@ -891,21 +891,27 @@ class MediaService:
             margin_px = margin if margin > 0 else int(video_h * 0.04)
             side_margin = int(video_w * 0.04)
 
-            # Size preset (audit #6): width 28-38% of frame width.
-            width_frac = {"small": 0.28, "medium": 0.33, "large": 0.38}.get(size_preset, 0.33)
+            # PHASE 1: size preset = TARGET VISUAL WIDTH (not just a cap).
+            # Root cause of "small/medium/large look identical": old code
+            # scaled with min(1.0, ...) so a small asset never upscaled and
+            # every preset rendered at the asset's native size.
+            target_frac = {"small": 0.24, "medium": 0.34, "large": 0.46}.get(size_preset, 0.34)
             if position == "full_width_bottom":
-                max_w = video_w - 2 * side_margin
+                target_w = video_w - 2 * side_margin
             else:
-                max_w = video_w * width_frac
-            max_h = video_h * 0.15
+                target_w = video_w * target_frac
+            max_h = video_h * 0.18  # safety limit (was 15%)
 
-            scale = min(1.0, max_w / banner_in_w, max_h / banner_in_h)
+            scale = target_w / max(banner_in_w, 1)
+            # Cap by max height (preserve aspect, never crop/stretch).
+            if banner_in_h * scale > max_h:
+                scale = max_h / banner_in_h
             if scale < 1.0:
                 logger.warning(
                     "cta_banner_too_large_auto_scaled",
                     input_width=banner_in_w, input_height=banner_in_h,
                     scale=round(scale, 3),
-                    max_width=int(max_w), max_height=int(max_h),
+                    max_height=int(max_h),
                 )
             banner_out_w = max(2, int(banner_in_w * scale) // 2 * 2)
             banner_out_h = max(2, int(banner_in_h * scale) // 2 * 2)

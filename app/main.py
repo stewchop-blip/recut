@@ -55,6 +55,7 @@ async def run_schema_migrations() -> None:
         ("current_media_status", "VARCHAR(20) DEFAULT NULL"),
         ("current_media_source_type", "VARCHAR(20) DEFAULT NULL"),
         ("current_media_url", "VARCHAR(1000) DEFAULT NULL"),
+        ("current_media_telegram_file_id", "VARCHAR(200) DEFAULT NULL"),
         ("current_media_normalized", "BOOLEAN DEFAULT FALSE"),
     ]
     is_sqlite = "sqlite" in str(db_manager.engine.url)

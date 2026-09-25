@@ -107,25 +107,26 @@ class QuickPrepPipeline:
         if not meta.has_audio:
             logger.warning("quickprep_no_audio", path=str(input_video))
 
-        # 2. Black-bar detection BEFORE portrait check (a "9:16" video with
-        # embedded letterbox must be pre-cropped, not passed through).
+        # 2b. MANDATORY normalization (TZ Phase 3/4/5/6): EVERY source goes
+        # raw → SourceNormalizer (two-pass: rotate+SAR, then bar crop on
+        # normalized pixels) → normalized_source. Pre-normalization
+        # cropdetect here is REMOVED (single source of truth).
+        from app.services.media.normalizer import SourceNormalizer
+        normalized_path = job_dir / "normalized_source.mp4"
+        norm = await SourceNormalizer().normalize(input_video, normalized_path)
+        input_video = norm.source
+        logger.info(
+            "quickprep_source_normalized",
+            raw_coded=norm.coded_before, raw_rot=norm.rotation_before,
+            raw_sar=norm.sar_before, base=norm.base_dims,
+            crop=norm.crop_applied,
+        )
         try:
-            bars = await media.detect_black_bars(input_video)
+            meta = await probe.probe(input_video)
         except Exception as e:
-            logger.warning("quickprep_cropdetect_failed", error=str(e)[:200])
-            bars = None
-        if bars is not None:
-            w, h, x, y = bars
-            logger.info("black_bars_detected", crop_w=w, crop_h=h, crop_x=x, crop_y=y)
-            cropped = job_dir / "precrop.mp4"
-            await media._run_crop_pass(input_video, cropped, w, h, x, y)
-            input_video = cropped
-            try:
-                meta = await probe.probe(input_video)
-            except Exception as e:
-                raise QuickPrepError(f"Re-probe after crop failed: {e}") from e
+            raise QuickPrepError(f"Re-probe after normalize failed: {e}") from e
 
-        # 2b. TransformationPreset resolution (PART 23-24) — single settings object.
+        # 2c. TransformationPreset resolution (PART 23-24) — single settings object.
         # Overrides per-style settings when using a built-in preset.
         from app.services.overlays.presets import resolve_preset
         preset_cfg = resolve_preset(transformation_preset)
@@ -145,51 +146,26 @@ class QuickPrepPipeline:
         # (cta_size remains from user DB settings unless preset explicitly
         # overrides — kept at user value for simplicity.)
 
-        # 3. Vertical format — decisions on EFFECTIVE DISPLAY GEOMETRY
-        # (PART 5/6/7): coded × SAR, rotation applied. Never coded dims.
-        from app.services.media.geometry import get_display_geometry, is_near_aspect
-        geo = get_display_geometry(meta)
-        current = input_video
-        # Already 9:16 (display ratio within 5%) → passthrough, but normalize
-        # SAR (preserving DAR) and rotation metadata if present.
+        # 3. Style rendering — ALWAYS through make_vertical/TemplateCompositor
+        # (TZ Phase 10/11): normalization != style rendering. A vertical
+        # source no longer bypasses background/title/brand/banner layout.
         target_ratio = target_width / max(target_height, 1)
+        current = input_video
         try:
-            if is_near_aspect(meta, target_ratio, tolerance=0.05):
-                vertical_path = job_dir / "vertical.mp4"
-                import shutil
-                # Phase 3 wiring (audit #20): rotation must be BAKED even
-                # when SAR == 1 — never stream-copy a rotated source.
-                needs_norm = (
-                    abs(meta.sample_aspect_ratio - 1.0) > 0.01
-                    or geo.rotation in (90, 180, 270)
-                )
-                if needs_norm:
-                    from app.services.media.normalizer import SourceNormalizer
-                    await SourceNormalizer().normalize(current, vertical_path)
-                    logger.info(
-                        "quickprep_passthrough_normalized",
-                        path=str(vertical_path),
-                        source_sar=meta.sample_aspect_ratio,
-                        source_rotation=geo.rotation,
-                    )
-                else:
-                    shutil.copy2(current, vertical_path)
-                    logger.info("quickprep_passthrough_vertical", path=str(vertical_path))
-            else:
-                vertical_path = job_dir / "vertical.mp4"
-                await media.make_vertical(
-                    current,
-                    vertical_path,
-                    target_width=target_width,
-                    target_height=target_height,
-                    target_fps=target_fps,
-                    video_bitrate=video_bitrate,
-                    audio_bitrate=audio_bitrate,
-                    background_id=background_id,
-                    title_text=title_text,
-                    brand_corner=brand_corner,
-                    audio_preset=audio_preset,
-                )
+            vertical_path = job_dir / "vertical.mp4"
+            await media.make_vertical(
+                current,
+                vertical_path,
+                target_width=target_width,
+                target_height=target_height,
+                target_fps=target_fps,
+                video_bitrate=video_bitrate,
+                audio_bitrate=audio_bitrate,
+                background_id=background_id,
+                title_text=title_text,
+                brand_corner=brand_corner,
+                audio_preset=audio_preset,
+            )
             current = vertical_path
             # Output geometry log (audit #22).
             try:
@@ -262,50 +238,46 @@ class QuickPrepPipeline:
             if not current.exists():
                 raise QuickPrepError(f"No output produced: {e}") from e
 
-        # 5. Verify + GEOMETRY VALIDATION (PART 9): never send a deformed
-        # clip — output SAR must be 1:1 and dims must match the canvas.
+        # 5. Verify + GEOMETRY VALIDATION (PART 9, TZ Phase 35): never send
+        # a deformed clip. Validation errors MUST NOT fall through the
+        # broad except into a "successful" result.
+        final_meta = None
         try:
             final_meta = await probe.probe(current)
-            if abs(final_meta.sample_aspect_ratio - 1.0) > 0.01:
-                raise QuickPrepError(
-                    f"GeometryValidationError: output SAR="
-                    f"{final_meta.sample_aspect_ratio}, expected 1:1 "
-                    f"(would display stretched) — not sending"
-                )
-            if (output_width, output_height) != (final_meta.width, final_meta.height) \
-                    and (final_meta.width, final_meta.height) != (meta.effective_width, meta.effective_height):
-                logger.warning(
-                    "geometry_output_dims_unexpected",
-                    expected=f"{output_width}x{output_height}",
-                    got=f"{final_meta.width}x{final_meta.height}",
-                    source_effective=f"{meta.effective_width}x{meta.effective_height}",
-                )
-            logger.info(
-                "video_geometry_final",
-                source_coded=f"{meta.coded_width}x{meta.coded_height}",
-                source_effective=f"{meta.effective_width}x{meta.effective_height}",
-                source_sar=meta.sample_aspect_ratio,
-                source_dar=meta.display_aspect_ratio,
-                source_rotation=meta.rotation,
-                output=f"{final_meta.width}x{final_meta.height}",
-                output_sar=final_meta.sample_aspect_ratio,
-                output_dar=final_meta.display_aspect_ratio,
-            )
-            return QuickPrepResult(
-                final_path=current,
-                size_bytes=current.stat().st_size,
-                width=final_meta.width,
-                height=final_meta.height,
-                duration_seconds=final_meta.duration_seconds,
-                has_cta=has_cta,
-            )
         except Exception as e:
-            logger.warning("quickprep_verify_failed", error=str(e)[:200])
-            return QuickPrepResult(
-                final_path=current,
-                size_bytes=current.stat().st_size,
-                width=meta.width,
-                height=meta.height,
-                duration_seconds=meta.duration_seconds,
-                has_cta=has_cta,
+            logger.warning("quickprep_probe_failed", error=str(e)[:200])
+            raise QuickPrepError(f"Final probe failed: {e}") from e
+        # Validation WITHOUT broad catch (TZ Phase 35).
+        if abs(final_meta.sample_aspect_ratio - 1.0) > 0.01:
+            raise QuickPrepError(
+                f"GeometryValidationError: output SAR="
+                f"{final_meta.sample_aspect_ratio}, expected 1:1 "
+                f"(would display stretched) — not sending"
             )
+        if (output_width, output_height) != (final_meta.width, final_meta.height) \
+                and (final_meta.width, final_meta.height) != (meta.effective_width, meta.effective_height):
+            logger.warning(
+                "geometry_output_dims_unexpected",
+                expected=f"{output_width}x{output_height}",
+                got=f"{final_meta.width}x{final_meta.height}",
+                source_effective=f"{meta.effective_width}x{meta.effective_height}",
+            )
+        logger.info(
+            "video_geometry_final",
+            source_coded=f"{meta.coded_width}x{meta.coded_height}",
+            source_effective=f"{meta.effective_width}x{meta.effective_height}",
+            source_sar=meta.sample_aspect_ratio,
+            source_dar=meta.display_aspect_ratio,
+            source_rotation=meta.rotation,
+            output=f"{final_meta.width}x{final_meta.height}",
+            output_sar=final_meta.sample_aspect_ratio,
+            output_dar=final_meta.display_aspect_ratio,
+        )
+        return QuickPrepResult(
+            final_path=current,
+            size_bytes=current.stat().st_size,
+            width=final_meta.width,
+            height=final_meta.height,
+            duration_seconds=final_meta.duration_seconds,
+            has_cta=has_cta,
+        )
