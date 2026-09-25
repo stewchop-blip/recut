@@ -157,16 +157,17 @@ class QuickPrepPipeline:
             if is_near_aspect(meta, target_ratio, tolerance=0.05):
                 vertical_path = job_dir / "vertical.mp4"
                 import shutil
+                # Phase 3 wiring (audit #20): rotation must be BAKED even
+                # when SAR == 1 — never stream-copy a rotated source.
                 needs_norm = (
                     abs(meta.sample_aspect_ratio - 1.0) > 0.01
                     or geo.rotation in (90, 180, 270)
                 )
                 if needs_norm:
-                    await get_media_service().normalize_square_pixels(
-                        current, vertical_path,
-                    )
+                    from app.services.media.normalizer import SourceNormalizer
+                    await SourceNormalizer().normalize(current, vertical_path)
                     logger.info(
-                        "quickprep_passthrough_normalized_sar",
+                        "quickprep_passthrough_normalized",
                         path=str(vertical_path),
                         source_sar=meta.sample_aspect_ratio,
                         source_rotation=geo.rotation,
