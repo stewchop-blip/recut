@@ -98,3 +98,13 @@ class CurrentMediaService:
                 current_media_url=None,
                 current_media_normalized=False,
             )
+
+
+_service: CurrentMediaService | None = None
+
+
+def get_current_media_service() -> CurrentMediaService:
+    global _service
+    if _service is None:
+        _service = CurrentMediaService()
+    return _service

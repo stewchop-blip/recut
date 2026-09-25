@@ -262,6 +262,13 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         job_dir=str(job_dir),
         status_message_id=status_msg.message_id,
     )
+    # Phase 1 wiring: persist current media in DB (survives restart).
+    try:
+        from app.services.current_media import get_current_media_service
+        await get_current_media_service().set_ready(
+            user_id, Path(input_path), job_id=job_id)
+    except Exception as e:
+        logger.warning("current_media_set_failed", error=str(e)[:150])
 
 
 @router.message(F.text)
@@ -390,6 +397,13 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
         job_dir=str(job_dir),
         status_message_id=status_msg.message_id,
     )
+    # Phase 1 wiring: persist current media in DB (survives restart).
+    try:
+        from app.services.current_media import get_current_media_service
+        await get_current_media_service().set_ready(
+            user_id, Path(result.path), job_id=job_id, source_url=url)
+    except Exception as e:
+        logger.warning("current_media_set_failed", error=str(e)[:150])
 
     dur_str = _fmt_duration(duration_sec) if duration_sec > 0 else "—"
     res_str = f"{w}×{h}" if w > 0 and h > 0 else "—"
@@ -450,6 +464,23 @@ def _pop_pending(user_id: int) -> _PendingJob | None:
 async def on_quick_prep(call: CallbackQuery) -> None:
     user_id = call.from_user.id if call.from_user else 0
     pending = _get_pending(user_id)
+    if pending is None:
+        # Phase 1 recovery (audit #14/51): reuse current media from DB
+        # instead of asking the user to re-send the video.
+        try:
+            from app.services.current_media import get_current_media_service
+            cm = await get_current_media_service().get(user_id)
+            if cm is not None and cm.source_path and cm.source_path.exists():
+                pending = _PendingJob(
+                    job_id=cm.job_id or 0,
+                    chat_id=call.message.chat.id if call.message else 0,
+                    input_path=str(cm.source_path),
+                    job_dir=str(cm.source_path.parent),
+                    status_message_id=call.message.message_id if call.message else 0,
+                )
+                _pending_jobs[user_id] = pending
+        except Exception as e:
+            logger.warning("current_media_reuse_failed", error=str(e)[:150])
     if pending is None:
         await call.answer("⚠️ Сначала отправь видео.", show_alert=True)
         return

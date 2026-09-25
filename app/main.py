@@ -50,6 +50,12 @@ async def run_schema_migrations() -> None:
         ("style_id", "VARCHAR(20) DEFAULT 'clean'"),
         ("custom_title", "VARCHAR(200) DEFAULT ''"),
         ("audio_preset", "VARCHAR(10) DEFAULT 'original'"),
+        ("current_media_path", "VARCHAR(500) DEFAULT NULL"),
+        ("current_media_job_id", "INTEGER DEFAULT NULL"),
+        ("current_media_status", "VARCHAR(20) DEFAULT NULL"),
+        ("current_media_source_type", "VARCHAR(20) DEFAULT NULL"),
+        ("current_media_url", "VARCHAR(1000) DEFAULT NULL"),
+        ("current_media_normalized", "BOOLEAN DEFAULT FALSE"),
     ]
     is_sqlite = "sqlite" in str(db_manager.engine.url)
     try:
