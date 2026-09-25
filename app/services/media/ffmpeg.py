@@ -739,9 +739,9 @@ class MediaService:
         if not crops:
             return None
 
-        # Source dimensions from the probe (already fetched above).
-        src_w = info.width
-        src_h = info.height
+        # Source dimensions from the probe (raw JSON dict, not dataclass).
+        src_w = int(vstream.get("width") or 0)
+        src_h = int(vstream.get("height") or 0)
 
         n = len(crops)
         mode_wh: tuple[int, int] | None = None
