@@ -277,8 +277,11 @@ class ThreeVersionsPipeline:
                     if pcfg and pcfg.title_id != "none" else "")
                 brand = bool(pcfg.brand_corner) if pcfg else False
                 speed = getattr(pcfg, "speed", 1.0) if pcfg else 1.0
+                color_preset = getattr(pcfg, "color_preset", "original") if pcfg else "original"
+                layout_id = getattr(pcfg, "layout_id", "pip") if pcfg else "pip"
             except Exception:
                 bg, title, brand, speed = "blur", "", False, 1.0
+                color_preset, layout_id = "original", "pip"
             vertical = job_dir / f"version_{plan.name}_vertical.mp4"
             try:
                 await media.make_vertical(
@@ -288,6 +291,8 @@ class ThreeVersionsPipeline:
                     title_text=title,
                     brand_corner=brand,
                     speed=speed,
+                    color_preset=color_preset,
+                    layout_id=layout_id,
                 )
             except Exception as e:
                 raise ThreeVersionsError(

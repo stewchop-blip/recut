@@ -30,6 +30,7 @@ class TransformationPreset:
     audio_preset: str    # original / dynamic / music / none
     speed: float         # playback speed (1.0 = original)
     color_preset: str = "original"  # TZ Phase 15: original/contrast/warm/cool/punchy
+    layout_id: str = "pip"  # TZ Phase 17: full / pip / framed
 
 
 # PART 24 — user-facing presets (shown as one-tap buttons in Style picker)
@@ -38,16 +39,19 @@ BUILTIN_PRESETS = {
         "clean", "⚪️ Чистый",
         background_id="blur", title_id="none", brand_corner=False,
         cta_size="small", audio_preset="original", speed=1.0,
+        color_preset="original", layout_id="full",   # TZ Phase 18: near-full
     ),
     "meme": TransformationPreset(
         "meme", "😎 Мем",
         background_id="dark", title_id="wow", brand_corner=False,
         cta_size="large", audio_preset="dynamic", speed=1.0,
+        color_preset="punchy", layout_id="pip",      # TZ Phase 18: PIP 85%
     ),
     "brand": TransformationPreset(
         "brand", "🏷 Бренд",
         background_id="accent", title_id="none", brand_corner=True,
         cta_size="medium", audio_preset="original", speed=1.0,
+        color_preset="contrast", layout_id="framed",  # TZ Phase 18: framed 78%
     ),
 }
 

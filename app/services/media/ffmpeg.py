@@ -325,6 +325,7 @@ class MediaService:
         audio_preset: str = "original",
         speed: float = 1.0,  # TZ Phase 16: setpts/atempo, pitch preserved
         color_preset: str = "original",  # TZ Phase 15: eq на контент
+        layout_id: str = "pip",  # TZ Phase 17: full / pip / framed
         timeout_seconds: float = 600.0,
     ) -> Path:
         """Convert source video to 9:16 vertical with a styled background.
@@ -407,7 +408,7 @@ class MediaService:
                 fg_ratio = cw / max(ch, 1)
             except Exception:
                 fg_ratio = target_width / target_height
-        fg = TemplateSpec(target_width, target_height).fit_video(fg_ratio)
+        fg = TemplateSpec.for_layout(layout_id, target_width, target_height).fit_video(fg_ratio)
 
         logger.info(
             "make_vertical_layout",

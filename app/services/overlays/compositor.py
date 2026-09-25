@@ -32,12 +32,31 @@ class Box:
 
 @dataclass(slots=True, frozen=True)
 class TemplateSpec:
-    """One template's canvas layout. All sizes are pixels."""
+    """One template's canvas layout. All sizes are pixels.
+
+    layout_id (TZ Phase 17):
+      full  — video occupies the full width between title/overlay bands
+              (CLEAN: near-full, no visible frame)
+      pip   — centered video at pip_width_frac of canvas width
+              (MEME/BRAND/PIP: 78-92%)
+    """
     canvas_width: int
     canvas_height: int
     title_height_frac: float = 0.10    # top band for title
     overlay_height_frac: float = 0.15  # bottom band for banner
     side_margin_frac: float = 0.0      # horizontal padding for video box
+    layout_id: str = "pip"
+    pip_width_frac: float = 0.85       # 78-92% canvas width per style
+
+    @classmethod
+    def for_layout(cls, layout_id: str, canvas_w: int, canvas_h: int) -> "TemplateSpec":
+        cfg = {
+            "full":    dict(title_height_frac=0.10, overlay_height_frac=0.13, side_margin_frac=0.0),
+            "pip":     dict(title_height_frac=0.10, overlay_height_frac=0.15, side_margin_frac=0.075),  # 85% width
+            "framed":  dict(title_height_frac=0.10, overlay_height_frac=0.15, side_margin_frac=0.11),   # 78% width
+        }.get(layout_id, {})
+        return cls(canvas_width=canvas_w, canvas_height=canvas_h,
+                   layout_id=layout_id, **cfg)
 
     @property
     def canvas_box(self) -> Box:
