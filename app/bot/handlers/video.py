@@ -290,9 +290,24 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
         )
         return
     text = (message.text or "").strip()
-    if not text.lower().startswith("https://"):
+    # Phase 2 wiring: urlparse validation + job queue with inflight dedup.
+    from app.services.downloader.url_utils import extract_url
+    url = extract_url(text)
+    if url is None:
+        return
+    from app.services.downloader.jobs import get_job_queue
+    queue = get_job_queue()
+    if queue.is_busy(user_id):
+        await message.answer(
+            "⏳ Сейчас обрабатываю видео. Жди завершения или отправь новое после.")
         return
     svc = DownloaderService()
+    try:
+        svc._validate(url)
+    except Exception:
+        await message.answer(
+            "❌ Поддерживаются ссылки: TikTok, Instagram, YouTube. Попробуй другую.")
+        return
     try:
         svc._validate(text)
     except Exception:
