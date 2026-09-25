@@ -50,12 +50,16 @@ MORE_MENU = InlineKeyboardMarkup(inline_keyboard=[
 # 🔊 Звук — audio presets (PART 21/22)
 def audio_menu(current: str) -> InlineKeyboardMarkup:
     from app.services.media.audio import AUDIO_PRESETS
+    # BUG 11 fix: hide "music" preset until user uploads a file.
+    available = [k for k in AUDIO_PRESETS if k != "music"]
     rows = []
-    for pid, info in AUDIO_PRESETS.items():
+    for pid in available:
+        info = AUDIO_PRESETS[pid]
         rows.append([InlineKeyboardButton(
             text=("✅ " if pid == current else "") + info["label"],
             callback_data=f"audio_set:{pid}",
         )])
+    rows.append([InlineKeyboardButton(text="🎵 С музыкой (загрузи файл)", callback_data="audio_info:music")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="more:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
