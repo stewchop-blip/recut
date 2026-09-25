@@ -29,6 +29,7 @@ class TransformationPreset:
     # Content / media
     audio_preset: str    # original / dynamic / music / none
     speed: float         # playback speed (1.0 = original)
+    color_preset: str = "original"  # TZ Phase 15: original/contrast/warm/cool/punchy
 
 
 # PART 24 — user-facing presets (shown as one-tap buttons in Style picker)
@@ -57,3 +58,40 @@ def resolve_preset(preset_id: str | None) -> TransformationPreset | None:
     """Resolve preset id -> TransformationPreset; 'custom' -> None."""
     p = BUILTIN_PRESETS.get(preset_id) if preset_id else None
     return p
+
+
+# TZ Phase 15 — color presets (eq filter params, no manual sliders).
+@dataclass(slots=True, frozen=True)
+class ColorPreset:
+    name: str
+    label: str
+    brightness: float = 0.0
+    contrast: float = 1.0
+    saturation: float = 1.0
+    gamma: float = 1.0
+
+
+COLOR_PRESETS: dict[str, ColorPreset] = {
+    "original": ColorPreset("original", "Оригинал"),
+    "contrast": ColorPreset("contrast", "Контраст", contrast=1.12, gamma=0.97),
+    "warm": ColorPreset("warm", "Тёплый", contrast=1.05, saturation=1.1, gamma=1.03),
+    "cool": ColorPreset("cool", "Холодный", contrast=1.04, saturation=1.05, gamma=0.96),
+    "punchy": ColorPreset("punchy", "Сочный", contrast=1.18, saturation=1.25, brightness=0.02),
+}
+
+
+def eq_filter(color_name: str) -> str:
+    """FFmpeg eq filter string, '' when original."""
+    p = COLOR_PRESETS.get(color_name)
+    if p is None:
+        return ""
+    parts = ["eq=1"]
+    if p.brightness:
+        parts.append(f"brightness={p.brightness}")
+    if p.contrast != 1.0:
+        parts.append(f"contrast={p.contrast}")
+    if p.saturation != 1.0:
+        parts.append(f"saturation={p.saturation}")
+    if p.gamma != 1.0:
+        parts.append(f"gamma={p.gamma}")
+    return ":".join(parts).replace("eq=1:", "eq=")

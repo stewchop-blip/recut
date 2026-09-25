@@ -324,6 +324,7 @@ class MediaService:
         decoration_id: str = "",
         audio_preset: str = "original",
         speed: float = 1.0,  # TZ Phase 16: setpts/atempo, pitch preserved
+        color_preset: str = "original",  # TZ Phase 15: eq на контент
         timeout_seconds: float = 600.0,
     ) -> Path:
         """Convert source video to 9:16 vertical with a styled background.
@@ -424,6 +425,11 @@ class MediaService:
         # FFmpeg performs, never re-decides aspect. bg keeps reset_sar=1
         # (cover-crop of a blurred canvas is aspect-agnostic).
         fg_scale = f"scale={fg.width}:{fg.height},setsar=1"
+        # TZ Phase 15: color preset applies to the FOREGROUND content only.
+        from app.services.overlays.presets import eq_filter as _eq
+        eq_str = _eq(color_preset)
+        if eq_str:
+            fg_scale = f"{fg_scale},{eq_str}"
         fg_pos = f"{fg.x}:{fg.y}"
         if preset.kind == "gradient":
             # PHASE A: two-color animated gradient canvas. The gradients

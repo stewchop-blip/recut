@@ -27,6 +27,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.services.overlays.templates import TITLES  # TZ Phase 20: single registry
+
 from app.core.logging import get_logger
 from app.services.media.ffmpeg import MediaService, get_media_service
 from app.services.media.probe import get_probe_service
@@ -251,32 +253,46 @@ class ThreeVersionsPipeline:
             base = job_dir / f"version_{plan.name}.mp4"
             await self._render_segments(input_video, base, plan.segments)
 
-            # Common renderer: vertical layout.
-            current = base
+            # TZ Phase 20: cut → NORMALIZE first (rotation/SAR baked),
+            # then style render — never coded geometry.
+            from app.services.media.normalizer import SourceNormalizer
+            norm_path = job_dir / f"version_{plan.name}_norm.mp4"
             try:
-                meta = await probe.probe(current)
+                await SourceNormalizer().normalize(base, norm_path)
             except Exception as e:
-                raise ThreeVersionsError(f"probe {plan.name} failed: {e}") from e
-            is_916 = (
-                meta.height >= meta.width
-                and abs(meta.width / max(meta.height, 1) - 9 / 16) < 0.05
-            )
-            if not is_916:
-                vertical = job_dir / f"version_{plan.name}_vertical.mp4"
-                # PART 25: each version uses a different visual preset.
-                preset_style = {
-                    "A": {"background_id": "blur",  "title_text": "",          "brand_corner": False},
-                    "B": {"background_id": "dark",  "title_text": "Вот это момент", "brand_corner": False},
-                    "C": {"background_id": "accent","title_text": "",          "brand_corner": True},
-                }.get(plan.name, {"background_id":"blur","title_text":"","brand_corner":False})
+                raise ThreeVersionsError(
+                    f"normalize {plan.name} failed: {e}") from e
+            current = norm_path
+
+            # TZ Phase 10/11: style ALWAYS through compositor (no 9:16
+            # bypass). Presets from the SINGLE registry.
+            try:
+                from app.services.overlays.presets import resolve_preset
+                preset_id = {"A": "clean", "B": "meme", "C": "brand"}.get(
+                    plan.name, "clean")
+                pcfg = resolve_preset(preset_id)
+                bg = pcfg.background_id if pcfg else "blur"
+                title = (
+                    TITLES.get(pcfg.title_id, TITLES.get("none")).text
+                    if pcfg and pcfg.title_id != "none" else "")
+                brand = bool(pcfg.brand_corner) if pcfg else False
+                speed = getattr(pcfg, "speed", 1.0) if pcfg else 1.0
+            except Exception:
+                bg, title, brand, speed = "blur", "", False, 1.0
+            vertical = job_dir / f"version_{plan.name}_vertical.mp4"
+            try:
                 await media.make_vertical(
                     current, vertical,
-                    background_id=preset_style["background_id"],
+                    background_id=bg,
                     overlay_type=overlay_type,
-                    title_text=preset_style["title_text"],
-                    brand_corner=preset_style["brand_corner"],
+                    title_text=title,
+                    brand_corner=brand,
+                    speed=speed,
                 )
-                current = vertical
+            except Exception as e:
+                raise ThreeVersionsError(
+                    f"make_vertical {plan.name} failed: {e}") from e
+            current = vertical
 
             # CTA on the LAST seconds (shared burn_cta).
             if cta_asset is not None and cta_asset.exists():
