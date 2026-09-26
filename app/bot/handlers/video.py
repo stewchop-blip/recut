@@ -656,7 +656,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
         if send_result.sent:
             await _edit_status(
                 call.message,
-                f"✅ Готово. Исходник удалён.\n\n🆔 Job #{pending.job_id}",
+                f"✅ Готово. Исходник сохранён — можно сделать иначе.\n\n🆔 Job #{pending.job_id}",
                 reply_markup=RESULT_MENU_PREPARE,
             )
             async with db_manager.session() as session:
@@ -837,7 +837,7 @@ async def on_url_original(call: CallbackQuery) -> None:
         await repo.mark_completed(pending.job_id, clips_generated=0)
     await _safe_edit_text(
         call.message,
-        "✅ Готово. Исходник удалён.",
+        "✅ Готово. Исходник сохранён — можно сделать иначе.",
         reply_markup=RESULT_MENU_PREPARE,
     )
     try:
@@ -955,7 +955,7 @@ async def on_url_recut(call: CallbackQuery) -> None:
     if send_result.sent:
         await _edit_status(
             call.message,
-            "✅ Готово. Исходник удалён.\n\n🆔 Job #" + str(pending.job_id),
+            "✅ Готово. Исходник сохранён — можно сделать иначе.\n\n🆔 Job #" + str(pending.job_id),
             reply_markup=RESULT_MENU_PREPARE,
         )
         async with db_manager.session() as session:
@@ -1045,6 +1045,32 @@ async def on_mode_selected(call: CallbackQuery) -> None:
         await call.answer("Неизвестный режим")
         return
     _mode_state[user_id] = mode
+    # Item 12: if CurrentMedia exists and recoverable — reuse it,
+    # do NOT ask for source again.
+    try:
+        from app.services.current_media import resolve_current_media
+        cm = await resolve_current_media(user_id, call.message.bot if call.message else None)
+    except Exception:
+        cm = None
+    if cm is not None and cm.source_path and cm.source_path.is_file():
+        try:
+            _pending_jobs[user_id] = _PendingJob(
+                job_id=cm.job_id or 0,
+                chat_id=call.message.chat.id if call.message else 0,
+                input_path=str(cm.source_path),
+                job_dir=str(cm.source_path.parent),
+                status_message_id=call.message.message_id if call.message else 0,
+            )
+        except Exception:
+            pass
+        from app.bot.keyboards.inline import ACTION_MENU
+        await call.message.edit_text(
+            "🎬 <b>Видео готово</b>\n\nВыбери действие:",
+            parse_mode="HTML",
+            reply_markup=ACTION_MENU,
+        )
+        await call.answer()
+        return
     await call.message.edit_text(_MODE_PROMPTS[mode], parse_mode="HTML")
     await call.answer()
 

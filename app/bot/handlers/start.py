@@ -37,27 +37,22 @@ HELP_TEXT = (
 @router.message(Command("start"))
 async def cmd_start(message: types.Message) -> None:
     from app.bot.keyboards.inline import HOME_MENU
-    # If the user has a pending job in memory, restore the action menu
-    # instead of showing the welcome text (better UX — the menu is
-    # otherwise lost after the status message scrolls away).
+    # Item 11: CurrentMedia is the source of truth, not _pending_jobs.
+    # If media is recoverable → HOME with "Продолжить" info.
+    from app.services.current_media import resolve_current_media
+    user_id = message.from_user.id if message.from_user else 0
     try:
-        from app.bot.handlers.video import _pending_jobs
-        from app.bot.keyboards.inline import ACTION_MENU
-        from pathlib import Path
-        user_id = message.from_user.id if message.from_user else 0
-        pending = _pending_jobs.get(user_id)
-        if pending is not None:
-            input_path = Path(pending.input_path)
-            if input_path.exists():
-                actual_size = input_path.stat().st_size
-                await message.answer(
-                    f"✅ Видео загружено ({actual_size // 1024 // 1024} МБ).\n\n"
-                    f"Выбери действие:",
-                    reply_markup=ACTION_MENU,
-                )
-                return
+        cm = await resolve_current_media(user_id, message.bot)
     except Exception:
-        pass
+        cm = None
+    if cm is not None and cm.source_path and cm.source_path.is_file():
+        from app.bot.keyboards.inline import ACTION_MENU
+        await message.answer(
+            "🎬 <b>ReCut</b>\n\nТекущее видео готово. Продолжаем?",
+            parse_mode="HTML",
+            reply_markup=ACTION_MENU,
+        )
+        return
     await message.answer(
         "🎬 <b>ReCut</b>\n\nЧто сделать?",
         parse_mode="HTML",
