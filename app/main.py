@@ -44,9 +44,10 @@ async def _migrate_jobstatus_enum() -> None:
     if "sqlite" in str(db_manager.engine.url):
         return  # SQLite stores VARCHAR — nothing to migrate
 
-    async with db_manager.engine.connect() as conn:
+    async with db_manager.engine.connect() as conn_raw:
+        await conn_raw.execution_options(isolation_level="AUTOCOMMIT")
         # 1. Find the actual enum type backing jobs.status (do not guess).
-        res = await conn.execute(text(
+        res = await conn_raw.execute(text(
             "SELECT udt_name FROM information_schema.columns "
             "WHERE table_name = 'jobs' AND column_name = 'status' LIMIT 1"))
         row = res.fetchone()
@@ -55,7 +56,7 @@ async def _migrate_jobstatus_enum() -> None:
             logger.warning("jobstatus_enum_not_found", note="jobs.status missing?")
             return
 
-        res = await conn.execute(text(
+        res = await conn_raw.execute(text(
             "SELECT e.enumlabel FROM pg_type t "
             "JOIN pg_enum e ON t.oid = e.enumtypid "
             "WHERE t.typname = :t ORDER BY e.enumsortorder"), {"t": typname})
@@ -74,15 +75,13 @@ async def _migrate_jobstatus_enum() -> None:
             logger.info("postgres_jobstatus_ok", values=existing)
             return
 
-        # 3. ALTER TYPE ... ADD VALUE cannot run inside a transaction on
-        # older PostgreSQL — use autocommit.
-        ac = await conn.execution_options(isolation_level="AUTOCOMMIT")
+        # 3. ALTER TYPE ... ADD VALUE IF NOT EXISTS (autocommit mode).
         for label in missing:
-            await ac.exec_driver_sql(
+            await conn_raw.exec_driver_sql(
                 f'ALTER TYPE "{typname}" ADD VALUE IF NOT EXISTS \'{label}\'')
             logger.info("postgres_jobstatus_value_added", typname=typname, value=label)
 
-        res = await conn.execute(text(
+        res = await conn_raw.execute(text(
             "SELECT e.enumlabel FROM pg_type t "
             "JOIN pg_enum e ON t.oid = e.enumtypid "
             "WHERE t.typname = :t ORDER BY e.enumsortorder"), {"t": typname})
