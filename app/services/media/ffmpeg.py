@@ -350,25 +350,8 @@ class MediaService:
         # pre-crop real content BEFORE layout. Stable across >=70% of
         # sampled frames — a single random frame never decides.
         source = input_path
-        try:
-            bars = await self.detect_black_bars(input_path)
-        except Exception as e:
-            logger.warning("cropdetect_failed", error=str(e)[:200])
-            bars = None
-        if bars is not None:
-            w, h, x, y = bars
-            logger.info(
-                "black_bars_detected",
-                crop_w=w, crop_h=h, crop_x=x, crop_y=y,
-                input=str(input_path),
-            )
-            cropped = output_path.parent / (output_path.stem + "_precrop.mp4")
-            try:
-                await self._run_crop_pass(input_path, cropped, w, h, x, y)
-                source = cropped
-            except Exception as e:
-                logger.warning("black_bars_crop_failed_keep_original", error=str(e)[:200])
-                source = input_path
+        # BLOCKER #4: SourceNormalizer already handles bars/rotation.
+        # make_vertical does NOT crop again (single owner).
 
         # PART 2/4 — TemplateCompositor is the ONLY layout engine.
         # Python computes the foreground box from the DISPLAY aspect ratio
@@ -463,8 +446,9 @@ class MediaService:
                 # Background: cover target (increase) → crop exact → blur.
                 f"[bg_src]scale=w={target_width}:h={target_height}:"
                 f"force_original_aspect_ratio=increase:"
-                f"force_divisible_by=2:reset_sar=1,"
+                f"force_divisible_by=2,"
                 f"crop={target_width}:{target_height},"
+                f"setsar=1,"
                 f"eq=brightness=0.0:contrast=1.1:saturation=1.2,"
                 f"gblur=sigma={blur_strength}[bg];"
                 # Foreground: EXPLICIT size from compositor. NO AR math here.
