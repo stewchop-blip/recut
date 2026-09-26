@@ -1248,7 +1248,7 @@ async def on_settings_timing(call: CallbackQuery) -> None:
     await call.answer()
 
 
-CTA_SIZES = {"small": "Маленькая (~28%)", "medium": "Средняя (~33%)", "large": "Большая (~38%)"}
+CTA_SIZES = {"small": "Маленькая", "medium": "Средняя", "large": "Большая"}
 
 
 def _resolve_title_text(s) -> str:

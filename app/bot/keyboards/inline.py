@@ -59,7 +59,8 @@ def audio_menu(current: str) -> InlineKeyboardMarkup:
             text=("✅ " if pid == current else "") + info["label"],
             callback_data=f"audio_set:{pid}",
         )])
-    rows.append([InlineKeyboardButton(text="🎵 С музыкой (загрузи файл)", callback_data="audio_info:music")])
+    # Item 26: dead callback removed — "С музыкой" needs file-upload flow
+    # that does not exist yet. Re-add only when implemented.
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="more:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -179,11 +180,11 @@ def title_menu(current: str) -> InlineKeyboardMarkup:
 
 SIZE_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [
-        InlineKeyboardButton(text="🔷 Маленькая (~28%)", callback_data="cta_size:small"),
-        InlineKeyboardButton(text="🔶 Средняя (~33%)", callback_data="cta_size:medium"),
+        InlineKeyboardButton(text="🔷 Маленькая", callback_data="cta_size:small"),
+        InlineKeyboardButton(text="🔶 Средняя", callback_data="cta_size:medium"),
     ],
     [
-        InlineKeyboardButton(text="🔸 Большая (~38%)", callback_data="cta_size:large"),
+        InlineKeyboardButton(text="🔸 Большая", callback_data="cta_size:large"),
     ],
     [InlineKeyboardButton(text="⬅️ Назад", callback_data="banner:menu")],
 ])

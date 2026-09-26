@@ -188,6 +188,18 @@ async def _on_startup(bot: Bot) -> None:
         out2, _ = await proc2.communicate()
         first2 = out2.decode(errors="ignore").splitlines()[0] if out2 else "?"
         logger.info("ffprobe_version", version=first2)
+        # Item 18: log yt-dlp version too.
+        try:
+            import shutil as _shutil
+            ytdlp = _shutil.which("yt-dlp") or "yt-dlp"
+            proc3 = await _aio.create_subprocess_exec(
+                ytdlp, "--version", stdout=_aio.subprocess.PIPE,
+                stderr=_aio.subprocess.DEVNULL)
+            out3, _ = await proc3.communicate()
+            logger.info("ytdlp_version",
+                        version=out3.decode(errors="ignore").strip() or "?")
+        except Exception as e:
+            logger.warning("ytdlp_version_probe_failed", error=str(e)[:120])
     except Exception as e:
         logger.warning("ffmpeg_version_probe_failed", error=str(e)[:200])
 
@@ -275,7 +287,11 @@ async def run_polling() -> None:
     await _on_startup(bot)
 
     try:
-        logger.info("polling_started", bot_id=bot.id)
+        import socket
+        logger.info("polling_started", bot_id=bot.id,
+                    bot_instance_id=f"{socket.gethostname()}-{os.getpid()}",
+                    pid=os.getpid(),
+                    hostname=socket.gethostname())
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         await _on_shutdown(bot)
