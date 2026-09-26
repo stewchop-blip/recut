@@ -265,12 +265,18 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         temp.cleanup_job(job_dir.name)
         return
 
-    # 2) CurrentMedia (with telegram_file_id for post-restart recovery).
+    # 2) Save CURRENT source separately from render workspace (item 6).
+    current_dir = Path(f"/tmp/recut/current/{user_id}")
+    current_dir.mkdir(parents=True, exist_ok=True)
+    current_ext = input_path.suffix or ".mp4"
+    current_path = current_dir / f"source{current_ext}"
+    import shutil
+    shutil.copy2(str(input_path), str(current_path))
     telegram_file_id = getattr(attachment, "file_id", None)
     try:
         from app.services.current_media import get_current_media_service
         await get_current_media_service().set_ready(
-            user_id, Path(input_path), job_id=job_id,
+            user_id, current_path, job_id=job_id,
             telegram_file_id=telegram_file_id,
         )
     except Exception:
