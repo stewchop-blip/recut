@@ -225,18 +225,20 @@ class DownloaderService:
         return results
 
     def _validate(self, url: str) -> str:
+        """Single source of truth: app/services/downloader/url_utils.py
+        (HOTFIX item 10). No parallel validation logic here."""
+        from app.services.downloader.url_utils import (
+            get_platform_name, is_supported_url,
+        )
         if not isinstance(url, str) or not url.strip():
             raise UnsupportedURLError("Empty URL")
         url = url.strip()
         if not url.lower().startswith("https://"):
             raise UnsupportedURLError("Only HTTPS URLs are supported")
-        host = self._host(url)
-        if not host:
-            raise UnsupportedURLError("Invalid URL")
-        for pattern in _SUPPORTED_HOST_PATTERNS:
-            if host == pattern or host.endswith("." + pattern):
-                return url
-        raise UnsupportedURLError(f"Source '{host}' is not supported yet")
+        if not is_supported_url(url):
+            host = self._host(url) or "unknown"
+            raise UnsupportedURLError(f"Source '{host}' is not supported yet")
+        return url
 
     @staticmethod
     def _host(url: str) -> Optional[str]:

@@ -20,13 +20,8 @@ SUPPORTED_HOSTS = {
 
 # Tracking params safe to strip (audit #6)
 STRIP_PARAMS = {"utm_source", "utm_medium", "utm_campaign", "utm_content",
-                "utm_term", "si", "feature", "ref", "igshid", "is_from_webapp"}
-
-
-def _host_matches(url_host: str, supported: str) -> bool:
-    """Hostname boundary: tiktok.com matches www.tiktok.com, not faketiktok.com."""
-    host = url.lower().strip(".")
-    return host == supported or host.endswith("." + supported)
+                "utm_term", "si", "feature", "ref", "igshid", "igsh",
+                "is_from_webapp"}
 
 
 def get_platform_name(url: str) -> str:

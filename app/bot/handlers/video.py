@@ -131,13 +131,20 @@ def _fmt_duration(seconds: float) -> str:
 # Step 1 — accept video, save to job_dir, show action menu
 # ---------------------------------------------------------------------------
 
-@router.message(F.video | F.video_note | (F.document & F.document.mime_type.startswith("video/")))
+@router.message(F.video | F.video_note | F.animation | F.document)
 async def on_video_message(message: types.Message, bot: Bot) -> None:
     user_id: int = message.from_user.id if message.from_user else 0
     if not user_id:
         return
 
     settings = get_settings()
+
+    # Banner upload state takes priority: a document while waiting for a
+    # banner asset is the banner, not a video (HOTFIX routing fix).
+    doc_only = message.document and not (message.video or message.video_note or message.animation)
+    if doc_only and user_id in _awaiting_banner:
+        await _handle_banner_asset(message, bot)
+        return
 
     # Detect attachment
     attachment = _pick_attachment(message)
@@ -146,26 +153,30 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
 
     declared_size = int(getattr(attachment, "file_size", 0) or 0)
     mime = getattr(attachment, "mime_type", None)
-    filename = getattr(attachment, "file_name", None) or "video.mp4"
+    filename = getattr(attachment, "file_name", None) or ""
 
     # Telegram Bot API limit: 20 MB for files via getFile.
     TELEGRAM_BOT_API_LIMIT = 20 * 1024 * 1024
     if declared_size > TELEGRAM_BOT_API_LIMIT:
         await message.answer(
-            "❌ Видео больше 20 МБ.\n\n"
-            "Telegram Bot API сейчас не позволяет боту скачивать файлы больше этого лимита. "
-            "Это ограничение платформы, не наше.\n\n"
-            "Попробуй сжать видео до 20 МБ или отправь ссылку на файл."
+            "❌ Файл слишком большой для загрузки через текущий Telegram API.\n\n"
+            "Пришли ссылку или файл меньшего размера."
         )
         return
 
-    # Telegram MIME hint (some attachments omit it; treat as ok)
-    if mime and mime != "application/octet-stream" and not mime.startswith("video/"):
-        await message.answer(
-            f"❌ Неподдерживаемый формат: {mime}.\n\n"
-            f"Отправь MP4 / MOV / MKV / WebM."
-        )
-        return
+    # MIME is only a HINT (HOTFIX items 5/6). A clearly non-video document
+    # is rejected early; octet-stream/None/video/* all proceed to ffprobe.
+    if mime and not (mime.startswith("video/") or mime == "application/octet-stream"
+                     or mime.startswith("application/x-matroska")):
+        # Cheap filename check before rejecting — mislabeled MP4s happen.
+        _vid_exts = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpg",
+                     ".mpeg", ".ts", ".wmv", ".flv", ".3gp")
+        if not filename.lower().endswith(_vid_exts):
+            await message.answer(
+                f"❌ Это не видео-файл ({mime}).\n\n"
+                f"Отправь MP4 / MOV / MKV / WebM."
+            )
+            return
 
     # Concurrency guard
     async with db_manager.session() as session:
@@ -181,7 +192,7 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
             telegram_user_id=user_id,
             telegram_chat_id=message.chat.id,
             source_message_id=message.message_id,
-            source_filename=filename,
+            source_filename=filename or "video",
             source_bytes=declared_size or None,
         )
         job_id = job.id
@@ -197,7 +208,7 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
 
     try:
         input_path = await downloader.download_to_job_dir(
-            source=message, job_dir=job_dir, filename="input.mp4",
+            source=message, job_dir=job_dir, filename=None,
         )
     except Exception as e:
         logger.error("video_download_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
@@ -210,46 +221,79 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
 
     actual_size = input_path.stat().st_size
 
-    # Probe for UX metadata (duration, resolution).
+    # ffprobe decides (HOTFIX item 6) — MIME was only a hint.
     try:
         probe = get_probe_service()
         meta = await probe.probe(input_path)
         duration_sec = meta.duration_seconds
         w, h = meta.width, meta.height
+        if duration_sec <= 0 or w <= 0 or h <= 0:
+            raise ValueError("no video stream / zero duration")
+    except Exception as e:
+        logger.warning("local_video_ffprobe_rejected", user_id=user_id,
+                       job_id=job_id, error=str(e)[:200])
+        await _fail_job(job_id, "NOT_A_VIDEO", str(e)[:300])
+        await status_msg.edit_text(
+            "❌ Это не видео (или файл повреждён).\n\n"
+            "Отправь MP4 / MOV / MKV / WebM — или ссылку на ролик."
+        )
+        temp.cleanup_job(job_dir.name)
+        return
+
+    # HOTFIX order (item 8): persist DB state BEFORE touching the Telegram UI.
+    # 1) Job READY — guarded so an enum/DB error can't hang the bot silently.
+    from app.database.models import JobStatus
+    try:
+        async with db_manager.session() as session:
+            repo = JobRepository(session)
+            await repo.set_status(
+                job_id=job_id,
+                status=JobStatus.READY,
+                status_message_id=status_msg.message_id,
+            )
+            from sqlalchemy import update as _u
+            from app.database.models import Job as _Job
+            await session.execute(
+                _u(_Job).where(_Job.id == job_id).values(source_bytes=actual_size)
+            )
     except Exception:
-        duration_sec = 0.0
-        w, h = 0, 0
+        logger.exception("job_ready_transition_failed", job_id=job_id)
+        await _fail_job(job_id, "MEDIA_READY_FAILED", "READY persist failed")
+        await status_msg.edit_text(
+            "❌ Не удалось сохранить видео.\nКод ошибки: MEDIA_READY_FAILED"
+        )
+        temp.cleanup_job(job_dir.name)
+        return
 
-    # Mark job DOWNLOADING done; remember source path on the job
-    async with db_manager.session() as session:
-        repo = JobRepository(session)
-        await repo.set_status(
-            job_id=job_id,
-            status=__import__("app.database.models", fromlist=["JobStatus"]).JobStatus.PENDING,
-            status_message_id=status_msg.message_id,
+    # 2) CurrentMedia (with telegram_file_id for post-restart recovery).
+    telegram_file_id = getattr(attachment, "file_id", None)
+    try:
+        from app.services.current_media import get_current_media_service
+        await get_current_media_service().set_ready(
+            user_id, Path(input_path), job_id=job_id,
+            telegram_file_id=telegram_file_id,
         )
-        # TZ Phase 25: media present → READY (not counted as active processing)
-        await repo.set_status(
-            job_id=job_id,
-            status=__import__("app.database.models", fromlist=["JobStatus"]).JobStatus.READY,
-        )
-        # Persist a small metadata note (actual size)
-        from sqlalchemy import update as _u
-        from app.database.models import Job as _Job
-        await session.execute(
-            _u(_Job).where(_Job.id == job_id).values(source_bytes=actual_size)
-        )
+    except Exception:
+        logger.exception("current_media_set_failed", job_id=job_id)
 
-    # Show action menu with video info.
+    # 3) In-memory pending cache.
+    _pending_jobs[user_id] = _PendingJob(
+        job_id=job_id,
+        chat_id=message.chat.id,
+        input_path=str(input_path),
+        job_dir=str(job_dir),
+        status_message_id=status_msg.message_id,
+    )
+
+    # 4) Only now render the UI — a UI failure can no longer lose media.
     dur_str = _fmt_duration(duration_sec) if duration_sec > 0 else "—"
-    res_str = f"{w}\u00d7{h}" if w > 0 and h > 0 else "—"
-    text = f"\U0001f3ac \u0412\u0438\u0434\u0435\u043e \u043f\u043e\u043b\u0443\u0447\u0435\u043d\u043e\n"
-    if duration_sec > 0:
-        text += f"\u23f1 {dur_str}\n"
-    if w > 0 and h > 0:
-        text += f"\U0001f4d0 {res_str}\n"
-    text += "\n\u0412\u044b\u0431\u0435\u0440\u0438 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435:"
-
+    res_str = f"{w}×{h}" if w > 0 and h > 0 else "—"
+    text = (
+        f"🎬 <b>Видео готово</b>\n\n"
+        f"⏱ {dur_str}\n"
+        f"📐 {res_str}\n\n"
+        f"Выбери действие:"
+    )
     # Decide menu: chosen mode wins; long videos get Smart Clips option.
     SMART_CLIPS_MIN_SECONDS = 120
     selected_mode = get_selected_mode(user_id)
@@ -258,23 +302,7 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         _mode_state.pop(user_id, None)
     else:
         menu = mode_input_menu("moments" if duration_sec >= SMART_CLIPS_MIN_SECONDS else "prepare")
-    await status_msg.edit_text(text, reply_markup=menu)
-
-    # Stash the job info on a tiny in-memory store so callbacks can find it
-    _pending_jobs[user_id] = _PendingJob(
-        job_id=job_id,
-        chat_id=message.chat.id,
-        input_path=str(input_path),
-        job_dir=str(job_dir),
-        status_message_id=status_msg.message_id,
-    )
-    # Phase 1 wiring: persist current media in DB (survives restart).
-    try:
-        from app.services.current_media import get_current_media_service
-        await get_current_media_service().set_ready(
-            user_id, Path(input_path), job_id=job_id)
-    except Exception as e:
-        logger.warning("current_media_set_failed", error=str(e)[:150])
+    await _safe_edit_text(status_msg, text, reply_markup=menu, parse_mode="HTML")
 
 
 @router.message(F.text)
@@ -303,11 +331,13 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
         )
         return
     text = (message.text or "").strip()
-    # Phase 2 wiring: urlparse validation + job queue with inflight dedup.
-    from app.services.downloader.url_utils import extract_url
+    # HOTFIX items 9/10/11: extract → normalize → ONE validator → queue.
+    from app.services.downloader.url_utils import extract_url, normalize_url, get_platform_name
     url = extract_url(text)
     if url is None:
         return
+    url = normalize_url(url)
+    platform = get_platform_name(url)
     from app.services.downloader.jobs import get_job_queue
     queue = get_job_queue()
     if queue.is_busy(user_id):
@@ -320,10 +350,6 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
     except Exception:
         await message.answer(
             "❌ Поддерживаются ссылки: TikTok, Instagram, YouTube. Попробуй другую.")
-        return
-    try:
-        svc._validate(text)
-    except Exception:
         return
 
     async with db_manager.session() as session:
@@ -347,8 +373,17 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
     job_dir = temp._job_dir(f"job_{job_id}_{uuid.uuid4().hex[:8]}")
     job_dir.mkdir(parents=True, exist_ok=True)
 
+    logger.info(
+        "download_request", user_id=user_id, job_id=job_id,
+        normalized_url=url, platform=platform, raw_text_len=len(text),
+    )
+
+    # HOTFIX item 11: run_download (semaphore + per-user lock + inflight dedup).
+    async def _download_work():
+        return await svc.download(url, job_dir)
+
     try:
-        result = await svc.download(text, job_dir)
+        result = await queue.run_download(user_id, url, _download_work)
     except URLDownloadError as e:
         logger.error("url_download_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
         await _fail_job(job_id, "URL_DOWNLOAD_FAILED", str(e)[:500])
@@ -383,23 +418,36 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
         w, h = 0, 0
 
     actual_size = result.size_bytes
-    async with db_manager.session() as session:
-        repo = JobRepository(session)
-        await repo.set_status(
-            job_id=job_id,
-            status=__import__("app.database.models", fromlist=["JobStatus"]).JobStatus.PENDING,
-            status_message_id=status_msg.message_id,
+    # HOTFIX item 8: DB/persist FIRST, UI last. READY transition guarded.
+    from app.database.models import JobStatus
+    try:
+        async with db_manager.session() as session:
+            repo = JobRepository(session)
+            await repo.set_status(
+                job_id=job_id,
+                status=JobStatus.READY,
+                status_message_id=status_msg.message_id,
+            )
+            from sqlalchemy import update as _u
+            from app.database.models import Job as _Job
+            await session.execute(
+                _u(_Job).where(_Job.id == job_id).values(source_bytes=actual_size)
+            )
+    except Exception:
+        logger.exception("job_ready_transition_failed", job_id=job_id, source="url")
+        await _fail_job(job_id, "MEDIA_READY_FAILED", "READY persist failed (url)")
+        await status_msg.edit_text(
+            "❌ Не удалось сохранить видео.\nКод ошибки: MEDIA_READY_FAILED"
         )
-        # TZ Phase 25: media present → READY (not counted as active processing)
-        await repo.set_status(
-            job_id=job_id,
-            status=__import__("app.database.models", fromlist=["JobStatus"]).JobStatus.READY,
-        )
-        from sqlalchemy import update as _u
-        from app.database.models import Job as _Job
-        await session.execute(
-            _u(_Job).where(_Job.id == job_id).values(source_bytes=actual_size)
-        )
+        temp.cleanup_job(job_dir.name)
+        return
+
+    try:
+        from app.services.current_media import get_current_media_service
+        await get_current_media_service().set_ready(
+            user_id, Path(result.path), job_id=job_id, source_url=url)
+    except Exception:
+        logger.exception("current_media_set_failed", job_id=job_id)
 
     _pending_jobs[user_id] = _PendingJob(
         job_id=job_id,
@@ -408,17 +456,10 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
         job_dir=str(job_dir),
         status_message_id=status_msg.message_id,
     )
-    # Phase 1 wiring: persist current media in DB (survives restart).
-    try:
-        from app.services.current_media import get_current_media_service
-        await get_current_media_service().set_ready(
-            user_id, Path(result.path), job_id=job_id, source_url=url)
-    except Exception as e:
-        logger.warning("current_media_set_failed", error=str(e)[:150])
 
     dur_str = _fmt_duration(duration_sec) if duration_sec > 0 else "—"
     res_str = f"{w}×{h}" if w > 0 and h > 0 else "—"
-    text_out = f"🎬 Видео получено\n"
+    text_out = f"🎬 <b>Видео готово</b>\n\n"
     if duration_sec > 0:
         text_out += f"⏱ {dur_str}\n"
     if w > 0 and h > 0:
@@ -433,7 +474,7 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
     else:
         menu = mode_input_menu("moments" if duration_sec >= SMART_CLIPS_MIN_SECONDS else "prepare")
     logger.info("url_ready_for_actions", user_id=user_id, job_id=job_id, menu=type(menu).__name__)
-    await status_msg.edit_text(text_out, reply_markup=menu)
+    await _safe_edit_text(status_msg, text_out, reply_markup=menu, parse_mode="HTML")
 
 
 # ---------------------------------------------------------------------------
@@ -1047,7 +1088,7 @@ async def on_banner_upload_request(call: CallbackQuery) -> None:
     user_id = call.from_user.id if call.from_user else 0
     _awaiting_banner.add(user_id)
     await call.message.edit_text(
-        "📎 Пришли плашку: <b>PNG, WebP, GIF или короткий MP4</b>.\n\n"
+        "📎 Пришли плашку: <b>PNG, JPEG, WebP, GIF или короткий MP4</b>.\n\n"
         "Важно: отправь её как <b>ФАЙЛ</b>, а не как фото —\n"
         "так сохранится качество и прозрачность.",
         parse_mode="HTML",
@@ -1541,13 +1582,16 @@ async def on_preview_save(call: CallbackQuery) -> None:
 # Banner upload handler (user sends PNG)
 # ---------------------------------------------------------------------------
 
-@router.message(F.document)
-async def on_banner_upload(message: types.Message, bot: Bot) -> None:
-    """Accept a universal overlay asset: PNG / WebP / GIF / MP4 (Этап 3)."""
+async def _handle_banner_asset(message: types.Message, bot: Bot) -> None:
+    """Accept a universal overlay asset: PNG / JPEG / WebP / GIF / MP4.
+
+    Called from the video-intake router when the user is in banner-upload
+    state (HOTFIX item 5: the intake handler owns ALL documents now).
+    Upload state is cleared ONLY after a successful save (item 17).
+    """
     user_id = message.from_user.id if message.from_user else 0
     if user_id not in _awaiting_banner:
         return  # not waiting for a banner
-    _awaiting_banner.discard(user_id)
 
     doc = message.document
     if not doc or not doc.file_id:
@@ -1555,26 +1599,36 @@ async def on_banner_upload(message: types.Message, bot: Bot) -> None:
         return
 
     mime = (doc.mime_type or "").lower()
-    # (mime prefix, overlay_type, is_animated)
+    filename = (doc.file_name or "").lower()
+    # (mime prefix, overlay_type, is_animated) — JPEG added (item 18).
     accepted = [
         ("image/png", "png", False),
+        ("image/jpeg", "jpeg", False),
         ("image/webp", "webp", False),   # animated webp detected below
         ("image/gif", "gif", True),
         ("video/mp4", "mp4", True),
     ]
     entry = next((e for e in accepted if mime.startswith(e[0])), None)
+    # Fallback: trust the filename extension when MIME is octet-stream/None.
+    if entry is None:
+        ext_map = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg",
+                   ".webp": "webp", ".gif": "gif", ".mp4": "mp4"}
+        for ext, otype in ext_map.items():
+            if filename.endswith(ext):
+                entry = ("", otype, otype in ("gif", "mp4"))
+                break
     if entry is None:
         await message.answer(
             "❌ Неподдерживаемый формат: " + (mime or "неизвестен") + ".\n\n"
-            "Поддерживаются: PNG, WebP, GIF или короткий MP4."
+            "Поддерживаются: PNG, JPEG, WebP, GIF или короткий MP4."
         )
-        return
+        return  # waiting state KEPT — the next valid file must be accepted
     overlay_type, is_animated = entry[1], entry[2]
 
     # Download temporarily, validate, then store file_id in DB.
     try:
         _USER_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-        ext = {"png": "png", "webp": "webp", "gif": "gif", "mp4": "mp4"}[overlay_type]
+        ext = {"png": "png", "jpeg": "jpg", "webp": "webp", "gif": "gif", "mp4": "mp4"}[overlay_type]
         tmp_path = _USER_ASSETS_DIR / f"_tmp_banner_{user_id}.{ext}"
         file = await bot.get_file(doc.file_id)
         await bot.download_file(file.file_path, destination=tmp_path)
@@ -1583,20 +1637,21 @@ async def on_banner_upload(message: types.Message, bot: Bot) -> None:
         await message.answer("❌ Не удалось скачать файл.")
         return
 
-    # Validate with Pillow (images) — animated WebP detected here.
-    if overlay_type in ("png", "webp"):
+    # Content detection via Pillow (item 18) — MIME alone is not trusted.
+    if overlay_type in ("png", "jpeg", "webp"):
         try:
             from PIL import Image
             img = Image.open(tmp_path)
-            if overlay_type == "png" and img.format != "PNG":
+            fmt = (img.format or "").upper()
+            fmt_to_type = {"PNG": "png", "JPEG": "jpeg", "WEBP": "webp"}
+            if fmt_to_type.get(fmt) != overlay_type:
                 tmp_path.unlink(missing_ok=True)
-                await message.answer("❌ Отправь плашку именно как PNG-файл.")
+                await message.answer(
+                    f"❌ Внутри файла не {overlay_type.upper()} "
+                    f"(определён формат: {fmt or 'неизвестен'})."
+                )
                 return
             if overlay_type == "webp":
-                if img.format not in ("WEBP",):
-                    tmp_path.unlink(missing_ok=True)
-                    await message.answer("❌ Файл повреждён или это не WebP.")
-                    return
                 # Animated WebP: n_frames > 1
                 is_animated = getattr(img, "n_frames", 1) > 1
             if img.mode not in ("RGBA", "RGB"):
@@ -1632,6 +1687,8 @@ async def on_banner_upload(message: types.Message, bot: Bot) -> None:
             cta_enabled=True,
         )
     tmp_path.unlink(missing_ok=True)
+    # State cleared ONLY after a successful save (item 17).
+    _awaiting_banner.discard(user_id)
 
     kind = "статичная" if not is_animated else "анимированная"
     await message.answer(f"✅ Плашка сохранена ({kind})")
@@ -1662,14 +1719,34 @@ async def on_banner_photo_wrong_input(message: types.Message) -> None:
 # ---------------------------------------------------------------------------
 
 def _pick_attachment(message: types.Message):
-    """Return the biggest video attachment, or None."""
+    """Return the biggest video attachment, or None (HOTFIX item 5).
+
+    MIME is a hint only: documents with octet-stream/None MIME are returned
+    and validated by ffprobe after download. Clearly non-video documents
+    (explicit non-video MIME + non-video extension) are skipped here so a
+    stray PDF doesn't trigger a download.
+    """
     candidates = []
     if message.video:
         candidates.append(message.video)
     if message.video_note:
         candidates.append(message.video_note)
-    if message.document and message.document.mime_type and message.document.mime_type.startswith("video/"):
-        candidates.append(message.document)
+    if message.animation:
+        candidates.append(message.animation)
+    doc = message.document
+    if doc is not None:
+        mime = (doc.mime_type or "").lower()
+        filename = (doc.file_name or "").lower()
+        video_exts = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v",
+                      ".mpg", ".mpeg", ".ts", ".wmv", ".flv", ".3gp")
+        clearly_video = (
+            mime.startswith("video/")
+            or mime in ("", "application/octet-stream")
+            or mime.startswith("application/x-matroska")
+            or filename.endswith(video_exts)
+        )
+        if clearly_video:
+            candidates.append(doc)
     if not candidates:
         return None
     return max(candidates, key=lambda a: getattr(a, "file_size", 0) or 0)

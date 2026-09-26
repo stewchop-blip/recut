@@ -31,6 +31,93 @@ def _build_dispatcher() -> Dispatcher:
     return dp
 
 
+async def _migrate_jobstatus_enum() -> None:
+    """PostgreSQL enum migration for jobs.status (HOTFIX 2026-09-26).
+
+    create_all() does NOT extend an existing PG ENUM type. When JobStatus.READY
+    was added to the Python enum, production kept the old labels and every
+    transition to READY died with a DataError. Introspect the actual enum,
+    log existing values, and idempotently add any missing labels — matching
+    the existing casing (SQLAlchemy stores enum NAMES, e.g. PENDING).
+    """
+    from sqlalchemy import text
+    if "sqlite" in str(db_manager.engine.url):
+        return  # SQLite stores VARCHAR — nothing to migrate
+
+    async with db_manager.engine.connect() as conn:
+        # 1. Find the actual enum type backing jobs.status (do not guess).
+        res = await conn.execute(text(
+            "SELECT udt_name FROM information_schema.columns "
+            "WHERE table_name = 'jobs' AND column_name = 'status' LIMIT 1"))
+        row = res.fetchone()
+        typname = row[0] if row else None
+        if not typname:
+            logger.warning("jobstatus_enum_not_found", note="jobs.status missing?")
+            return
+
+        res = await conn.execute(text(
+            "SELECT e.enumlabel FROM pg_type t "
+            "JOIN pg_enum e ON t.oid = e.enumtypid "
+            "WHERE t.typname = :t ORDER BY e.enumsortorder"), {"t": typname})
+        existing = [r[0] for r in res.fetchall()]
+        logger.info("postgres_jobstatus_before", typname=typname, values=existing)
+
+        # 2. Same casing as existing labels (NAMES by default in SQLAlchemy).
+        wanted = ["PENDING", "READY", "DOWNLOADING", "PROBING", "TRANSCRIBING",
+                  "ANALYZING", "CUTTING", "RENDERING", "COMPLETED", "FAILED",
+                  "CANCELLED"]
+        lowercase = any(v == v.lower() and v.isalpha() for v in existing)
+        if lowercase:
+            wanted = [w.lower() for w in wanted]
+        missing = [w for w in wanted if w not in existing]
+        if not missing:
+            logger.info("postgres_jobstatus_ok", values=existing)
+            return
+
+        # 3. ALTER TYPE ... ADD VALUE cannot run inside a transaction on
+        # older PostgreSQL — use autocommit.
+        ac = await conn.execution_options(isolation_level="AUTOCOMMIT")
+        for label in missing:
+            await ac.exec_driver_sql(
+                f'ALTER TYPE "{typname}" ADD VALUE IF NOT EXISTS \'{label}\'')
+            logger.info("postgres_jobstatus_value_added", typname=typname, value=label)
+
+        res = await conn.execute(text(
+            "SELECT e.enumlabel FROM pg_type t "
+            "JOIN pg_enum e ON t.oid = e.enumtypid "
+            "WHERE t.typname = :t ORDER BY e.enumsortorder"), {"t": typname})
+        after = [r[0] for r in res.fetchall()]
+        logger.info("postgres_jobstatus_after", values=after)
+
+
+async def _ready_persistence_selfcheck() -> None:
+    """Startup self-check (HOTFIX item 14): JobStatus.READY must persist.
+
+    Creates a throwaway Job row with READY, reads it back, deletes it.
+    On failure the bot must NOT start — every upload would be broken.
+    """
+    from sqlalchemy import delete as _delete, select as _select
+    from app.database.models import Job, JobStatus
+    try:
+        async with db_manager.session() as session:
+            job = Job(telegram_user_id=0, telegram_chat_id=0,
+                      source_message_id=0, status=JobStatus.READY)
+            session.add(job)
+            await session.flush()
+            jid = job.id
+            await session.commit()
+        async with db_manager.session() as session:
+            row = (await session.execute(
+                _select(Job).where(Job.id == jid))).scalar_one()
+            assert row.status == JobStatus.READY, f"read back {row.status}"
+            await session.execute(_delete(Job).where(Job.id == jid))
+            await session.commit()
+        logger.info("db_ready_selfcheck_ok", job_id=jid)
+    except Exception as e:
+        logger.critical("DB SCHEMA INVALID: READY unsupported", error=str(e)[:300])
+        raise
+
+
 async def run_schema_migrations() -> None:
     """Run idempotent schema migrations on startup.
     
@@ -91,6 +178,15 @@ async def _on_startup(bot: Bot) -> None:
 
     # Run schema migrations for existing tables
     await run_schema_migrations()
+    # HOTFIX: extend the PostgreSQL jobs.status enum (READY etc.) —
+    # create_all() does not alter existing enum types.
+    try:
+        await _migrate_jobstatus_enum()
+    except Exception as e:
+        logger.error("jobstatus_enum_migration_failed", error=str(e)[:300])
+
+    # HOTFIX item 14: refuse to start unless READY actually persists.
+    await _ready_persistence_selfcheck()
 
     # Clean up stale Jobs left over from a previous process crash.
     # Without this a 'PENDING' Job from yesterday would block the user
