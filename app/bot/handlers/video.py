@@ -63,7 +63,7 @@ from app.database.repositories import (
 from app.database.session import db_manager
 from app.pipeline.downloader import VideoDownloader
 from app.pipeline.quick_prep import QuickPrepPipeline
-from app.pipeline.url_downloader import DownloaderService, URLDownloadError, URLDownloadResult
+from app.pipeline.url_downloader import DownloaderService, URLDownloadError, StructuredDownloadError, URLDownloadResult
 from app.services.media.probe import get_probe_service
 from app.services.sender import TelegramSender
 from app.services.transcription.faster_whisper import get_transcription_service
@@ -390,6 +390,21 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
 
     try:
         result = await queue.run_download(user_id, url, _download_work)
+    except StructuredDownloadError as e:
+        code = e.code
+        logger.error("url_download_structured_failed", user_id=user_id, job_id=job_id, error_code=code, detail=str(e.detail)[:200])
+        await _fail_job(job_id, code, str(e.detail)[:500])
+        msg = f"❌ Ошибка загрузки: {code}\n\n"
+        if "TIKTOK" in code:
+            msg += "❌ Для этого видео TikTok требуется авторизация."
+        elif "INSTAGRAM" in code:
+            msg += "❌ Instagram не отдал этот ролик.\nВозможно, он ограничен для части аудитории."
+        else:
+            msg += "❌ Не удалось скачать видео по ссылке.\nПопробуй другую ссылку или исходник."
+        msg += f"\n\n🆔 Job #{job_id}"
+        await status_msg.edit_text(msg)
+        temp.cleanup_job(job_dir.name)
+        return
     except URLDownloadError as e:
         logger.error("url_download_failed", user_id=user_id, job_id=job_id, error=str(e)[:200])
         await _fail_job(job_id, "URL_DOWNLOAD_FAILED", str(e)[:500])
@@ -1074,6 +1089,23 @@ async def on_mode_selected(call: CallbackQuery) -> None:
     await call.message.edit_text(_MODE_PROMPTS[mode], parse_mode="HTML")
     await call.answer()
 
+
+
+@router.callback_query(F.data == "replace_media")
+async def on_replace_media(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    try:
+        from app.services.current_media import get_current_media_service
+        await get_current_media_service().clear(user_id)
+    except Exception as e:
+        logger.warning("replace_media_clear_failed", user_id=user_id, error=str(e)[:150])
+    mode = get_selected_mode(user_id) or "prepare"
+    _mode_state[user_id] = mode
+    await call.message.edit_text(
+        f"🔄 Новый источник для режима <b>{mode}</b>\n\nОтправь видео или ссылку.",
+        parse_mode="HTML",
+    )
+    await call.answer()
 
 def get_selected_mode(user_id: int) -> str | None:
     return _mode_state.get(user_id)

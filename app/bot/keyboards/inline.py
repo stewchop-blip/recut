@@ -139,8 +139,9 @@ BANNER_CANCEL_MENU = InlineKeyboardMarkup(inline_keyboard=[
 # ---------------------------------------------------------------------------
 
 RESULT_MENU_PREPARE = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="🎬 Ещё одно видео", callback_data="mode:prepare")],
-    [InlineKeyboardButton(text="🎨 Оформление", callback_data="appearance:menu")],
+    [InlineKeyboardButton(text="🔄 Сделать иначе", callback_data="mode:prepare")],
+    [InlineKeyboardButton(text="🎨 Изменить оформление", callback_data="appearance:menu")],
+    [InlineKeyboardButton(text="📎 Другое видео", callback_data="replace_media")],
     [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
 ])
 

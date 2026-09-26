@@ -17,6 +17,18 @@ from app.database.repositories import UserSettingsRepository
 logger = get_logger(__name__)
 
 
+async def _probe_path(path: Path | None) -> tuple[float, int, int]:
+    if path is None or not path.exists() or not path.is_file():
+        return 0.0, 0, 0
+    try:
+        from app.services.media.probe import get_probe_service
+        meta = await get_probe_service().probe(path)
+        return meta.duration_seconds, meta.width, meta.height
+    except Exception as e:
+        logger.warning("current_media_probe_failed", path=str(path) if path else None, error=str(e)[:150])
+        return 0.0, 0, 0
+
+
 @dataclass(frozen=True, slots=True)
 class CurrentMedia:
     user_id: int
@@ -49,6 +61,7 @@ class CurrentMediaService:
             url = getattr(s, "current_media_url", None) or None
             if path is None and file_id is None and url is None:
                 return None
+            duration, width, height = await _probe_path(path)
             return CurrentMedia(
                 user_id=user_id,
                 job_id=getattr(s, "current_media_job_id", None),
@@ -57,9 +70,9 @@ class CurrentMediaService:
                 source_path=path,
                 telegram_file_id=getattr(s, "current_media_telegram_file_id", None) or None,
                 source_url=getattr(s, "current_media_url", None) or None,
-                duration=getattr(s, "current_media_duration", 0.0),
-                width=0,
-                height=0,
+                duration=duration,
+                width=width,
+                height=height,
                 normalized=bool(getattr(s, "current_media_normalized", False)),
                 created_at="",
             )
@@ -78,6 +91,7 @@ class CurrentMediaService:
                 current_media_url=source_url,
                 current_media_telegram_file_id=telegram_file_id,
             )
+        duration, width, height = await _probe_path(source_path)
         return CurrentMedia(
             user_id=user_id,
             job_id=job_id,
@@ -86,9 +100,9 @@ class CurrentMediaService:
             source_path=source_path,
             telegram_file_id=telegram_file_id,
             source_url=source_url,
-            duration=0.0,
-            width=0,
-            height=0,
+            duration=duration,
+            width=width,
+            height=height,
             normalized=False,
             created_at="",
         )
