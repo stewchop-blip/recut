@@ -110,3 +110,19 @@ def get_current_media_service() -> CurrentMediaService:
     if _service is None:
         _service = CurrentMediaService()
     return _service
+
+
+async def resolve_current_media(user_id: int, bot=None) -> "CurrentMedia | None":
+    svc = get_current_media_service()
+    cm = await svc.get(user_id)
+    if cm is None:
+        return None
+    # Point 11: is_file guard (not just exists())
+    if cm.source_path is not None:
+        p = Path(cm.source_path)
+        if p.exists() and p.is_file():
+            return cm
+    # Point 10/12: recovery via re-download stubbed; full in next pass
+    logger = get_logger(__name__)
+    logger.info("resolve_current_media_missing_file", user_id=user_id, path=cm.source_path)
+    return None
