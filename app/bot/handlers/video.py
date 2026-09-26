@@ -450,8 +450,15 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
 
     try:
         from app.services.current_media import get_current_media_service
+        # Item 7: URL source must live in stable current/ storage, not job_dir.
+        current_dir = Path(f"/tmp/recut/current/{user_id}")
+        current_dir.mkdir(parents=True, exist_ok=True)
+        src = Path(result.path)
+        current_path = current_dir / f"source{src.suffix or '.mp4'}"
+        import shutil
+        shutil.copy2(str(src), str(current_path))
         await get_current_media_service().set_ready(
-            user_id, Path(result.path), job_id=job_id, source_url=url)
+            user_id, current_path, job_id=job_id, source_url=url)
     except Exception:
         logger.exception("current_media_set_failed", job_id=job_id)
 
@@ -526,30 +533,10 @@ async def on_quick_prep(call: CallbackQuery) -> None:
         # Phase 1 recovery (audit #14/51): reuse current media from DB
         # instead of asking the user to re-send the video.
         try:
-            from app.services.current_media import get_current_media_service
-            cm = await get_current_media_service().get(user_id)
-            if cm is not None and cm.source_path and cm.source_path.exists():
-                pass  # local file alive
-            elif cm is not None and (cm.telegram_file_id or cm.source_url):
-                # TZ Phase 24: /tmp is ephemeral on Railway — re-download.
-                redl = Path(tempfile.gettempdir()) / f"redl_{user_id}.mp4"
-                try:
-                    if cm.telegram_file_id and call.message is not None:
-                        tg = await call.message.bot.get_file(cm.telegram_file_id)
-                        await call.message.bot.download_file(tg.file_path, str(redl))
-                    elif cm.source_url:
-                                            from app.pipeline.url_downloader import DownloaderService
-                                            await DownloaderService().download(
-                                                cm.source_url, redl)
-                    if redl.exists():
-                        await get_current_media_service().set_ready(
-                            user_id, redl, job_id=cm.job_id,
-                            telegram_file_id=cm.telegram_file_id,
-                            source_url=cm.source_url)
-                        cm = await get_current_media_service().get(user_id)
-                except Exception as e2:
-                    logger.warning("current_media_redownload_failed", error=str(e2)[:150])
-            if cm is not None and cm.source_path and cm.source_path.exists():
+            from app.services.current_media import resolve_current_media
+            cm = await resolve_current_media(
+                user_id, call.message.bot if call.message else None)
+            if cm is not None and cm.source_path and cm.source_path.is_file():
                 pending = _PendingJob(
                     job_id=cm.job_id or 0,
                     chat_id=call.message.chat.id if call.message else 0,

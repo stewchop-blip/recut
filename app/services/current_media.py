@@ -40,10 +40,15 @@ class CurrentMediaService:
         async with db_manager.session() as session:
             repo = UserSettingsRepository(session)
             s = await repo.get(user_id)
-            if s is None or not getattr(s, "current_media_path", None):
-                # Try to recover from Telegram file_id if local file lost
+            if s is None:
                 return None
+            # Item 9: return CurrentMedia if ANY recoverable identity exists —
+            # local_path, telegram_file_id, or source_url. local_path may be None.
             path = Path(s.current_media_path) if s.current_media_path else None
+            file_id = getattr(s, "current_media_telegram_file_id", None) or None
+            url = getattr(s, "current_media_url", None) or None
+            if path is None and file_id is None and url is None:
+                return None
             return CurrentMedia(
                 user_id=user_id,
                 job_id=getattr(s, "current_media_job_id", None),
@@ -113,16 +118,75 @@ def get_current_media_service() -> CurrentMediaService:
 
 
 async def resolve_current_media(user_id: int, bot=None) -> "CurrentMedia | None":
+    """Full recovery (item 8): local file → telegram_file_id → source_url."""
+    from app.services.media.probe import get_probe_service
     svc = get_current_media_service()
     cm = await svc.get(user_id)
     if cm is None:
         return None
-    # Point 11: is_file guard (not just exists())
+
+    # 1) Local file present and is a real file?
     if cm.source_path is not None:
         p = Path(cm.source_path)
         if p.exists() and p.is_file():
             return cm
-    # Point 10/12: recovery via re-download stubbed; full in next pass
+
+    current_dir = Path(f"/tmp/recut/current/{user_id}")
+    current_dir.mkdir(parents=True, exist_ok=True)
+
+    # 2) Recover from telegram_file_id.
+    if cm.telegram_file_id and bot is not None:
+        try:
+            tg_file = await bot.get_file(cm.telegram_file_id)
+            dest = current_dir / f"source{Path(tg_file.file_path).suffix or '.mp4'}"
+            await bot.download_file(tg_file.file_path, destination=dest)
+            probe = get_probe_service()
+            meta = await probe.probe(dest)
+            cm = await svc.set_ready(
+                user_id, dest, job_id=cm.job_id,
+                telegram_file_id=cm.telegram_file_id,
+                source_url=cm.source_url,
+            )
+            logger = get_logger(__name__)
+            logger.info("current_media_recovered_telegram",
+                        user_id=user_id, path=str(dest),
+                        duration=meta.duration_seconds)
+            return cm
+        except Exception as e:
+            logger = get_logger(__name__)
+            logger.warning("current_media_telegram_recovery_failed",
+                           user_id=user_id, error=str(e)[:200])
+
+    # 3) Recover from source_url (item 10: DownloaderService owns download).
+    if cm.source_url:
+        try:
+            from app.pipeline.url_downloader import DownloaderService
+            dl_dir = current_dir / "url"
+            dl_dir.mkdir(parents=True, exist_ok=True)
+            result = await DownloaderService().download(cm.source_url, dl_dir)
+            src = Path(result.path)
+            if not src.is_file():
+                raise ValueError(f"download result is not a file: {src}")
+            dest = current_dir / f"source{src.suffix or '.mp4'}"
+            import shutil
+            shutil.move(str(src), str(dest))
+            probe = get_probe_service()
+            meta = await probe.probe(dest)
+            cm = await svc.set_ready(
+                user_id, dest, job_id=cm.job_id,
+                telegram_file_id=cm.telegram_file_id,
+                source_url=cm.source_url,
+            )
+            logger = get_logger(__name__)
+            logger.info("current_media_recovered_url",
+                        user_id=user_id, path=str(dest),
+                        duration=meta.duration_seconds)
+            return cm
+        except Exception as e:
+            logger = get_logger(__name__)
+            logger.warning("current_media_url_recovery_failed",
+                           user_id=user_id, error=str(e)[:200])
+
     logger = get_logger(__name__)
-    logger.info("resolve_current_media_missing_file", user_id=user_id, path=cm.source_path)
+    logger.info("current_media_unrecoverable", user_id=user_id)
     return None

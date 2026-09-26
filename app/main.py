@@ -6,6 +6,7 @@ available by setting WEBHOOK_MODE=true with a public domain.
 import asyncio
 import os
 from contextlib import suppress
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -165,6 +166,30 @@ async def run_schema_migrations() -> None:
 async def _on_startup(bot: Bot) -> None:
     """Common startup: DB init + table creation, cleanup, commands."""
     db_manager.initialize()
+
+    # HOTFIX item 2: log exact production FFmpeg/ffprobe versions.
+    try:
+        import asyncio as _aio
+        from app.services.media.ffmpeg import _find_ffmpeg_bin
+
+        ffbin = _find_ffmpeg_bin()
+        ffprobe = str(Path(ffbin).with_name("ffprobe.exe"))
+        if not Path(ffprobe).exists():
+            ffprobe = str(Path(ffbin).with_name("ffprobe"))
+        proc = await _aio.create_subprocess_exec(
+            ffbin, "-version", stdout=_aio.subprocess.PIPE,
+            stderr=_aio.subprocess.DEVNULL)
+        out, _ = await proc.communicate()
+        first = out.decode(errors="ignore").splitlines()[0] if out else "?"
+        logger.info("ffmpeg_version", version=first)
+        proc2 = await _aio.create_subprocess_exec(
+            ffprobe, "-version", stdout=_aio.subprocess.PIPE,
+            stderr=_aio.subprocess.DEVNULL)
+        out2, _ = await proc2.communicate()
+        first2 = out2.decode(errors="ignore").splitlines()[0] if out2 else "?"
+        logger.info("ffprobe_version", version=first2)
+    except Exception as e:
+        logger.warning("ffmpeg_version_probe_failed", error=str(e)[:200])
 
     # Create tables if they don't exist (idempotent).
     try:
