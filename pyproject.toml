@@ -16,6 +16,8 @@ dependencies = [
     "aiohttp>=3.10,<4",
     # Database
     "sqlalchemy>=2.0,<3",
+    # Asyncio runtime dependency (Railway)
+    "greenlet>=3.0,<4",
     "asyncpg>=0.29,<1",
     "alembic>=1.13,<2",
     # Config & validation
