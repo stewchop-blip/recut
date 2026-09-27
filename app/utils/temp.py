@@ -82,6 +82,9 @@ class TempFileManager:
         for item in self.BASE_DIR.iterdir():
             if not item.is_dir():
                 continue
+            # Phase 12: never clean current media or user assets as stale jobs.
+            if item.name in ("current", "assets", "previews", "cache"):
+                continue
             try:
                 mtime = item.stat().st_mtime
                 if now - mtime > max_age_seconds:
