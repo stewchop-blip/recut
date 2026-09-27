@@ -35,7 +35,15 @@ class TempFileManager:
         return cleaned or uuid.uuid4().hex
 
     def _job_dir(self, job_id: str) -> Path:
-        return self.BASE_DIR / self._safe_id(job_id)
+        # Phase 11: namespace isolation — jobs live under /tmp/recut/jobs/
+        return self.BASE_DIR / "jobs" / self._safe_id(job_id)
+
+    def _current_dir(self, user_id: int) -> Path:
+        # Phase 11/12: current media lives separately, not under jobs/
+        return self.BASE_DIR / "current" / str(user_id)
+
+    def _assets_dir(self, user_id: int) -> Path:
+        return self.BASE_DIR / "assets" / str(user_id)
 
     @asynccontextmanager
     async def job_context(self, job_id: str) -> AsyncGenerator[Path, None]:
