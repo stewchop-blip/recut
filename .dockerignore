@@ -1,0 +1,23 @@
+# .dockerignore — exclude secrets, temp artifacts, and unnecessary files from Docker build context
+.git
+.env
+.env.*
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.pyc
+tests/
+test_*/
+*.log
+*.sqlite
+*.db
+tmp/
+/temp/
+cache/
+logs/
+Downloads/
+.DS_Store
+Thumbs.db
