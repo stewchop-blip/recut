@@ -79,23 +79,23 @@ async def cmd_cancel(message: types.Message) -> None:
     try:
         async with db_manager.session() as session:
             repo = JobRepository(session)
-            n = await repo.cancel_active_jobs(user_id, max_age_minutes=10)
+            n, cancelled_ids = await repo.cancel_active_jobs(user_id, max_age_minutes=10)
     except Exception as e:
         logger.error("cancel_db_failed", user_id=user_id, error=str(e)[:200])
         await message.answer("❌ Не удалось отменить задачу. Попробуй ещё раз.")
         return
 
-    # Best-effort cleanup of any leftover job workspaces.
+    # Phase 6 fix: only clean directories for this user's cancelled jobs,
+    # never delete other users' workspace.
     import shutil
-    from pathlib import Path
     base = Path("/tmp/recut")
-    if base.exists():
+    if base.exists() and cancelled_ids:
         for entry in base.iterdir():
             try:
-                # only remove directories that look like job dirs and aren't
-                # currently active (avoid racing with another in-flight job).
                 if entry.is_dir() and entry.name.startswith("job_"):
-                    shutil.rmtree(entry, ignore_errors=True)
+                    # Only delete if directory references one of our cancelled job IDs
+                    if any(str(job_id) in entry.name for job_id in cancelled_ids):
+                        shutil.rmtree(entry, ignore_errors=True)
             except Exception:
                 pass
 

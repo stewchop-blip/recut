@@ -255,7 +255,7 @@ class JobRepository:
 
     async def cancel_active_jobs(
         self, telegram_user_id: int, *, max_age_minutes: int = 10,
-    ) -> int:
+    ) -> tuple[int, list[int]]:
         """Mark any in-flight job for this user as CANCELLED.
 
         Returns the number of rows updated. Used by /cancel command so
@@ -271,17 +271,26 @@ class JobRepository:
             JobStatus.CUTTING, JobStatus.RENDERING,
         }
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
-        result = await self.session.execute(
-            _upd(Job)
+        # Select IDs before update for safe cleanup (Phase 6 / multi-user fix)
+        from sqlalchemy import select as _sel
+        ids_result = await self.session.execute(
+            _sel(Job.id)
             .where(Job.telegram_user_id == telegram_user_id)
             .where(Job.status.in_(active))
             .where(Job.created_at >= cutoff)
+        )
+        cancelled_ids = [row[0] for row in ids_result.all()]
+        result = await self.session.execute(
+            _upd(Job)
+            .where(Job.id.in_(cancelled_ids) if cancelled_ids else False)
+            .where(Job.status.in_(active))
             .values(
                 status=JobStatus.CANCELLED,
                 processing_completed_at=datetime.now(timezone.utc),
             )
         )
-        return result.rowcount or 0
+        # Return tuple for safe cleanup
+        return (result.rowcount or 0), cancelled_ids
 
     async def cleanup_stale_jobs(self, *, max_age_minutes: int = 30) -> int:
         """Mark any non-terminal job older than `max_age_minutes` as FAILED.
