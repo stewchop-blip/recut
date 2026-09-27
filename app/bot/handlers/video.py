@@ -1019,6 +1019,44 @@ async def on_settings_back(call: CallbackQuery) -> None:
     await call.answer()
 
 
+
+
+def render_fine_menu(s) -> tuple[str, types.InlineKeyboardMarkup]:
+    """Pure UI render for fine menu (no call.answer)."""
+    bg = BACKGROUNDS.get(getattr(s, "background_id", "blur"))
+    ti = TITLES.get(getattr(s, "title_id", "none") or "none")
+    text = (
+        "⚙️ <b>Тонкая настройка</b>\n\n"
+        f"Фон: {bg.label if bg else '—'}\n"
+        f"Заголовок: {ti.label if ti else '—'}\n"
+        f"Бренд-уголок: {'ВКЛ' if s.brand_corner else 'ВЫКЛ'}\n"
+        f"Плашка: {'ВКЛ' if s.cta_enabled else 'ВЫКЛ'}\n"
+        f"Субтитры: {'ВКЛ' if s.subtitles_enabled else 'ВЫКЛ'}"
+    )
+    markup = fine_menu(
+        bg.label if bg else "—",
+        ti.label if ti else "—",
+        bool(getattr(s, "brand_corner", False)),
+        bool(s.cta_enabled),
+    )
+    return text, markup
+
+
+def render_appearance(s, user_id: int) -> tuple[str, types.InlineKeyboardMarkup]:
+    bg = BACKGROUNDS.get(getattr(s, "background_id", "blur"))
+    title = TITLES.get(getattr(s, "title_id", "none") or "none")
+    style_label = _STYLE_LABELS.get(getattr(s, "style_id", None) or "", "Свой")
+    has_banner = bool(s.cta_telegram_file_id)
+    text = (
+        "🎨 <b>Оформление</b>\n\n"
+        f"Стиль: {style_label}\n"
+        f"Фон: {bg.label if bg else getattr(s, 'background_id', 'blur')}\n"
+        f"Плашка: {'✅' if has_banner else 'нет'}\n"
+        f"Заголовок: {title.label if title else 'без текста'}\n"
+        "Вставка: нет"
+    )
+    return text, appearance_menu(style_label, has_banner)
+
 # ---------------------------------------------------------------------------
 # HOME / mode selection / banner section (audit #1, #3-9, #33)
 # ---------------------------------------------------------------------------
