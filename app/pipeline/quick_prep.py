@@ -70,6 +70,7 @@ class QuickPrepPipeline:
         output_height: int,
         cta_size_preset: str = "medium",
         cta_overlay_type: str = "png",
+        overlay_is_animated: bool = False,
         background_id: str = "blur",
         title_text: str = "",
         brand_corner: bool = False,
@@ -235,6 +236,7 @@ class QuickPrepPipeline:
                         end_seconds=spec.end_seconds,
                         size_preset=cta_size_preset,
                         overlay_type=cta_overlay_type,
+                        overlay_is_animated=overlay_is_animated,
                     )
                     current = cta_path
                     has_cta = True

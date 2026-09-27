@@ -643,6 +643,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             brand_corner=bool(getattr(s, "brand_corner", False)) if s else False,
             audio_preset=getattr(s, "audio_preset", "original") if s else "original",
             transformation_preset=getattr(s, "style_id", "custom") if s else "custom",
+            overlay_is_animated=bool(getattr(s, "overlay_is_animated", False)) if s else False,
         )
 
         await _edit_status(
@@ -938,6 +939,7 @@ async def on_url_recut(call: CallbackQuery) -> None:
             title_text=_resolve_title_text(s),
             brand_corner=bool(getattr(s, "brand_corner", False)) if s else False,
             audio_preset=getattr(s, "audio_preset", "original") if s else "original",
+            overlay_is_animated=bool(getattr(s, "overlay_is_animated", False)) if s else False,
         )
     except Exception as e:
         logger.error("quickprep_failed", user_id=user_id, job_id=pending.job_id, error=str(e)[:200])

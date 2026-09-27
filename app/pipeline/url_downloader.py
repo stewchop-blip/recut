@@ -127,11 +127,19 @@ def _cookie_file_for(platform: str) -> Optional[Path]:
         return None
     try:
         data = base64.b64decode(raw)
-        p = Path(tempfile.gettempdir()) / f"{platform}_cookies.txt"
+        # Phase 13: random per-request filename, restrictive permissions, safe cleanup.
+        import tempfile
+        fd, temp_path_str = tempfile.mkstemp(prefix=f"{platform}_cookies_", suffix=".txt")
+        os.close(fd)
+        p = Path(temp_path_str)
         p.write_bytes(data)
+        # Restrictive permissions (owner read/write only)
+        p.chmod(0o600)
+        # Log only platform/config status, never content.
+        logger.info("cookie_file_created", platform=platform, configured=True, decoded=True, path=str(p.name)[:30])
         return p
     except Exception as e:
-        logger.warning("cookie_decode_failed", platform=platform, error=str(e)[:150])
+        logger.warning("cookie_decode_failed", platform=platform, configured=True, error=str(e)[:150])
         return None
 
 
@@ -253,6 +261,13 @@ class DownloaderService:
         if size_bytes == 0:
             path.unlink(missing_ok=True)
             raise URLDownloadError("Downloaded file is empty")
+
+        # Phase 13: cookie cleanup — remove temp cookie file safely after attempt.
+        try:
+            if cookie_file is not None and cookie_file.exists():
+                cookie_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
         res_source = self._parse_source(url)
         logger.info(
