@@ -1409,10 +1409,28 @@ async def on_fine_menu(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "more:menu")
 async def on_more_menu(call: CallbackQuery) -> None:
-    """••• Ещё — advanced options for the pending video (PART 14)."""
+    """••• Ещё — advanced options (uses CurrentMedia as source of truth)."""
     user_id = call.from_user.id if call.from_user else 0
+    # Phase 9: if no pending job, try to recover from CurrentMedia.
     if user_id not in _pending_jobs:
-        await call.answer("Сначала пришли видео", show_alert=True)
+        try:
+            from app.services.current_media import resolve_current_media
+            cm = await resolve_current_media(user_id, call.message.bot if call.message else None)
+            if cm is not None and cm.source_path and cm.source_path.is_file():
+                # Reuse current media for advanced options
+                pending_dir = cm.source_path.parent
+                pending_path = str(cm.source_path)
+                _pending_jobs[user_id] = _PendingJob(
+                    job_id=cm.job_id or 0,
+                    chat_id=call.message.chat.id if call.message else 0,
+                    input_path=pending_path,
+                    job_dir=str(pending_dir),
+                    status_message_id=call.message.message_id if call.message else 0,
+                )
+        except Exception as e:
+            logger.warning("current_media_reuse_for_more_failed", error=str(e)[:150])
+    if user_id not in _pending_jobs:
+        await call.answer("⚠️ Сначала отправь видео или ссылку.", show_alert=True)
         return
     await call.message.edit_text(
         "••• <b>Ещё</b>\n\nДополнительные варианты для этого видео:",
