@@ -172,7 +172,7 @@ class DownloaderService:
 
         # Step 1: quick metadata probe without downloading.
         # Item 16: attempt 1 public; retry ONCE with cookies on auth errors.
-        logger.info("url_metadata_start", url=url, platform=platform,
+        logger.info("url_metadata_start", url=f"{platform}://.../" + (url[-20:] if len(url) > 30 else url[-10:]), platform=platform,
                     cookie_configured=cookie_file is not None)
         info = None
         metadata_err = None
@@ -221,7 +221,7 @@ class DownloaderService:
 
         # Step 2: download to output_dir (cookie retry once on auth errors).
         out_template = str(output_dir / "download.%(ext)s")
-        logger.info("url_download_start", url=url, out_template=out_template,
+        logger.info("url_download_start", url=f"{platform}://.../" + (url[-20:] if len(url) > 30 else url[-10:]), out_template=out_template,
                     cookie_configured=cookie_file is not None)
         download_args = [
             self._ytdlp_path,

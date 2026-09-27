@@ -337,6 +337,12 @@ async def run_webhook() -> None:
 def main() -> None:
     use_webhook = os.getenv("WEBHOOK_MODE", "").lower() in ("1", "true", "yes")
     if use_webhook:
+        settings = get_settings()
+        # Phase 15: production webhook must have a non-empty secret.
+        if settings.is_production and not settings.webhook_secret:
+            raise SystemExit(
+                "FATAL: WEBHOOK_MODE=true in production requires WEBHOOK_SECRET to be set."
+            )
         run_webhook()
     else:
         asyncio.run(run_polling())
