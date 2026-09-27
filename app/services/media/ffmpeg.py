@@ -903,11 +903,14 @@ class MediaService:
             # scaled with min(1.0, ...) so a small asset never upscaled and
             # every preset rendered at the asset's native size.
             target_frac = {"small": 0.24, "medium": 0.34, "large": 0.46}.get(size_preset, 0.34)
+            # Phase 2: different max_h per preset so SMALL < MEDIUM < LARGE
+            # visually holds (unless asset is extremely tall).
+            max_h_frac = {"small": 0.12, "medium": 0.18, "large": 0.24}.get(size_preset, 0.18)
+            max_h = video_h * max_h_frac
             if position == "full_width_bottom":
                 target_w = video_w - 2 * side_margin
             else:
                 target_w = video_w * target_frac
-            max_h = video_h * 0.18  # safety limit (was 15%)
 
             scale = target_w / max(banner_in_w, 1)
             # Cap by max height (preserve aspect, never crop/stretch).

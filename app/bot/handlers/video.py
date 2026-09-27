@@ -1336,7 +1336,8 @@ def _preset_to_fields(preset_id: str) -> dict:
         background_id=p.background_id,
         title_id=p.title_id,
         brand_corner=p.brand_corner,
-        cta_size=getattr(p, "cta_size", None) or "medium",
+        # Banner size is an independent user preference (Phase 3),
+        # NOT overridden by style preset.
     )
 
 
