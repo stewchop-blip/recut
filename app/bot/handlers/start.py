@@ -1,4 +1,6 @@
 """/start and /help handlers for the Quick Prep UX."""
+from pathlib import Path
+
 from aiogram import Router, types
 from aiogram.filters import Command
 
@@ -88,13 +90,15 @@ async def cmd_cancel(message: types.Message) -> None:
     # Phase 6 fix: only clean directories for this user's cancelled jobs,
     # never delete other users' workspace.
     import shutil
-    base = Path("/tmp/recut")
+    from app.core.config import get_settings
+    base = Path(get_settings().temp_dir)
     if base.exists() and cancelled_ids:
         for entry in base.iterdir():
             try:
                 if entry.is_dir() and entry.name.startswith("job_"):
                     # Only delete if directory references one of our cancelled job IDs
-                    if any(str(job_id) in entry.name for job_id in cancelled_ids):
+                    if any(entry.name == f"job_{job_id}" or entry.name.startswith(f"job_{job_id}_")
+                           for job_id in cancelled_ids):
                         shutil.rmtree(entry, ignore_errors=True)
             except Exception:
                 pass

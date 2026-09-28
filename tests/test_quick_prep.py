@@ -357,8 +357,9 @@ def test_cancel_active_jobs_marks_them_cancelled():
             repo = JobRepository(session)
             assert await repo.has_active_job(7) is True
 
-            n = await repo.cancel_active_jobs(7, max_age_minutes=10)
+            n, cancelled_ids = await repo.cancel_active_jobs(7, max_age_minutes=10)
             assert n == 1
+            assert cancelled_ids == [job.id]
             await session.commit()
 
             assert await repo.has_active_job(7) is False

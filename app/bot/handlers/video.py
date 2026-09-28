@@ -386,10 +386,18 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
 
     # HOTFIX item 11: run_download (semaphore + per-user lock + inflight dedup).
     async def _download_work():
-        return await svc.download(url, job_dir)
+        return await svc.download(
+            url, job_dir, max_size_mb=get_settings().max_video_size_mb,
+            max_duration_seconds=get_settings().max_video_duration_minutes * 60,
+        )
 
     try:
         result = await queue.run_download(user_id, url, _download_work)
+        if getattr(result, "success", True) is False:
+            await _fail_job(job_id, "QUEUE_FULL")
+            await status_msg.edit_text("⏳ Очередь заполнена. Попробуй чуть позже.")
+            temp.cleanup_job(job_dir.name)
+            return
     except StructuredDownloadError as e:
         code = e.code
         logger.error("url_download_structured_failed", user_id=user_id, job_id=job_id, error_code=code, detail=str(e.detail)[:200])

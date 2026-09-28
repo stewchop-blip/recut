@@ -25,33 +25,26 @@ def mask_secrets_processor(logger: Any, method_name: str, event_dict: EventDict)
         "authorization",
     }
 
-    def mask_value(key: str, value: Any) -> Any:
-        key_lower = key.lower()
-        if any(sensitive in key_lower for sensitive in sensitive_keys):
-            if isinstance(value, str) and value:
-                return f"***{value[-4:]}" if len(value) > 4 else "****"
-            return "****"
+    import os
+    secrets = [settings.telegram_bot_token, settings.openrouter_api_key,
+               settings.webhook_secret, settings.database_url,
+               os.getenv("TIKTOK_COOKIES_B64", ""), os.getenv("INSTAGRAM_COOKIES_B64", "")]
+    sensitive_keys.update({"cookie", "credential"})
+
+    def redact(value: Any, key: str = "") -> Any:
+        if any(s in key.lower() for s in sensitive_keys):
+            return "[REDACTED]"
+        if isinstance(value, dict):
+            return {k: redact(v, str(k)) for k, v in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [redact(v) for v in value]
+        if isinstance(value, str):
+            for secret in secrets:
+                if secret:
+                    value = value.replace(secret, "[REDACTED]")
         return value
 
-    def walk_dict(d: dict) -> dict:
-        return {k: mask_value(k, walk_dict(v) if isinstance(v, dict) else v) for k, v in d.items()}
-
-    if isinstance(event_dict.get("event"), str):
-        # Mask in log message itself
-        msg = event_dict["event"]
-        for secret in [settings.telegram_bot_token, settings.openrouter_api_key, settings.webhook_secret]:
-            if secret and secret in msg:
-                msg = msg.replace(secret, f"***{secret[-4:]}")
-        event_dict["event"] = msg
-
-    # Mask in key-value pairs
-    for key, value in list(event_dict.items()):
-        if isinstance(value, dict):
-            event_dict[key] = walk_dict(value)
-        else:
-            event_dict[key] = mask_value(key, value)
-
-    return event_dict
+    return redact(event_dict)
 
 
 def add_job_context(logger: Any, method_name: str, event_dict: EventDict) -> EventDict:

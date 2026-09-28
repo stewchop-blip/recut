@@ -212,3 +212,26 @@ class UserSettings(Base):
             f"<UserSettings(user={self.telegram_user_id}, cta_enabled={self.cta_enabled}, "
             f"position={self.cta_position}, mode={self.cta_mode})>"
         )
+
+class PaymentOrder(Base):
+    """Immutable invoice snapshot; only verified Telegram receipts change status."""
+
+    __tablename__ = "payment_orders"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    stars: Mapped[int] = mapped_column(Integer)
+    credits: Mapped[int] = mapped_column(Integer)
+    terms: Mapped[str] = mapped_column(String(4000))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    charge_id: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CreditEntry(Base):
+    """Append-only ledger, unique keys make retries safe across processes."""
+
+    __tablename__ = "credit_entries"
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    amount: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

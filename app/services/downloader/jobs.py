@@ -1,6 +1,6 @@
 """MediaJobQueue — adapted from reels-downloader-bot download_jobs.py (Apache-2.0).
 
-Global semaphore + per-user lock + inflight URL dedup with asyncio.shield
+Global semaphore + per-user admission + inflight URL dedup with asyncio.shield
 (one cancelled caller must not kill the shared download). READY media is
 NOT a heavy active job (audit #8-10).
 """
@@ -38,14 +38,8 @@ class MediaJobQueue:
 
     def __init__(self, max_heavy: int = MAX_CONCURRENT_HEAVY_JOBS) -> None:
         self._sem = asyncio.Semaphore(max_heavy)
-        self._user_locks: dict[int, asyncio.Lock] = {}
-        self._inflight: dict[str, asyncio.Task] = {}   # url -> task
+        self._inflight: dict[tuple[int, str], asyncio.Task] = {}   # (user, url) -> task
         self._active: set[int] = set()                  # users with heavy job
-
-    def _lock_for(self, user_id: int) -> asyncio.Lock:
-        if user_id not in self._user_locks:
-            self._user_locks[user_id] = asyncio.Lock()
-        return self._user_locks[user_id]
 
     def is_busy(self, user_id: int) -> bool:
         """True when the user has a heavy (active) job — audit #12/16."""
@@ -53,31 +47,33 @@ class MediaJobQueue:
 
     async def run_download(self, user_id: int, url: str,
                            work: Callable[[], Awaitable[DownloadResult]]) -> DownloadResult:
-        """Run download under global semaphore + per-user lock.
+        """Run download under global semaphore + per-user admission.
 
         Duplicate URL while inflight: join the SAME shielded task instead of
         launching a second yt-dlp (audit #10).
         """
-        existing = self._inflight.get(url)
+        # Results contain user-scoped paths: never share them between users.
+        key = (user_id, url)
+        existing = self._inflight.get(key)
         if existing is not None and not existing.done():
-            logger.info("download_dedup_join", url=url, user=user_id)
             return await asyncio.shield(existing)
-
+        if len(self._inflight) >= MAX_QUEUED_JOBS or self.is_busy(user_id):
+            return DownloadResult(success=False, error_code="QUEUE_FULL")
+        self._active.add(user_id)
         task = asyncio.create_task(self._run_one(user_id, work))
-        self._inflight[url] = task
-        try:
-            return await asyncio.shield(task)
-        finally:
-            self._inflight.pop(url, None)
+        self._inflight[key] = task
+
+        def finished(completed):
+            if self._inflight.get(key) is completed:
+                self._inflight.pop(key, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finished)
+        return await asyncio.shield(task)
 
     async def _run_one(self, user_id: int,
                        work: Callable[[], Awaitable[DownloadResult]]) -> DownloadResult:
-        if len(self._inflight) > MAX_QUEUED_JOBS:
-            return DownloadResult(success=False, error_code="QUEUE_FULL")
-        lock = self._lock_for(user_id)
-        if lock.locked() or self.is_busy(user_id):
-            return DownloadResult(success=False, error_code="QUEUE_FULL")
-        self._active.add(user_id)
         try:
             async with self._sem:
                 return await work()

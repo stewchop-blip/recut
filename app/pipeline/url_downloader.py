@@ -170,122 +170,124 @@ class DownloaderService:
         platform = self._parse_source(url)
         cookie_file = _cookie_file_for(platform)
 
-        # Step 1: quick metadata probe without downloading.
-        # Item 16: attempt 1 public; retry ONCE with cookies on auth errors.
-        logger.info("url_metadata_start", url=f"{platform}://.../" + (url[-20:] if len(url) > 30 else url[-10:]), platform=platform,
-                    cookie_configured=cookie_file is not None)
-        info = None
-        metadata_err = None
         try:
-            info = await self._run_ytdlp(
-                [self._ytdlp_path, "--dump-json", "--no-warnings", "--no-playlist", url],
-                timeout=60,
-            )
-        except URLDownloadError as e:
-            metadata_err = e
-            code = classify_ytdlp_error(getattr(e, "detail", str(e)), platform)
-            logger.warning("yt_dlp_metadata_failed", platform=platform,
-                           error_code=code, stderr=str(e)[:300])
-            if cookie_file is not None and ("AUTH" in code or "RESTRICTED" in code):
-                logger.info("ytdlp_cookie_retry", platform=platform,
-                            stage="metadata", cookie_retry=True)
+            # Step 1: quick metadata probe without downloading.
+            # Item 16: attempt 1 public; retry ONCE with cookies on auth errors.
+            logger.info("url_metadata_start", url=f"{platform}://.../" + (url[-20:] if len(url) > 30 else url[-10:]), platform=platform,
+                        cookie_configured=cookie_file is not None)
+            info = None
+            metadata_err = None
+            try:
                 info = await self._run_ytdlp(
-                    [self._ytdlp_path, "--dump-json", "--no-warnings",
-                     "--no-playlist", "--cookies", str(cookie_file), url],
+                    [self._ytdlp_path, "--dump-json", "--no-warnings", "--no-playlist", url],
                     timeout=60,
                 )
-            else:
-                raise StructuredDownloadError(
-                    code, getattr(e, "detail", str(e))) from e
-        if not info:
-            raise URLDownloadError("Cannot read metadata for this URL")
-        meta = info[0] if isinstance(info, list) and info else info
-        duration = float(meta.get("duration") or 0)
-        filesize_approx = int(
-            meta.get("filesize_approx")
-            or meta.get("filesize")
-            or 0
-        )
-        title = str(meta.get("title") or "recat_video")[:120]
-        logger.info("url_metadata_ok", url=url, duration=duration, filesize_approx=filesize_approx, title=title)
-
-        if max_size_mb and filesize_approx > max_size_mb * 1024 * 1024:
-            raise DownloadTooLargeError(
-                f"Video is ~{filesize_approx // (1024 * 1024)} MB; "
-                f"download limit is {max_size_mb} MB"
+            except URLDownloadError as e:
+                metadata_err = e
+                code = classify_ytdlp_error(getattr(e, "detail", str(e)), platform)
+                logger.warning("yt_dlp_metadata_failed", platform=platform,
+                               error_code=code, stderr=str(e)[:300])
+                if cookie_file is not None and ("AUTH" in code or "RESTRICTED" in code):
+                    logger.info("ytdlp_cookie_retry", platform=platform,
+                                stage="metadata", cookie_retry=True)
+                    info = await self._run_ytdlp(
+                        [self._ytdlp_path, "--dump-json", "--no-warnings",
+                         "--no-playlist", "--cookies", str(cookie_file), url],
+                        timeout=60,
+                    )
+                else:
+                    raise StructuredDownloadError(
+                        code, getattr(e, "detail", str(e))) from e
+            if not info:
+                raise URLDownloadError("Cannot read metadata for this URL")
+            meta = info[0] if isinstance(info, list) and info else info
+            duration = float(meta.get("duration") or 0)
+            filesize_approx = int(
+                meta.get("filesize_approx")
+                or meta.get("filesize")
+                or 0
             )
-        if max_duration_seconds and duration > max_duration_seconds:
-            raise VideoTooLongError(
-                f"Video is longer than {max_duration_seconds // 3600} hours"
-            )
+            title = str(meta.get("title") or "recat_video")[:120]
+            logger.info("url_metadata_ok", url=url, duration=duration, filesize_approx=filesize_approx, title=title)
 
-        # Step 2: download to output_dir (cookie retry once on auth errors).
-        out_template = str(output_dir / "download.%(ext)s")
-        logger.info("url_download_start", url=f"{platform}://.../" + (url[-20:] if len(url) > 30 else url[-10:]), out_template=out_template,
-                    cookie_configured=cookie_file is not None)
-        download_args = [
-            self._ytdlp_path,
-            "--no-warnings",
-            "--no-playlist",
-            "--merge-output-format", "mp4",
-            "--no-mtime",
-            "-o", out_template,
-            url,
-        ]
-        try:
-            await self._run_ytdlp(download_args, timeout=timeout_s)
-        except URLDownloadError as e:
-            code = classify_ytdlp_error(str(e), platform)
-            logger.warning("yt_dlp_download_failed", platform=platform,
-                           error_code=code, stderr=str(e)[:300],
-                           cookie_retry=False)
-            if cookie_file is not None and ("AUTH" in code or "RESTRICTED" in code):
-                logger.info("ytdlp_cookie_retry", platform=platform,
-                            stage="download", cookie_retry=True)
-                await self._run_ytdlp(
-                    download_args[:6] + ["--cookies", str(cookie_file)] + download_args[6:],
-                    timeout=timeout_s,
+            if max_size_mb and filesize_approx > max_size_mb * 1024 * 1024:
+                raise DownloadTooLargeError(
+                    f"Video is ~{filesize_approx // (1024 * 1024)} MB; "
+                    f"download limit is {max_size_mb} MB"
                 )
-            else:
-                raise StructuredDownloadError(code, str(e)) from e
+            if max_duration_seconds and duration > max_duration_seconds:
+                raise VideoTooLongError(
+                    f"Video is longer than {max_duration_seconds // 3600} hours"
+                )
 
-        files = sorted(
-            (p for p in output_dir.iterdir() if p.is_file()),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if not files:
-            raise URLDownloadError("Download finished but no file was produced")
-        path = files[0]
-        size_bytes = path.stat().st_size
-        if size_bytes == 0:
-            path.unlink(missing_ok=True)
-            raise URLDownloadError("Downloaded file is empty")
+            # Step 2: download to output_dir (cookie retry once on auth errors).
+            out_template = str(output_dir / "download.%(ext)s")
+            logger.info("url_download_start", url=f"{platform}://.../" + (url[-20:] if len(url) > 30 else url[-10:]), out_template=out_template,
+                        cookie_configured=cookie_file is not None)
+            download_args = [
+                self._ytdlp_path,
+                "--no-warnings",
+                "--no-playlist",
+                "--merge-output-format", "mp4",
+                "--no-mtime",
+                "--max-filesize", str(max_size_mb * 1024 * 1024),
+                "-o", out_template,
+                url,
+            ]
+            try:
+                await self._run_ytdlp(download_args, timeout=timeout_s)
+            except URLDownloadError as e:
+                code = classify_ytdlp_error(str(e), platform)
+                logger.warning("yt_dlp_download_failed", platform=platform,
+                               error_code=code, stderr=str(e)[:300],
+                               cookie_retry=False)
+                if cookie_file is not None and ("AUTH" in code or "RESTRICTED" in code):
+                    logger.info("ytdlp_cookie_retry", platform=platform,
+                                stage="download", cookie_retry=True)
+                    await self._run_ytdlp(
+                        download_args[:6] + ["--cookies", str(cookie_file)] + download_args[6:],
+                        timeout=timeout_s,
+                    )
+                else:
+                    raise StructuredDownloadError(code, str(e)) from e
 
-        # Phase 13: cookie cleanup — remove temp cookie file safely after attempt.
-        try:
-            if cookie_file is not None and cookie_file.exists():
+            files = sorted(
+                (p for p in output_dir.iterdir() if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if not files:
+                raise URLDownloadError("Download finished but no file was produced")
+            path = files[0]
+            size_bytes = path.stat().st_size
+            if max_size_mb and size_bytes > max_size_mb * 1024 * 1024:
+                path.unlink(missing_ok=True)
+                raise DownloadTooLargeError("Downloaded video exceeds the size limit")
+            if size_bytes == 0:
+                path.unlink(missing_ok=True)
+                raise URLDownloadError("Downloaded file is empty")
+
+            res_source = self._parse_source(url)
+            logger.info(
+                "url_download_file_created",
+                path=str(path),
+                size_bytes=size_bytes,
+                duration=duration,
+                source=res_source,
+            )
+
+            return URLDownloadResult(
+                path=path,
+                title=title,
+                source=res_source,
+                size_bytes=size_bytes,
+                duration_seconds=duration,
+                thumbnail=meta.get("thumbnail"),
+            )
+
+        finally:
+            if cookie_file is not None:
                 cookie_file.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-        res_source = self._parse_source(url)
-        logger.info(
-            "url_download_file_created",
-            path=str(path),
-            size_bytes=size_bytes,
-            duration=duration,
-            source=res_source,
-        )
-
-        return URLDownloadResult(
-            path=path,
-            title=title,
-            source=res_source,
-            size_bytes=size_bytes,
-            duration_seconds=duration,
-            thumbnail=meta.get("thumbnail"),
-        )
 
     async def _run_ytdlp(
         self,
@@ -295,7 +297,7 @@ class DownloaderService:
     ) -> Optional[list]:
         try:
             proc = await asyncio.create_subprocess_exec(
-                *argv,
+                *([argv[0], "--ignore-config", "--no-plugin-dirs"] + argv[1:]),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -308,11 +310,15 @@ class DownloaderService:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
             )
-        except asyncio.TimeoutError as exc:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            await proc.communicate()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise URLDownloadError("Download timed out") from exc
 
         if proc.returncode != 0:

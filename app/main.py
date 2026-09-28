@@ -11,7 +11,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 
-from app.bot.handlers import start, video
+from app.bot.handlers import start, video, payments
 from app.bot.middlewares.access import AccessMiddleware
 from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
@@ -25,8 +25,8 @@ def _build_dispatcher() -> Dispatcher:
     # Whitelist gate runs before any router logic.
     dp.message.middleware.register(AccessMiddleware())
     dp.callback_query.middleware.register(AccessMiddleware())
-    # Routers — start must be FIRST so commands like /start are handled
-    # before the text/video handlers. We register video after start/help.
+    # Financial events and commands must precede broad video/text handlers.
+    dp.include_router(payments.router)
     dp.include_router(start.router)
     dp.include_router(video.router)
     return dp
@@ -281,7 +281,7 @@ async def run_polling() -> None:
 
     # Clear any leftover webhook from previous deployment
     with suppress(Exception):
-        await bot.delete_webhook(drop_pending_updates=True)
+        await bot.delete_webhook(drop_pending_updates=False)
         logger.info("webhook_cleared_for_polling")
 
     await _on_startup(bot)
@@ -301,7 +301,7 @@ async def run_polling() -> None:
 # Webhook (optional — only if WEBHOOK_MODE=true)
 # ============================================================================
 
-async def run_webhook() -> None:
+def run_webhook() -> None:
     from aiogram.webhook.aiohttp_server import SimpleRequestHandler
     from aiohttp import web
 
@@ -318,7 +318,9 @@ async def run_webhook() -> None:
     app["bot"] = bot
     app["dp"] = dp
 
-    secret = settings.webhook_secret or None
+    if not settings.webhook_secret:
+        raise RuntimeError("Webhook requires WEBHOOK_SECRET")
+    secret = settings.webhook_secret
     handler = SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=secret)
     handler.register(app, path=settings.webhook_path)
 

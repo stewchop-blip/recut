@@ -34,10 +34,17 @@ class AccessMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        # Financial receipts must be reconciled even after beta access is revoked.
+        # Authenticity is supplied by Telegram polling / authenticated webhook.
+        if isinstance(event, Message) and (event.successful_payment or event.refunded_payment):
+            return await handler(event, data)
+        if isinstance(event, Message) and event.text and event.text.strip():
+            command = event.text.split()[0].split("@")[0]
+            if command in {"/paysupport", "/terms"}:
+                return await handler(event, data)
         user_id = _extract_user_id(event)
         if user_id is None:
-            # No user (e.g. channel post). Skip — not our concern.
-            return await handler(event, data)
+            return None
 
         allowed = self._allowed_ids()
         if not allowed:

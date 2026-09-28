@@ -32,6 +32,14 @@ class Settings(BaseSettings):
         description="Comma-separated Telegram user IDs allowed to use the bot",
     )
 
+    # Payments stay off until a separately tested commercial launch.
+    payments_enabled: bool = False
+    payment_price_stars: int = Field(default=0, ge=0, le=100000)
+    payment_credits: int = Field(default=0, ge=0, le=100000)
+    payment_terms: str = ""
+    payment_support: str = "@stewchop"
+    payment_admin_ids: str = ""
+
     # === OpenRouter (used only for transcript analysis / clip selection) ===
     openrouter_api_key: str = Field(..., description="OpenRouter API key")
     clip_analysis_model: str = Field(

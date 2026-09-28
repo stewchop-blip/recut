@@ -27,7 +27,12 @@ STRIP_PARAMS = {"utm_source", "utm_medium", "utm_campaign", "utm_content",
 def get_platform_name(url: str) -> str:
     """Platform id for a supported URL, else ''. Hostname-boundary safe."""
     try:
-        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+        parsed = urlparse(url)
+        if parsed.scheme.lower() != "https" or parsed.username or parsed.password:
+            return ""
+        if parsed.port not in (None, 443):
+            return ""
+        host = (parsed.hostname or "").lower().removeprefix("www.")
     except ValueError:
         return ""
     for supported, platform in SUPPORTED_HOSTS.items():
