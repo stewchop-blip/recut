@@ -326,6 +326,7 @@ class MediaService:
         speed: float = 1.0,  # TZ Phase 16: setpts/atempo, pitch preserved
         color_preset: str = "original",  # TZ Phase 15: eq на контент
         layout_id: str = "pip",  # TZ Phase 17: full / pip / framed
+        subtle_particles: bool = True,  # Shared visual finish; no extra menu control.
         timeout_seconds: float = 600.0,
     ) -> Path:
         """Convert source video to 9:16 vertical with a styled background.
@@ -456,6 +457,13 @@ class MediaService:
                 f"[bg][fg]overlay={fg_pos}:shortest=0[v]"
             )
         filter_complex = canvas
+        # Apply once, before title/brand/banner overlays, in the SAME encode pass.
+        # All callers (Quick Prep, three versions, long clips) share this renderer.
+        if subtle_particles:
+            from app.services.overlays.particles import twinkle_filters
+            particle_chain = twinkle_filters(fg.x, fg.y, fg.width, fg.height, _drawtext)
+            filter_complex = filter_complex[:-3] + "," + particle_chain + "[v]"
+            logger.info("subtle_particles_applied", count=10, peak_opacity=0.065)
 
         # Title via TitleRenderer (Phase 7 wiring, audit #31-32): Pillow
         # transparent PNG rendered inside title_box, overlaid — replaces
