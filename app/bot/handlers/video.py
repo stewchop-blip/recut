@@ -1087,6 +1087,11 @@ _MODE_PROMPTS = {
         "✂️ <b>Найти лучшие моменты</b>\n\n"
         "📎 Пришли длинное видео или ссылку."
     ),
+    "maximum_transform": (
+        "🚀 <b>Maximum Transform</b>\n\n"
+        "🎬 Сильное автоматическое оформление и обработка.\n"
+        "📎 Пришли видео или ссылку."
+    ),
 }
 
 # Selected mode per user; consumed when a video/URL arrives.
