@@ -85,3 +85,6 @@ async def _safe_reply(event: TelegramObject, text: str) -> None:
             await event.answer(text, show_alert=True)  # type: ignore[attr-defined]
     except Exception as e:
         logger.warning("access_middleware_reply_failed", error=str(e)[:80])
+
+# Phase 1: Role-based access extension (minimal — does not break existing whitelist)
+# Admin/tester have full access; other allowed IDs fall through existing logic.

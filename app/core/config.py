@@ -193,3 +193,7 @@ settings = Settings()  # type: ignore[call-arg]
 
 def get_settings() -> Settings:
     return settings
+
+# Phase 1: User roles (added by agent — no hardcoded IDs)
+    admin_telegram_ids: str = Field(default="", description="Comma-separated admin Telegram IDs")
+    tester_telegram_ids: str = Field(default="", description="Comma-separated tester Telegram IDs")
