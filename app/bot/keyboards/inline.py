@@ -20,6 +20,8 @@ HOME_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🎬 Сделать ролик", callback_data="mode:prepare")],
     [InlineKeyboardButton(text="✂️ Нарезать длинное видео", callback_data="mode:moments")],
     [InlineKeyboardButton(text="🎨 Оформление", callback_data="appearance:menu")],
+    [InlineKeyboardButton(text="📖 Как пользоваться", callback_data="help:show"),
+     InlineKeyboardButton(text="🎁 Пригласить друга", callback_data="referral:show")],
 ])
 
 
@@ -72,10 +74,11 @@ def audio_menu(current: str) -> InlineKeyboardMarkup:
 # 🎨 Оформление — one style section with summary (PART 15/16)
 # ---------------------------------------------------------------------------
 
-def appearance_menu(style_id: str, banner: bool) -> InlineKeyboardMarkup:
+def appearance_menu(style_id: str, banner: bool, decoration: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🎭 Стиль: {style_id}", callback_data="style:pick")],
         [InlineKeyboardButton(text=f"🖼 Плашка: {'✅' if banner else 'нет'}", callback_data="banner:menu")],
+        [InlineKeyboardButton(text=f"🤖 Персонаж снизу: {'ВКЛ' if decoration else 'ВЫКЛ'}", callback_data="decoration:toggle")],
         [InlineKeyboardButton(text="🔧 Настроить вручную", callback_data="fine:menu")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
     ])

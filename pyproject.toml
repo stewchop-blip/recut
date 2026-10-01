@@ -88,3 +88,5 @@ python_functions = "test_*"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*"]
+[tool.setuptools.package-data]
+app = ["assets/*.png"]

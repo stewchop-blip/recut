@@ -31,9 +31,10 @@ charge real Stars. No real payment or refund was performed during this change.
 
 ## Required before commercial activation
 
-1. Choose prices, unit semantics, refund policy and final terms. The credit ledger is
-   prepared, but debiting credits from video jobs / paid quotas is deliberately NOT
-   connected yet. Do not sell credits until that integration is implemented and tested.
+1. Choose prices, refund policy and final terms. Optional generation quotas now reserve
+   and consume ledger credits for render callbacks (see GROWTH.md). One successful
+   action, including a three-clip batch, costs one generation. Quotas remain disabled
+   by default; test reservation recovery and concurrency on staging PostgreSQL before sales.
 2. Test invoices, duplicates, expired invoices, changed prices, refunds, restart and
    receipt delivery against PostgreSQL and Telegram's test environment.
 3. Implement/rehearse payment reconciliation using `getStarTransactions`: polling

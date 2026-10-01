@@ -97,9 +97,16 @@ async def refunded(message: types.Message):
 
 @router.message(Command("balance"))
 async def show_balance(message: types.Message):
+    if not message.from_user or message.chat.type != "private":
+        return
+    settings = get_settings()
     async with db_manager.session() as session:
         credits = await balance(session, message.from_user.id)
-    await message.answer(f"Баланс обработок: {credits}")
+    details = (f"Бесплатный дневной лимит: {settings.daily_free_generations}. "
+               "После него используется баланс. Приглашения: /referral"
+               if settings.generation_limits_enabled else
+               "Сейчас обработка безлимитная. Бонусы сохраняются для будущих лимитов.")
+    await message.answer(f"Баланс дополнительных обработок: {credits}\n\n{details}")
 
 
 @router.message(Command("terms"))

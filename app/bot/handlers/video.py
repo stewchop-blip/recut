@@ -652,6 +652,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             background_id=getattr(s, "background_id", "blur") if s else "blur",
             title_text=_resolve_title_text(s),
             brand_corner=bool(getattr(s, "brand_corner", False)) if s else False,
+            decoration_id="mascot" if s and getattr(s, "decoration_enabled", False) else "",
             audio_preset=getattr(s, "audio_preset", "original") if s else "original",
             transformation_preset=getattr(s, "style_id", "custom") if s else "custom",
             overlay_is_animated=bool(getattr(s, "overlay_is_animated", False)) if s else False,
@@ -755,6 +756,7 @@ async def on_action_versions(call: CallbackQuery) -> None:
             input_path, job_dir,
             cta_asset=cta_asset if cta_enabled else None,
             cta_position=cta_position,
+            decoration_id="mascot" if s and getattr(s, "decoration_enabled", False) else "",
             cta_margin_px=0,  # auto ~9.5% of height
         )
 
@@ -949,6 +951,7 @@ async def on_url_recut(call: CallbackQuery) -> None:
             background_id=getattr(s, "background_id", "blur") if s else "blur",
             title_text=_resolve_title_text(s),
             brand_corner=bool(getattr(s, "brand_corner", False)) if s else False,
+            decoration_id="mascot" if s and getattr(s, "decoration_enabled", False) else "",
             audio_preset=getattr(s, "audio_preset", "original") if s else "original",
             overlay_is_animated=bool(getattr(s, "overlay_is_animated", False)) if s else False,
         )
@@ -1064,9 +1067,9 @@ def render_appearance(s, user_id: int) -> tuple[str, types.InlineKeyboardMarkup]
         f"Фон: {bg.label if bg else getattr(s, 'background_id', 'blur')}\n"
         f"Плашка: {'✅' if has_banner else 'нет'}\n"
         f"Заголовок: {title.label if title else 'без текста'}\n"
-        "Вставка: нет"
+        f"Персонаж снизу: {'включён' if getattr(s, 'decoration_enabled', False) else 'выключен'}"
     )
-    return text, appearance_menu(style_label, has_banner)
+    return text, appearance_menu(style_label, has_banner, bool(getattr(s, "decoration_enabled", False)))
 
 # ---------------------------------------------------------------------------
 # HOME / mode selection / banner section (audit #1, #3-9, #33)
@@ -1375,11 +1378,11 @@ async def on_appearance_menu(call: CallbackQuery) -> None:
         f"Фон: {bg.label if bg else getattr(s, 'background_id', 'blur')}\n"
         f"Плашка: {'✅' if has_banner else 'нет'}\n"
         f"Заголовок: {title.label if title else 'без текста'}\n"
-        "Вставка: нет"
+        f"Персонаж снизу: {'включён' if getattr(s, 'decoration_enabled', False) else 'выключен'}"
     )
     await call.message.edit_text(
         text, parse_mode="HTML",
-        reply_markup=appearance_menu(style_label, has_banner),
+        reply_markup=appearance_menu(style_label, has_banner, bool(getattr(s, "decoration_enabled", False))),
     )
     await call.answer()
 
@@ -1922,3 +1925,10 @@ async def _edit_status(message: types.Message, text: str, reply_markup=None) -> 
         await message.edit_text(text, reply_markup=reply_markup)
     except Exception as e:
         logger.warning("status_edit_failed", error=str(e)[:120])
+
+@router.callback_query(F.data == "decoration:toggle")
+async def toggle_decoration(call: CallbackQuery) -> None:
+    async with db_manager.session() as session:
+        row = await UserSettingsRepository(session).get_or_create(call.from_user.id)
+        row.decoration_enabled = not bool(row.decoration_enabled)
+    await on_appearance_menu(call)

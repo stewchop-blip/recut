@@ -1,7 +1,7 @@
 """/start and /help handlers for the Quick Prep UX."""
 from pathlib import Path
 
-from aiogram import Router, types
+from aiogram import F, Router, types
 from aiogram.filters import Command
 
 from app.core.logging import get_logger
@@ -13,32 +13,59 @@ logger = get_logger(__name__)
 
 
 WELCOME = (
-    "\U0001f3ac <b>ReCut</b>\n\n"
-    "\u041f\u0440\u0438\u0448\u043b\u0438 \u0432\u0438\u0434\u0435\u043e \u0438\u043b\u0438 \u0441\u0441\u044b\u043b\u043a\u0443 "
-    "\u043d\u0430 TikTok, Reels \u0438\u043b\u0438 Shorts.\n\n"
-    "\u042f \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043b\u044e \u0440\u043e\u043b\u0438\u043a:\n"
-    "\u2022 \u043f\u0440\u0438\u0432\u0435\u0434\u0443 \u043a \u0443\u0434\u043e\u0431\u043d\u043e\u043c\u0443 \u0444\u043e\u0440\u043c\u0430\u0442\u0443\n"
-    "\u2022 \u0434\u043e\u0431\u0430\u0432\u043b\u044e \u043f\u043b\u0430\u0448\u043a\u0443\n"
-    "\u2022 \u043f\u0440\u0438 \u043d\u0435\u043e\u0431\u0445\u043e\u0434\u0438\u043c\u043e\u0441\u0442\u0438 \u0441\u0434\u0435\u043b\u0430\u044e "
-    "\u0441\u0443\u0431\u0442\u0438\u0442\u0440\u044b\n\n"
-    "\u0414\u043b\u044f \u0434\u043b\u0438\u043d\u043d\u043e\u0433\u043e \u0432\u0438\u0434\u0435\u043e \u043c\u043e\u0433\u0443 "
-    "\u043d\u0430\u0439\u0442\u0438 \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u044b\u0435 \u043c\u043e\u043c\u0435\u043d\u0442\u044b."
+    "🎬 <b>ReCut — подготовка видео для публикации</b>\n\n"
+    "Отправь видео файлом или ссылку на TikTok, Reels или Shorts.\n\n"
+    "• Скачаю исходник по ссылке.\n"
+    "• Сделаю вертикальный ролик с оформлением, твоей плашкой и персонажем.\n"
+    "• Создам три монтажных варианта или найду моменты в длинном видео.\n\n"
+    "<b>Первый ролик — в три шага:</b>\n"
+    "1. Пришли видео или ссылку.\n"
+    "2. Нажми «Сделать».\n"
+    "3. Получи готовый MP4.\n\n"
+    "Плашку и персонажа можно включить в «Оформлении». "
+    "Максимальная обработка находится в «Ещё»."
 )
 
-
 HELP_TEXT = (
-    "📖 <b>Как пользоваться</b>\n\n"
-    "1️⃣ Отправь видео (файл)\n"
-    "2️⃣ Нажми «🚀 Подготовить видео»\n"
-    "3️⃣ Получи готовый MP4\n\n"
-    "⚙️ В настройках: позиция CTA, время показа, баннер, субтитры.\n\n"
-    "Вопросы → @stewchop"
+    "📖 <b>Как пользоваться ReCut</b>\n\n"
+    "<b>Короткое видео:</b> отправь файл или ссылку, затем нажми «Сделать». "
+    "В «Ещё» доступны три варианта и максимальная обработка со сменой цвета, скорости и звука.\n\n"
+    "<b>Оформление:</b> выбери стиль, загрузи свою плашку или включи персонажа снизу. "
+    "Настройки сохраняются для следующих роликов.\n\n"
+    "<b>Длинное видео:</b> выбери «Нарезать длинное видео» и отправь источник. "
+    "Бот подберёт моменты; субтитры доступны в обработке длинных видео.\n\n"
+    "Скачать исходник можно без обработки. Изменение оформления не гарантирует "
+    "попадания в рекомендации площадок.\n\n"
+    "/referral — приглашения и бонусы\n/balance — баланс обработок\n"
+    "/cancel — отменить зависшую задачу\nПоддержка: @stewchop"
 )
 
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message) -> None:
     from app.bot.keyboards.inline import HOME_MENU
+    if message.chat.type != "private" or not message.from_user:
+        return
+    from sqlalchemy import update
+    from app.database.models import BotProfile
+    from app.services.referrals import ensure_profile
+    user_id = message.from_user.id
+    payload = (message.text or "").split(maxsplit=1)
+    payload = payload[1].strip() if len(payload) > 1 else ""
+    try:
+        async with db_manager.session() as session:
+            profile, _ = await ensure_profile(session, user_id, payload)
+            first_visit = not profile.onboarding_seen
+        if first_visit:
+            await message.answer(WELCOME, parse_mode="HTML", reply_markup=HOME_MENU)
+            async with db_manager.session() as session:
+                await session.execute(update(BotProfile).where(
+                    BotProfile.telegram_user_id == user_id).values(onboarding_seen=True))
+            return
+    except Exception:
+        logger.exception("onboarding_failed", user_id=user_id)
+        await message.answer(WELCOME, parse_mode="HTML", reply_markup=HOME_MENU)
+        return
     # Item 11: CurrentMedia is the source of truth, not _pending_jobs.
     # If media is recoverable → HOME with "Продолжить" info.
     from app.services.current_media import resolve_current_media
@@ -64,7 +91,15 @@ async def cmd_start(message: types.Message) -> None:
 
 @router.message(Command("help"))
 async def cmd_help(message: types.Message) -> None:
-    await message.answer(HELP_TEXT, parse_mode="HTML")
+    from app.bot.keyboards.inline import HOME_MENU
+    await message.answer(HELP_TEXT, parse_mode="HTML", reply_markup=HOME_MENU)
+
+
+@router.callback_query(F.data == "help:show")
+async def help_callback(call: types.CallbackQuery) -> None:
+    await call.answer()
+    if call.message:
+        await call.message.answer(HELP_TEXT, parse_mode="HTML")
 
 
 @router.message(Command("cancel"))

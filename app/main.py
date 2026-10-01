@@ -11,7 +11,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 
-from app.bot.handlers import start, video, payments
+from app.bot.handlers import start, video, payments, referrals
 from app.bot.middlewares.access import AccessMiddleware
 from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
@@ -25,9 +25,12 @@ def _build_dispatcher() -> Dispatcher:
     # Whitelist gate runs before any router logic.
     dp.message.middleware.register(AccessMiddleware())
     dp.callback_query.middleware.register(AccessMiddleware())
+    from app.bot.middlewares.generations import GenerationMiddleware
+    dp.callback_query.middleware.register(GenerationMiddleware())
     # Financial events and commands must precede broad video/text handlers.
     dp.include_router(payments.router)
     dp.include_router(start.router)
+    dp.include_router(referrals.router)
     dp.include_router(video.router)
     return dp
 
@@ -135,6 +138,7 @@ async def run_schema_migrations() -> None:
         ("title_id", "VARCHAR(20) DEFAULT 'none'"),
         ("brand_corner", "BOOLEAN DEFAULT FALSE"),
         ("style_id", "VARCHAR(20) DEFAULT 'clean'"),
+        ("decoration_enabled", "BOOLEAN NOT NULL DEFAULT FALSE"),
         ("custom_title", "VARCHAR(200) DEFAULT ''"),
         ("audio_preset", "VARCHAR(10) DEFAULT 'original'"),
         ("current_media_path", "VARCHAR(500) DEFAULT NULL"),
@@ -251,7 +255,9 @@ async def _on_startup(bot: Bot) -> None:
         from aiogram.types import BotCommand
         await bot.set_my_commands([
             BotCommand(command="start", description="Начать"),
-            BotCommand(command="help", description="Помощь"),
+            BotCommand(command="help", description="Как пользоваться"),
+            BotCommand(command="referral", description="Пригласить друга"),
+            BotCommand(command="balance", description="Баланс обработок"),
             BotCommand(command="cancel", description="Отменить"),
         ])
     except Exception as e:

@@ -50,6 +50,7 @@ def test_schema_migration_adds_column_idempotent(tmp_path):
                 res = await conn.execute(text("PRAGMA table_info(user_settings)"))
                 cols = [row[1] for row in res.fetchall()]
                 assert "cta_telegram_file_id" in cols
+                assert "decoration_enabled" in cols
 
             # Pass 2: Run migration again -> must not fail
             await run_schema_migrations()
@@ -57,6 +58,7 @@ def test_schema_migration_adds_column_idempotent(tmp_path):
                 res = await conn.execute(text("PRAGMA table_info(user_settings)"))
                 cols = [row[1] for row in res.fetchall()]
                 assert "cta_telegram_file_id" in cols
+                assert "decoration_enabled" in cols
         finally:
             db_manager._engine = old_engine
             await engine.dispose()

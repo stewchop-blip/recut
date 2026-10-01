@@ -212,6 +212,13 @@ class JobRepository:
                 processing_completed_at=datetime.utcnow(),
             )
         )
+        if clips_generated > 0:
+            from app.services.referrals import qualify_referral
+            from app.services.generations import complete_current_run
+            job = await self.session.get(Job, job_id)
+            if job is not None:
+                await complete_current_run(self.session, job.telegram_user_id)
+                await qualify_referral(self.session, job.telegram_user_id)
 
     async def mark_failed(
         self, job_id: int, error_code: str, error_detail: str,

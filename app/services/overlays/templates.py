@@ -14,6 +14,7 @@ source, animated-capable in ffmpeg 7+) and vignette overlays.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from app.core.logging import get_logger
@@ -78,9 +79,12 @@ class DecorationAsset:
     max_height_frac: float = 0.18  # relative to canvas height
 
 
-# PHASE B registry — empty for now: no bundled binaries in repo yet.
-# Future entries: mascot, reactions, arrows. fill this dict only.
-DECORATIONS: dict[str, DecorationAsset] = {}
+# Bundled, opt-in transparent mascot. Keep paths independent of cwd.
+DECORATIONS: dict[str, DecorationAsset] = {
+    "mascot": DecorationAsset("mascot", "Робот", "png",
+        str(Path(__file__).resolve().parents[2] / "assets" / "mascot.png"),
+        anchor="bottom_left", max_width_frac=0.22, max_height_frac=0.18),
+}
 
 
 TITLES: dict[str, TitlePreset] = {

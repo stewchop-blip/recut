@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     payment_support: str = "@stewchop"
     payment_admin_ids: str = ""
 
+    # Public-launch features are opt-in; closed-beta access stays unchanged.
+    referrals_enabled: bool = False
+    referral_reward_credits: int = Field(default=3, ge=1, le=100)
+    referral_max_rewards: int = Field(default=50, ge=1, le=10000)
+    generation_limits_enabled: bool = False
+    daily_free_generations: int = Field(default=3, ge=0, le=1000)
+    unlimited_telegram_ids: str = ""
+
     # === OpenRouter (used only for transcript analysis / clip selection) ===
     openrouter_api_key: str = Field(..., description="OpenRouter API key")
     clip_analysis_model: str = Field(

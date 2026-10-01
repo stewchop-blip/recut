@@ -107,10 +107,12 @@ async def run_long_pipeline(
             cta_size_preset="medium", cta_overlay_type="png",
             cta_enabled=False,
         )
+        decoration_id = ""
         cta_asset: Path | None = None
         async with db_manager.session() as session:
             s = await UserSettingsRepository(session).get(user_id)
             if s is not None:
+                decoration_id = "mascot" if getattr(s, "decoration_enabled", False) else ""
                 # Style for the vertical render (one engine everywhere).
                 from app.services.overlays.templates import BACKGROUNDS
                 user_style["background_id"] = (
@@ -158,6 +160,8 @@ async def run_long_pipeline(
                 background_id=user_style["background_id"],
                 title_text=user_style["title_text"],
                 brand_corner=user_style["brand_corner"],
+                decoration_id=decoration_id,
+                decoration_avoid_bottom_banner=bool(cta_asset and cta_settings["cta_position"].startswith("bottom")),
             ).render(cut_job, vertical_dir)
         except VerticalRenderError as e:
             await edit_status(f"❌ Не удалось сделать вертикаль: {e}")

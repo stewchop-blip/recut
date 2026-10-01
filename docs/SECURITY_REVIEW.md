@@ -53,3 +53,15 @@ queue cancellation/isolation, cookie cleanup and exact cancellation directory ma
 Dispatcher import and registered payment update types checked; payments disabled
 by default. An old cancellation test was updated to the existing `(count, ids)` API.
 No end-to-end payment, live PostgreSQL concurrency, or deployed load test was run.
+
+
+## 2026-10-01 follow-up: referrals and generation allowance
+
+Optional per-user render reservations and credit debit/release now exist
+(`GENERATION_LIMITS_ENABLED=false` by default). Referral attribution is first-touch,
+opaque-token based, and excludes existing users; rewards require successful delivery,
+are idempotent and have a configurable lifetime cap. This does not prevent multi-account
+abuse. SQLite concurrency and transaction tests are included; staging PostgreSQL and
+live Telegram delivery/restart reconciliation still require verification. Abrupt process
+termination can leave reserved runs: use the explicit operator procedure in GROWTH.md.
+No whitelist, payment enablement, or public-access setting was changed.

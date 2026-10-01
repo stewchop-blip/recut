@@ -192,6 +192,8 @@ class UserSettings(Base):
     current_media_telegram_file_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     current_media_normalized: Mapped[Optional[bool]] = mapped_column(nullable=True)
 
+    decoration_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
+
     # Subtitles (default OFF — quick prep does NOT run Whisper automatically)
     subtitles_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
 
@@ -234,4 +236,28 @@ class CreditEntry(Base):
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     amount: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class BotProfile(Base):
+    """First-touch attribution and onboarding, separate from legacy user data."""
+    __tablename__ = "bot_profiles"
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    invite_token: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    inviter_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
+    reward_credits: Mapped[int] = mapped_column(Integer, default=0)
+    referral_qualified: Mapped[bool] = mapped_column(default=False)
+    rewarded_invites: Mapped[int] = mapped_column(Integer, default=0)
+    onboarding_seen: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GenerationRun(Base):
+    """One render action; a three-clip batch costs one generation."""
+    __tablename__ = "generation_runs"
+    request_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    day: Mapped[str] = mapped_column(String(10), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="reserved", index=True)
+    uses_credit: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

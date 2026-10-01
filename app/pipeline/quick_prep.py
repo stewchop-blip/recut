@@ -75,6 +75,7 @@ class QuickPrepPipeline:
         title_text: str = "",
         brand_corner: bool = False,
         audio_preset: str = "original",
+        decoration_id: str = "",
         maximum_transform: bool = False,
         transformation_preset: str = "custom",  # PART 23: clean / meme / brand / custom
     ) -> QuickPrepResult:
@@ -200,6 +201,8 @@ class QuickPrepPipeline:
                 color_preset=color_preset,
                 layout_id=layout_id,
                 maximum_plan=maximum_plan,
+                decoration_id=decoration_id,
+                decoration_avoid_bottom_banner=bool(cta_asset and cta_position.startswith("bottom")),
             )
             current = vertical_path
             # Output geometry log (audit #22).

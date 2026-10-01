@@ -325,6 +325,7 @@ class MediaService:
         title_text: str = "",
         brand_corner: bool = False,
         decoration_id: str = "",
+        decoration_avoid_bottom_banner: bool = False,
         audio_preset: str = "original",
         speed: float = 1.0,  # TZ Phase 16: setpts/atempo, pitch preserved
         color_preset: str = "original",  # TZ Phase 15: eq на контент
@@ -535,6 +536,12 @@ class MediaService:
                         dec.max_width_frac, dec.max_height_frac, dec.anchor,
                     )
                     dec_w, dec_h = _asset_pixel_size(dec_path, dbox.width, dbox.height)
+                    dec_y = dbox.y
+                    if decoration_avoid_bottom_banner and dec.anchor.startswith("bottom"):
+                        dec_y = min(dec_y, int(target_height * 0.70) - dec_h)
+                    # Slow, small bob: one reusable transparent PNG, no extra encode pass.
+                    dec_y_expr = f"{max(0, dec_y)}+{max(1, int(target_height * 0.003))}*sin(2*PI*t/4)"
+
                     # Input registry (audit #12): source=0, title=1 (if used),
                     # decoration = next. No hardcoded indexes.
                     input_idx = 1 + (1 if title_used else 0)
@@ -543,7 +550,7 @@ class MediaService:
                     chain = (
                         f"[{input_idx}:v]format=rgba,"
                         f"scale={dec_w}:{dec_h}[dec];"
-                        f"[v][dec]overlay={dbox.x}:{dbox.y}:"
+                        f"[v][dec]overlay=x={dbox.x}:y='{dec_y_expr}':"
                         + ("shortest=1:eof_action=pass[v]" if is_anim
                            else "eof_action=repeat:repeatlast=1[v]")
                     )

@@ -83,7 +83,7 @@ async def test_full_pipeline_with_banner(tmp_path):
     source_file(source, duration=4)
     Image.new('RGBA', (300, 60), (255, 40, 40, 255)).save(banner)
     result = await QuickPrepPipeline().run(source, tmp_path / 'job',
-        maximum_transform=True, target_width=360, target_height=640, target_fps=24,
+        maximum_transform=True, decoration_id="mascot", target_width=360, target_height=640, target_fps=24,
         video_bitrate='1M', audio_bitrate='128k', cta_asset=banner,
         cta_position='bottom', cta_mode='end', cta_duration_seconds=1,
         cta_start_seconds=0, cta_min_margin_px=12, output_width=360, output_height=640)

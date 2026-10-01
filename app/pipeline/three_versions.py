@@ -235,6 +235,7 @@ class ThreeVersionsPipeline:
         cta_asset: Path | None,
         cta_position: str,
         cta_margin_px: int,
+        decoration_id: str = "",
         cta_last_seconds: float = 4.0,
         overlay_type: str = "png",
         overlay_is_animated: bool = False,
@@ -287,7 +288,8 @@ class ThreeVersionsPipeline:
                 await media.make_vertical(
                     current, vertical,
                     background_id=bg,
-                    overlay_type=overlay_type,
+                    decoration_id=decoration_id,
+                    decoration_avoid_bottom_banner=bool(cta_asset and cta_position.startswith("bottom")),
                     title_text=title,
                     brand_corner=brand,
                     speed=speed,
