@@ -539,7 +539,7 @@ class MediaService:
                     dec_y = dbox.y
                     if decoration_avoid_bottom_banner and dec.anchor.startswith("bottom"):
                         dec_y = min(dec_y, int(target_height * 0.70) - dec_h)
-                    # Slow, small bob: one reusable transparent PNG, no extra encode pass.
+                    # Static assets gently bob; animated assets keep their own motion.
                     dec_y_expr = f"{max(0, dec_y)}+{max(1, int(target_height * 0.003))}*sin(2*PI*t/4)"
 
                     # Input registry (audit #12): source=0, title=1 (if used),
@@ -547,6 +547,8 @@ class MediaService:
                     input_idx = 1 + (1 if title_used else 0)
                     dec_kind = (dec.kind or "").lower()
                     is_anim = dec_kind in ("gif", "mp4", "webp")
+                    if is_anim:
+                        dec_y_expr = str(max(0, dec_y))
                     chain = (
                         f"[{input_idx}:v]format=rgba,"
                         f"scale={dec_w}:{dec_h}[dec];"
@@ -559,7 +561,7 @@ class MediaService:
                         # Only animated assets loop; a static PNG with
                         # -stream_loop -1 + shortest=0 never terminates.
                         if dec_kind == "gif":
-                            extra_inputs += ["-ignore_loop", "0"]
+                            extra_inputs += ["-ignore_loop", "1"]
                         extra_inputs += ["-stream_loop", "-1"]
                     extra_inputs += ["-i", str(dec_path)]
 

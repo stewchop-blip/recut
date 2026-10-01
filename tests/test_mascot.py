@@ -28,7 +28,8 @@ def frame(path, t):
 
 def test_asset_has_real_alpha():
     asset = Image.open(DECORATIONS['mascot'].path)
-    assert asset.mode == 'RGBA'
+    assert asset.n_frames > 1
+    asset = asset.convert('RGBA')
     assert asset.getchannel('A').getextrema() == (0, 255)
     assert asset.getpixel((0, 0))[3] == 0
 
@@ -36,8 +37,8 @@ def test_asset_has_real_alpha():
 @pytest.mark.parametrize('banner', [False, True])
 async def test_mascot_real_render_with_title_audio_and_motion(tmp_path, banner):
     source, output, baseline = [tmp_path / name for name in ('source.mp4','mascot.mp4','off.mp4')]
-    run('ffmpeg','-v','error','-f','lavfi','-i','color=gray:s=180x320:r=24:d=3',
-        '-f','lavfi','-i','sine=frequency=440:duration=3',
+    run('ffmpeg','-v','error','-f','lavfi','-i','color=gray:s=180x320:r=24:d=6',
+        '-f','lavfi','-i','sine=frequency=440:duration=6',
         '-c:v','libx264','-pix_fmt','yuv420p',str(source))
     kwargs = dict(target_width=360, target_height=640, target_fps=24,
         title_text='Тест', brand_corner=True, subtle_particles=False,
@@ -54,9 +55,10 @@ async def test_mascot_real_render_with_title_audio_and_motion(tmp_path, banner):
     if banner:
         assert delta[470:].mean() < 1, 'Leave lower banner region free'
     assert np.mean(np.abs(frame(output,1.0).astype(float)-frame(output,2.8))) > 0.05
+    assert np.mean(np.abs(frame(output,4.2).astype(float)-frame(output,4.8))) > 0.05
     data=json.loads(run('ffprobe','-v','error','-show_streams','-of','json',str(output)))
     assert any(s['codec_type']=='audio' for s in data['streams'])
-    assert abs(float(data['streams'][0]['duration'])-3)<0.1
+    assert abs(float(data['streams'][0]['duration'])-6)<0.1
 
 
 async def test_decoration_toggle_persists(tmp_path, monkeypatch):
@@ -93,7 +95,7 @@ async def test_three_versions_reaches_real_shared_renderer(tmp_path):
             return await super().make_vertical(*args, target_width=360,target_height=640,
                 target_fps=24,**kwargs)
     source=tmp_path/'source.mp4'
-    run('ffmpeg','-v','error','-f','lavfi','-i','testsrc2=s=180x320:r=24:d=3',
+    run('ffmpeg','-v','error','-f','lavfi','-i','testsrc2=s=180x320:r=24:d=6',
         '-c:v','libx264','-pix_fmt','yuv420p',str(source))
     results=await ThreeVersionsPipeline(media=SmallMedia()).run(source,tmp_path/'versions',
         cta_asset=None,cta_position='bottom',cta_margin_px=10,decoration_id='mascot')

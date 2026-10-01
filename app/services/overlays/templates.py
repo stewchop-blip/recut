@@ -81,8 +81,8 @@ class DecorationAsset:
 
 # Bundled, opt-in transparent mascot. Keep paths independent of cwd.
 DECORATIONS: dict[str, DecorationAsset] = {
-    "mascot": DecorationAsset("mascot", "Робот", "png",
-        str(Path(__file__).resolve().parents[2] / "assets" / "mascot.png"),
+    "mascot": DecorationAsset("mascot", "Кот", "gif",
+        str(Path(__file__).resolve().parents[2] / "assets" / "mascot.gif"),
         anchor="bottom_left", max_width_frac=0.22, max_height_frac=0.18),
 }
 

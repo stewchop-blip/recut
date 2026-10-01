@@ -7,7 +7,7 @@
   Later starts keep the existing resume/home behaviour. Help is available from
   the home menu and `/help`. There is no promise of recommendation eligibility.
 - `Оформление → Персонаж снизу` is an opt-in, persistent switch, initially OFF.
-  The single bundled transparent robot gently bobs in the lower-left corner.
+  The user-supplied transparent dancing-cat GIF loops in the lower-left corner.
   It is wired to QuickPrep, Maximum Transform, three versions and long clips;
   original downloads stay original. For bottom banners it moves upward.
 - `Пригласить друга` and `/referral` show a personal deep link and bonus statistics
@@ -67,7 +67,7 @@ farming; review abuse and operating costs before opening unrestricted access.
 
 ## Mascot asset
 
-`app/assets/mascot.png`: generated with built-in imagegen, actual RGBA alpha; original
-file preserved in the project. Prompt: one compact full-body ivory 3D robot, dark visor,
-warm eyes, subtle blue accents, one hand pointing up; transparent background; no text,
-logos, extra objects or ground shadow. Runtime scales and animates it in FFmpeg.
+`app/assets/mascot.gif`: user-supplied transparent dancing cat, copied byte-for-byte
+from the provided GIF (40 frames, four seconds per cycle). FFmpeg repeats it for the
+full source duration, preserves its original timing and adds no artificial bobbing.
+The opt-in switch and stored preference are unchanged.

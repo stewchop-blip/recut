@@ -89,4 +89,4 @@ python_functions = "test_*"
 where = ["."]
 include = ["app*"]
 [tool.setuptools.package-data]
-app = ["assets/*.png"]
+app = ["assets/*.png", "assets/*.gif"]
