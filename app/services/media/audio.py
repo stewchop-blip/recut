@@ -39,6 +39,7 @@ class AudioConfig:
     fade_in: float = 0.0              # seconds
     fade_out: float = 0.0             # seconds
     speed: float = 1.0                # 0.5..2.0, keeps pitch (atempo)
+    pitch_semitones: float = 0.0       # mild pitch shift, compensated duration
     normalize: bool = True
 
     def resolved_preset(self) -> str:
@@ -76,6 +77,11 @@ class AudioProcessor:
                 chain.append(vol)
             if cfg.normalize:
                 chain.append(_LN)
+
+        if cfg.pitch_semitones:
+            pitch = 2 ** (max(-0.5, min(0.5, cfg.pitch_semitones)) / 12)
+            chain += ["aresample=48000", f"asetrate={48000 * pitch:.6f}",
+                      "aresample=48000", f"atempo={1 / pitch:.8f}"]
 
         if cfg.speed != 1.0:
             # atempo range is 0.5..2.0; keep it sane

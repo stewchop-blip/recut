@@ -4,10 +4,13 @@ import asyncio
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from app.core.logging import get_logger
 
+
+if TYPE_CHECKING:
+    from app.services.auto_edit_planner import MaximumTransformPlan
 
 logger = get_logger(__name__)
 
@@ -326,6 +329,7 @@ class MediaService:
         speed: float = 1.0,  # TZ Phase 16: setpts/atempo, pitch preserved
         color_preset: str = "original",  # TZ Phase 15: eq на контент
         layout_id: str = "pip",  # TZ Phase 17: full / pip / framed
+        maximum_plan: "MaximumTransformPlan | None" = None,
         subtle_particles: bool = True,  # Shared visual finish; no extra menu control.
         timeout_seconds: float = 600.0,
     ) -> Path:
@@ -415,6 +419,8 @@ class MediaService:
         eq_str = _eq(color_preset)
         if eq_str:
             fg_scale = f"{fg_scale},{eq_str}"
+        if maximum_plan is not None:
+            fg_scale += "," + maximum_plan.video_filter()
         fg_pos = f"{fg.x}:{fg.y}"
         if preset.kind == "gradient":
             # PHASE A: two-color animated gradient canvas. The gradients
@@ -556,26 +562,18 @@ class MediaService:
             "-v", "error",
             "-i", str(source),
         ]
-        # TZ Phase 16: video speed via container timestamps (donor
-        # ffmpeg-video-bot change_speed pattern); audio atempo comes from
-        # AudioProcessor with the SAME factor — synchronized.
+        # Scale video timestamps once; audio tempo is handled independently.
+        # Input-level itsscale also changes audio timestamps and risks drift.
         if abs(speed - 1.0) > 0.001:
-            i_idx = cmd.index("-i")
-            cmd = (cmd[:i_idx]
-                   + ["-itsscale", f"{1.0 / speed:.5f}"]
-                   + cmd[i_idx:])
+            filter_complex = filter_complex.replace(
+                "[0:v]", f"[0:v]setpts=(PTS-STARTPTS)/{speed:.5f},", 1)
         cmd += extra_inputs
         # PART 20-21: audio through AudioProcessor presets.
         from app.services.media.audio import AudioConfig, AudioProcessor
         audio_args, audio_map = AudioProcessor().audio_args(
-            AudioConfig(preset=audio_preset, speed=speed),
+            AudioConfig(preset=audio_preset, speed=speed,
+                        pitch_semitones=maximum_plan.pitch_semitones if maximum_plan else 0.0),
             audio_bitrate=audio_bitrate)
-        # TZ Phase 16: video speed via setpts (donor ffmpeg-video-bot
-        # change_speed pattern). Audio atempo comes from AudioProcessor —
-        # both use the same factor so they stay synchronized.
-        if abs(speed - 1.0) > 0.001:
-            filter_complex = filter_complex.replace(
-                "[v_pre]", f"[v_pre]setpts=(1/{speed:.5f})*PTS[v_pre]")
         cmd += audio_args
         cmd += [
             "-filter_complex", filter_complex,

@@ -75,6 +75,7 @@ class QuickPrepPipeline:
         title_text: str = "",
         brand_corner: bool = False,
         audio_preset: str = "original",
+        maximum_transform: bool = False,
         transformation_preset: str = "custom",  # PART 23: clean / meme / brand / custom
     ) -> QuickPrepResult:
         media = self._media or get_media_service()
@@ -108,6 +109,12 @@ class QuickPrepPipeline:
         if not meta.has_audio:
             logger.warning("quickprep_no_audio", path=str(input_video))
 
+        maximum_plan = None
+        if maximum_transform:
+            import asyncio
+            from app.services.auto_edit_planner import MaximumTransformProfile
+            maximum_plan = await asyncio.to_thread(MaximumTransformProfile.for_source, input_video)
+
         # 2b. MANDATORY normalization (TZ Phase 3/4/5/6): EVERY source goes
         # raw → SourceNormalizer (two-pass: rotate+SAR, then bar crop on
         # normalized pixels) → normalized_source. Pre-normalization
@@ -130,7 +137,7 @@ class QuickPrepPipeline:
         # 2c. TransformationPreset resolution (PART 23-24) — single settings object.
         # Overrides per-style settings when using a built-in preset.
         from app.services.overlays.presets import resolve_preset
-        preset_cfg = resolve_preset(transformation_preset)
+        preset_cfg = resolve_preset(transformation_preset) if not maximum_transform else None
         if preset_cfg is not None:
             # Apply preset's visual/audio settings; keep user banner config
             # (cta_size overrides only when preset specifies different size).
@@ -147,6 +154,13 @@ class QuickPrepPipeline:
         speed = getattr(preset_cfg, "speed", 1.0) if preset_cfg is not None else 1.0
         color_preset = getattr(preset_cfg, "color_preset", "original") if preset_cfg is not None else "original"
         layout_id = getattr(preset_cfg, "layout_id", "pip") if preset_cfg is not None else "pip"
+        if maximum_plan is not None:
+            speed = maximum_plan.speed
+            layout_id = maximum_plan.layout_id
+            audio_preset = "none" if audio_preset == "none" else "dynamic"
+            logger.info("maximum_transform_applied", profile=maximum_plan.name,
+                        speed=speed, pitch=maximum_plan.pitch_semitones,
+                        grain=maximum_plan.grain, layout=layout_id)
         # TZ Phase 19: log what actually applied (verify preset worked).
         logger.info(
             "transformations_applied",
@@ -185,6 +199,7 @@ class QuickPrepPipeline:
                 speed=speed,
                 color_preset=color_preset,
                 layout_id=layout_id,
+                maximum_plan=maximum_plan,
             )
             current = vertical_path
             # Output geometry log (audit #22).
@@ -215,7 +230,7 @@ class QuickPrepPipeline:
         if effective_cta_asset is not None and effective_cta_asset.exists():
             from app.services.overlays.cta import CTAService, CTAOverlaySpec
             spec = CTAService()._make_spec(
-                clip_duration=meta.duration_seconds,
+                clip_duration=meta.duration_seconds / speed,
                 mode=cta_mode,
                 duration_seconds=cta_duration_seconds,
                 start_seconds=cta_start_seconds,

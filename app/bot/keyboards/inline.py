@@ -25,7 +25,9 @@ HOME_MENU = InlineKeyboardMarkup(inline_keyboard=[
 
 def mode_input_menu(mode: str) -> InlineKeyboardMarkup:
     """Menu after video input in the chosen mode."""
-    if mode == "versions":
+    if mode == "maximum_transform":
+        rows = [[InlineKeyboardButton(text="🚀 Максимальная обработка", callback_data="action:maximum_transform")]]
+    elif mode == "versions":
         rows = [[InlineKeyboardButton(text="✨ Сделать 3 версии", callback_data="action:versions")]]
     else:  # prepare / moments
         rows = [[InlineKeyboardButton(
@@ -39,6 +41,7 @@ def mode_input_menu(mode: str) -> InlineKeyboardMarkup:
 
 # ••• Ещё — advanced options for a pending short video (PART 12)
 MORE_MENU = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="🚀 Максимальная обработка", callback_data="mode:maximum_transform")],
     [InlineKeyboardButton(text="🎞 Сделать 3 варианта", callback_data="action:versions")],
     [InlineKeyboardButton(text="🔊 Звук", callback_data="audio:menu")],
     [InlineKeyboardButton(text="💬 Субтитры", callback_data="settings:toggle_subs")],

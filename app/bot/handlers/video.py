@@ -548,7 +548,7 @@ def _pop_pending(user_id: int) -> _PendingJob | None:
 # Step 2 — callbacks
 # ---------------------------------------------------------------------------
 
-@router.callback_query(F.data == "action:quick_prep")
+@router.callback_query(F.data.in_({"action:quick_prep", "action:maximum_transform"}))
 async def on_quick_prep(call: CallbackQuery) -> None:
     user_id = call.from_user.id if call.from_user else 0
     pending = _get_pending(user_id)
@@ -626,10 +626,13 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             if cta_enabled and cta_asset is None:
                 logger.info("cta_no_user_banner_skipping_overlay", user_id=user_id)
 
+        # The callback carries the mode even after upload consumes _mode_state.
+        maximum_transform = call.data == "action:maximum_transform"
         # Run QuickPrep
         pipeline = QuickPrepPipeline()
         result = await pipeline.run(
             input_video=input_path,
+            maximum_transform=maximum_transform,
             job_dir=job_dir,
             target_width=settings.output_width,
             target_height=settings.output_height,
@@ -1088,7 +1091,7 @@ _MODE_PROMPTS = {
         "📎 Пришли длинное видео или ссылку."
     ),
     "maximum_transform": (
-        "🚀 <b>Maximum Transform</b>\n\n"
+        "🚀 <b>Максимальная обработка</b>\n\n"
         "🎬 Сильное автоматическое оформление и обработка.\n"
         "📎 Пришли видео или ссылку."
     ),
@@ -1113,6 +1116,13 @@ async def on_mode_selected(call: CallbackQuery) -> None:
         await call.answer("Неизвестный режим")
         return
     _mode_state[user_id] = mode
+    pending = _get_pending(user_id)
+    if pending is not None and Path(pending.input_path).is_file():
+        await call.message.edit_text(
+            "🎬 <b>Видео готово</b>\n\nВыбери действие:",
+            parse_mode="HTML", reply_markup=mode_input_menu(mode))
+        await call.answer()
+        return
     # Item 12: if CurrentMedia exists and recoverable — reuse it,
     # do NOT ask for source again.
     try:
@@ -1131,11 +1141,10 @@ async def on_mode_selected(call: CallbackQuery) -> None:
             )
         except Exception:
             pass
-        from app.bot.keyboards.inline import ACTION_MENU
         await call.message.edit_text(
             "🎬 <b>Видео готово</b>\n\nВыбери действие:",
             parse_mode="HTML",
-            reply_markup=ACTION_MENU,
+            reply_markup=mode_input_menu(mode),
         )
         await call.answer()
         return
