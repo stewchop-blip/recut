@@ -32,6 +32,22 @@ class Settings(BaseSettings):
         description="Comma-separated Telegram user IDs allowed to use the bot",
     )
 
+    admin_telegram_ids: str = ""
+    tester_telegram_ids: str = ""
+
+    @property
+    def analytics_admin_ids(self) -> set[int]:
+        # Preserve the existing private-beta operator access until explicit admins are set.
+        ids = {int(x.strip()) for x in self.admin_telegram_ids.split(",") if x.strip().isdigit()}
+        return ids or self.allowed_user_id_set
+
+    @property
+    def internal_user_ids(self) -> set[int]:
+        ids = self.allowed_user_id_set | self.analytics_admin_ids
+        for value in (self.tester_telegram_ids, self.unlimited_telegram_ids):
+            ids.update(int(x.strip()) for x in value.split(",") if x.strip().isdigit())
+        return ids
+
     # Payments stay off until a separately tested commercial launch.
     payments_enabled: bool = False
     payment_price_stars: int = Field(default=0, ge=0, le=100000)
@@ -209,7 +225,3 @@ settings = Settings()  # type: ignore[call-arg]
 
 def get_settings() -> Settings:
     return settings
-
-# Phase 1: User roles (added by agent — no hardcoded IDs)
-    admin_telegram_ids: str = Field(default="", description="Comma-separated admin Telegram IDs")
-    tester_telegram_ids: str = Field(default="", description="Comma-separated tester Telegram IDs")

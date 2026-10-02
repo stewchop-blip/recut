@@ -219,6 +219,8 @@ class JobRepository:
             if job is not None:
                 await complete_current_run(self.session, job.telegram_user_id)
                 await qualify_referral(self.session, job.telegram_user_id)
+                from app.services.analytics import record_result
+                await record_result(self.session, job.telegram_user_id)
 
     async def mark_failed(
         self, job_id: int, error_code: str, error_detail: str,

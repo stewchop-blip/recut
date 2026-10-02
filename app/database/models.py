@@ -261,3 +261,23 @@ class GenerationRun(Base):
     status: Mapped[str] = mapped_column(String(20), default="reserved", index=True)
     uses_credit: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Acquisition(Base):
+    """Immutable first observed source; legacy users never become new acquisitions."""
+    __tablename__ = "analytics_acquisitions"
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source: Mapped[str] = mapped_column(String(48), index=True)
+    is_new: Mapped[bool] = mapped_column(default=True)
+    is_internal: Mapped[bool] = mapped_column(default=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    d1_day: Mapped[str] = mapped_column(String(10))
+    d7_day: Mapped[str] = mapped_column(String(10))
+    first_result_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ActivityDay(Base):
+    """One row per private-chat user/day; no message text or media is stored."""
+    __tablename__ = "analytics_activity_days"
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    day: Mapped[str] = mapped_column(String(10), primary_key=True, index=True)
