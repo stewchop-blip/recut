@@ -406,7 +406,12 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
         if "TIKTOK" in code:
             msg += "❌ Для этого видео TikTok требуется авторизация."
         elif "INSTAGRAM" in code:
-            msg += "❌ Instagram не отдал этот ролик.\nВозможно, он ограничен для части аудитории."
+            if code == "INSTAGRAM_RATE_LIMITED":
+                msg += "Instagram временно ограничил запросы с сервера. Попробуй позже или пришли видео файлом."
+            elif code in {"INSTAGRAM_AUTH_REQUIRED", "INSTAGRAM_RESTRICTED"}:
+                msg += "Instagram запросил авторизованный доступ к ролику. Можешь прислать видео файлом."
+            else:
+                msg += "Не удалось получить ролик от Instagram. Это может быть сбой загрузки или ограничение доступа. Попробуй позже или пришли видео файлом."
         else:
             msg += "❌ Не удалось скачать видео по ссылке.\nПопробуй другую ссылку или исходник."
         msg += f"\n\n🆔 Job #{job_id}"

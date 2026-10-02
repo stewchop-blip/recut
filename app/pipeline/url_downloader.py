@@ -91,10 +91,20 @@ _AUTH_MARKERS = (
 def classify_ytdlp_error(stderr: str, platform: str) -> str:
     """Map yt-dlp stderr to a structured error code (item 19)."""
     s = (stderr or "").lower()
+    if "timed out" in s or "timeout" in s:
+        return "DOWNLOAD_TIMEOUT"
     if platform == "instagram":
-        if "isn't available to everyone" in s or "certain audiences" in s:
+        # yt-dlp's generic advice contains the word cookies even for extractor bugs.
+        if "requested content is not available, rate-limit reached or login required" in s:
+            return "INSTAGRAM_ACCESS_FAILED"
+        if any(m in s for m in ("http error 429", "too many requests", "exceeded the rate-limit")):
+            return "INSTAGRAM_RATE_LIMITED"
+        if "empty media response" in s or "unable to extract" in s:
+            return "INSTAGRAM_EXTRACTOR_FAILED"
+        if any(m in s for m in ("isn't available to everyone", "certain audiences", "restricted video")):
             return "INSTAGRAM_RESTRICTED"
-        if any(m in s for m in _AUTH_MARKERS):
+        if any(m in s for m in ("login required", "log in to access", "log in for access",
+                                "authentication required", "only available for registered users")):
             return "INSTAGRAM_AUTH_REQUIRED"
         return "INSTAGRAM_EXTRACTOR_FAILED"
     if platform == "tiktok":
@@ -169,6 +179,8 @@ class DownloaderService:
         url = self._validate(url)
         platform = self._parse_source(url)
         cookie_file = _cookie_file_for(platform)
+        info_file = None
+        use_cookies = False
 
         try:
             # Step 1: quick metadata probe without downloading.
@@ -176,25 +188,29 @@ class DownloaderService:
             logger.info("url_metadata_start", url=f"{platform}://.../" + (url[-20:] if len(url) > 30 else url[-10:]), platform=platform,
                         cookie_configured=cookie_file is not None)
             info = None
-            metadata_err = None
             try:
                 info = await self._run_ytdlp(
                     [self._ytdlp_path, "--dump-json", "--no-warnings", "--no-playlist", url],
                     timeout=60,
                 )
             except URLDownloadError as e:
-                metadata_err = e
                 code = classify_ytdlp_error(getattr(e, "detail", str(e)), platform)
                 logger.warning("yt_dlp_metadata_failed", platform=platform,
                                error_code=code, stderr=str(e)[:300])
-                if cookie_file is not None and ("AUTH" in code or "RESTRICTED" in code):
+                if cookie_file is not None and ("AUTH" in code or "RESTRICTED" in code
+                        or code in {"INSTAGRAM_ACCESS_FAILED", "INSTAGRAM_RATE_LIMITED", "INSTAGRAM_EXTRACTOR_FAILED"}):
                     logger.info("ytdlp_cookie_retry", platform=platform,
                                 stage="metadata", cookie_retry=True)
-                    info = await self._run_ytdlp(
-                        [self._ytdlp_path, "--dump-json", "--no-warnings",
-                         "--no-playlist", "--cookies", str(cookie_file), url],
-                        timeout=60,
-                    )
+                    try:
+                        info = await self._run_ytdlp(
+                            [self._ytdlp_path, "--dump-json", "--no-warnings",
+                             "--no-playlist", "--cookies", str(cookie_file), url],
+                            timeout=60,
+                        )
+                        use_cookies = True
+                    except URLDownloadError as retry_error:
+                        detail = getattr(retry_error, "detail", str(retry_error))
+                        raise StructuredDownloadError(classify_ytdlp_error(detail, platform), detail) from retry_error
                 else:
                     raise StructuredDownloadError(
                         code, getattr(e, "detail", str(e))) from e
@@ -224,6 +240,16 @@ class DownloaderService:
             out_template = str(output_dir / "download.%(ext)s")
             logger.info("url_download_start", url=f"{platform}://.../" + (url[-20:] if len(url) > 30 else url[-10:]), out_template=out_template,
                         cookie_configured=cookie_file is not None)
+            # Instagram extraction already returned signed media URLs. Reuse that
+            # result rather than querying the post a second time in a fresh session.
+            source_args = [url]
+            if platform == "instagram":
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="instagram_info_",
+                                                 suffix=".json", delete=False) as f:
+                    info_file = Path(f.name)
+                    json.dump(meta, f)
+                source_args = ["--load-info-json", str(info_file)]
             download_args = [
                 self._ytdlp_path,
                 "--no-warnings",
@@ -232,7 +258,8 @@ class DownloaderService:
                 "--no-mtime",
                 "--max-filesize", str(max_size_mb * 1024 * 1024),
                 "-o", out_template,
-                url,
+                *(["--cookies", str(cookie_file)] if use_cookies else []),
+                *source_args,
             ]
             try:
                 await self._run_ytdlp(download_args, timeout=timeout_s)
@@ -241,18 +268,23 @@ class DownloaderService:
                 logger.warning("yt_dlp_download_failed", platform=platform,
                                error_code=code, stderr=str(e)[:300],
                                cookie_retry=False)
-                if cookie_file is not None and ("AUTH" in code or "RESTRICTED" in code):
+                if cookie_file is not None and not use_cookies and ("AUTH" in code or "RESTRICTED" in code):
                     logger.info("ytdlp_cookie_retry", platform=platform,
                                 stage="download", cookie_retry=True)
-                    await self._run_ytdlp(
-                        download_args[:6] + ["--cookies", str(cookie_file)] + download_args[6:],
-                        timeout=timeout_s,
-                    )
+                    try:
+                        await self._run_ytdlp(
+                            download_args[:1] + ["--cookies", str(cookie_file)] + download_args[1:],
+                            timeout=timeout_s,
+                        )
+                    except URLDownloadError as retry_error:
+                        detail = getattr(retry_error, "detail", str(retry_error))
+                        raise StructuredDownloadError(classify_ytdlp_error(detail, platform), detail) from retry_error
                 else:
                     raise StructuredDownloadError(code, str(e)) from e
 
             files = sorted(
-                (p for p in output_dir.iterdir() if p.is_file()),
+                (p for p in output_dir.glob("download.*") if p.is_file()
+                 and p.suffix.lower() in {".mp4", ".webm", ".mkv", ".mov", ".m4v"}),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
@@ -286,6 +318,8 @@ class DownloaderService:
             )
 
         finally:
+            if info_file is not None:
+                info_file.unlink(missing_ok=True)
             if cookie_file is not None:
                 cookie_file.unlink(missing_ok=True)
 
@@ -350,7 +384,7 @@ class DownloaderService:
         """Single source of truth: app/services/downloader/url_utils.py
         (HOTFIX item 10). No parallel validation logic here."""
         from app.services.downloader.url_utils import (
-            get_platform_name, is_supported_url,
+            get_platform_name, is_supported_url, normalize_url,
         )
         if not isinstance(url, str) or not url.strip():
             raise UnsupportedURLError("Empty URL")
@@ -360,7 +394,7 @@ class DownloaderService:
         if not is_supported_url(url):
             host = self._host(url) or "unknown"
             raise UnsupportedURLError(f"Source '{host}' is not supported yet")
-        return url
+        return normalize_url(url)
 
     @staticmethod
     def _host(url: str) -> Optional[str]:

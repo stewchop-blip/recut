@@ -23,7 +23,8 @@ WORKDIR /app
 
 # Copy only dependencies first for layer caching
 COPY pyproject.toml .
-RUN pip install --no-cache-dir -e . 2>&1 | tail -3
+RUN pip install --no-cache-dir -e .
+RUN python -c "import yt_dlp, curl_cffi"
 
 # Copy source
 COPY app/ ./app/

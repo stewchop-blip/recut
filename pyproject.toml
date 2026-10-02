@@ -37,7 +37,7 @@ dependencies = [
     # CTA overlay asset generation (stage I)
     "pillow>=10.0,<12",
     # URL video intake (TikTok / Instagram / YouTube)
-        "yt-dlp[default]>=2025.6.9",
+    "yt-dlp[default,curl-cffi]==2026.8.19",
 ]
 
 [project.optional-dependencies]

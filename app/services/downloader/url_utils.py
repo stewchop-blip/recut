@@ -21,7 +21,7 @@ SUPPORTED_HOSTS = {
 # Tracking params safe to strip (audit #6)
 STRIP_PARAMS = {"utm_source", "utm_medium", "utm_campaign", "utm_content",
                 "utm_term", "si", "feature", "ref", "igshid", "igsh",
-                "is_from_webapp"}
+                "is_from_webapp", "stkn"}
 
 
 def get_platform_name(url: str) -> str:
