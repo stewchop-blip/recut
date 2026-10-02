@@ -40,13 +40,15 @@ class Settings(BaseSettings):
     payment_support: str = "@stewchop"
     payment_admin_ids: str = ""
 
-    # Public-launch features are opt-in; closed-beta access stays unchanged.
-    referrals_enabled: bool = False
+    # Launch defaults; explicit environment overrides still take precedence.
+    # Enabling quotas/referrals does not change the access allowlist.
+    referrals_enabled: bool = True
     referral_reward_credits: int = Field(default=3, ge=1, le=100)
     referral_max_rewards: int = Field(default=50, ge=1, le=10000)
-    generation_limits_enabled: bool = False
+    generation_limits_enabled: bool = True
     daily_free_generations: int = Field(default=3, ge=0, le=1000)
     unlimited_telegram_ids: str = ""
+    beta_testers_unlimited: bool = True
 
     # === OpenRouter (used only for transcript analysis / clip selection) ===
     openrouter_api_key: str = Field(..., description="OpenRouter API key")
@@ -155,6 +157,12 @@ class Settings(BaseSettings):
             if chunk.isdigit():
                 out.add(int(chunk))
         return out
+
+    def has_unlimited_generations(self, user_id: int) -> bool:
+        explicit = {int(x.strip()) for x in self.unlimited_telegram_ids.split(",")
+                    if x.strip().isdigit()}
+        return (not self.generation_limits_enabled or user_id in explicit
+                or (self.beta_testers_unlimited and user_id in self.allowed_user_id_set))
 
     # === Validators ===
     @field_validator("database_url")

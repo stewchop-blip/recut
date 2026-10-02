@@ -31,8 +31,8 @@ async def referral_text(user_id, bot):
              'Один друг — один бонус; скачивание оригинала не считается.\n\n'
              f'Бонусы доступны за первые {settings.referral_max_rewards} таких приглашений.\n\n'
              f'Твоя ссылка:\n{link}\n\n')
-    if not settings.generation_limits_enabled:
-        text += 'Сейчас обработка безлимитная. Бонусы сохраняются на балансе для будущих лимитов.'
+    if settings.has_unlimited_generations(user_id):
+        text += 'Для твоего аккаунта обработка безлимитная. Бонусы сохраняются на балансе.'
     else:
         text += (f'В день бесплатно: {settings.daily_free_generations} обработки. '
                  'Затем используется бонусный баланс. Один запуск, включая три варианта, — одна обработка.')

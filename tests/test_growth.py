@@ -246,3 +246,28 @@ async def test_disabled_limits_and_testers_bypass_db(settings,monkeypatch):
     handler.reset_mock()
     await GenerationMiddleware()(handler,event,{})
     handler.assert_awaited_once()
+
+
+async def test_remaining_allowance_tracks_reservations_refunds_and_previous_days(sessions, settings):
+    from app.services.generations import free_remaining
+    settings.daily_free_generations = 3
+    async with sessions.begin() as s:
+        assert await free_remaining(s, 10, settings) == 3
+        s.add(GenerationRun(request_id='yesterday', telegram_user_id=10, day='2020-01-01',
+                            status='completed', uses_credit=False))
+        await reserve(s, 10, 'today', settings)
+        assert await free_remaining(s, 10, settings) == 2
+        await refund_unfinished(s, 'today')
+        assert await free_remaining(s, 10, settings) == 3
+
+
+def test_testers_keep_unlimited_without_exempting_new_users(settings, monkeypatch):
+    monkeypatch.setattr(settings, 'generation_limits_enabled', True)
+    monkeypatch.setattr(settings, 'allowed_telegram_user_ids', '10,20')
+    monkeypatch.setattr(settings, 'unlimited_telegram_ids', '30')
+    monkeypatch.setattr(settings, 'beta_testers_unlimited', True)
+    assert all(settings.has_unlimited_generations(uid) for uid in (10,20,30))
+    assert not settings.has_unlimited_generations(40)
+    monkeypatch.setattr(settings, 'beta_testers_unlimited', False)
+    assert not settings.has_unlimited_generations(10)
+    assert settings.has_unlimited_generations(30)

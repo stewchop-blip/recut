@@ -100,12 +100,15 @@ async def show_balance(message: types.Message):
     if not message.from_user or message.chat.type != "private":
         return
     settings = get_settings()
+    from app.services.generations import free_remaining
     async with db_manager.session() as session:
         credits = await balance(session, message.from_user.id)
-    details = (f"Бесплатный дневной лимит: {settings.daily_free_generations}. "
-               "После него используется баланс. Приглашения: /referral"
-               if settings.generation_limits_enabled else
-               "Сейчас обработка безлимитная. Бонусы сохраняются для будущих лимитов.")
+        remaining = await free_remaining(session, message.from_user.id, settings)
+    details = (f"Бесплатно осталось сегодня: {remaining} из {settings.daily_free_generations}. "
+               "Лимит обновляется в 03:00 по Минску. Затем используется бонусный баланс. "
+               "Один запуск, включая три варианта, — одна обработка. Приглашения: /referral"
+               if not settings.has_unlimited_generations(message.from_user.id) else
+               "Для твоего аккаунта обработка безлимитная. Бонусы сохраняются на балансе.")
     await message.answer(f"Баланс дополнительных обработок: {credits}\n\n{details}")
 
 

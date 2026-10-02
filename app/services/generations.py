@@ -15,6 +15,14 @@ class AllowanceRejected(ValueError):
     pass
 
 
+async def free_remaining(session, user_id, settings):
+    day = datetime.now(timezone.utc).date().isoformat()
+    used = await session.scalar(select(func.count()).select_from(GenerationRun).where(
+        GenerationRun.telegram_user_id == user_id, GenerationRun.day == day,
+        GenerationRun.uses_credit.is_(False), GenerationRun.status.in_(['reserved', 'completed'])))
+    return max(0, settings.daily_free_generations - int(used or 0))
+
+
 async def reserve(session, user_id, request_id, settings):
     await ensure_profile(session, user_id)
     # Serialize reservations per user across replicas (PostgreSQL row lock).
@@ -28,10 +36,7 @@ async def reserve(session, user_id, request_id, settings):
     if active:
         raise AllowanceRejected('Предыдущая обработка ещё выполняется. Дождись результата.')
     day = datetime.now(timezone.utc).date().isoformat()
-    used = await session.scalar(select(func.count()).select_from(GenerationRun).where(
-        GenerationRun.telegram_user_id == user_id, GenerationRun.day == day,
-        GenerationRun.uses_credit.is_(False), GenerationRun.status.in_(['reserved', 'completed'])))
-    uses_credit = int(used or 0) >= settings.daily_free_generations
+    uses_credit = await free_remaining(session, user_id, settings) == 0
     if uses_credit and await balance(session, user_id) <= 0:
         raise AllowanceRejected('Бесплатные обработки на сегодня закончились. '
             'Новый лимит — в 03:00 по Минску. Бонусы за друзей: /referral')

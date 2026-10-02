@@ -16,9 +16,8 @@ RENDER_ACTIONS = {'action:quick_prep', 'action:maximum_transform', 'action:versi
 class GenerationMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         settings = get_settings()
-        exempt = {int(x.strip()) for x in settings.unlimited_telegram_ids.split(',') if x.strip().isdigit()}
         user = getattr(event, 'from_user', None)
-        if (not settings.generation_limits_enabled or not user or user.id in exempt
+        if (not user or settings.has_unlimited_generations(user.id)
                 or getattr(event, 'data', '') not in RENDER_ACTIONS):
             return await handler(event, data)
         run_id = hashlib.sha256(str(event.id).encode()).hexdigest()

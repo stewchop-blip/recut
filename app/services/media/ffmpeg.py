@@ -339,7 +339,7 @@ class MediaService:
         background_id: 'blur' (default) — blurred copy of the source;
         'dark'/'light'/'accent' — solid color canvas (templates registry).
         title_text: burned at top safe area via drawtext (empty = off).
-        brand_corner: small 'ReCut' tag in the top-right corner.
+        brand_corner: ReCut card with tagline and Telegram address in the top-right.
 
         Strategy (single ffmpeg filter_complex pass):
         - bg: blurred source copy OR solid color (templates registry)
@@ -474,8 +474,8 @@ class MediaService:
 
         # Title via TitleRenderer (Phase 7 wiring, audit #31-32): Pillow
         # transparent PNG rendered inside title_box, overlaid — replaces
-        # raw drawtext (which was visually raw, no wrap/fit). Brand corner
-        # stays drawtext (tiny text, no wrap needed).
+        # raw drawtext (which was visually raw, no wrap/fit). Brand corner uses its own
+        # antialiased card with a readable Telegram address.
         extra_inputs: list[str] = []
         title_used = False
         if title_text:
@@ -501,21 +501,24 @@ class MediaService:
             except Exception as e:
                 logger.warning("title_png_failed_fallback_drawtext", error=str(e)[:150])
 
-        text_filters = ""
+        brand_png = None
         if brand_corner:
-            text_filters += "," + _drawtext(
-                "ReCut", int(target_height * 0.018),
-                x=f"w-text_w-{int(target_width * 0.03)}",
-                y=f"{int(target_height * 0.025)}",
-                alpha="0.75", borderw=1,
+            from app.services.overlays.brand import render_brand
+            import tempfile
+            brand_width = round(target_width * 0.38)
+            margin = round(target_width * 0.03)
+            brand_x = target_width - brand_width - margin
+            brand_y = (tbox.y + tbox.height + margin if title_used
+                       else round(target_height * 0.025))
+            with tempfile.NamedTemporaryFile(prefix="recut_brand_", suffix=".png", delete=False) as f:
+                brand_png = Path(f.name)
+                f.write(render_brand(brand_width))
+            brand_idx = extra_inputs.count("-i") + 1
+            extra_inputs += ["-i", str(brand_png)]
+            filter_complex += (
+                f";[{brand_idx}:v]format=rgba[brand];"
+                f"[v][brand]overlay={brand_x}:{brand_y}:eof_action=repeat:repeatlast=1[v]"
             )
-        if text_filters:
-            # NOTE: ffmpeg 8.1.2 filtergraph parser rejects intermediate
-            # labels ("[v_pre]" style) — chain drawtext directly instead.
-            if filter_complex.endswith("[v]"):
-                filter_complex = filter_complex[:-3] + text_filters + "[v]"
-            else:
-                filter_complex += text_filters + "[v]"
 
         # PHASE B: decorative insert (from DECORATIONS registry) overlaid
         # above the video, below the banner. Animated assets loop forever;
@@ -544,7 +547,7 @@ class MediaService:
 
                     # Input registry (audit #12): source=0, title=1 (if used),
                     # decoration = next. No hardcoded indexes.
-                    input_idx = 1 + (1 if title_used else 0)
+                    input_idx = extra_inputs.count("-i") + 1
                     dec_kind = (dec.kind or "").lower()
                     is_anim = dec_kind in ("gif", "mp4", "webp")
                     if is_anim:
@@ -616,6 +619,9 @@ class MediaService:
             raise RuntimeError(
                 f"FFmpeg make_vertical timed out after {timeout_seconds}s"
             ) from e
+        finally:
+            if brand_png is not None:
+                brand_png.unlink(missing_ok=True)
 
         if proc.returncode != 0:
             err = stderr.decode(errors="ignore")[:500]

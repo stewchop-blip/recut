@@ -15,19 +15,22 @@
   processed result earns the inviter +3 credits by default. Downloads do not count.
   One inviter per user, first touch only, no self-referrals or existing-user referrals.
   Ledger key uniqueness + conditional updates prevent duplicate awards.
-- Limits, referrals and sales stay disabled in the current closed beta. Access still
+- Limits and referrals are enabled by default; sales stay disabled. Access still
   uses the existing allowlist; these flags do NOT open the bot to everyone.
+- Current allowlisted beta testers remain unlimited by default. Do not add ordinary
+  public users to that tester list. Set BETA_TESTERS_UNLIMITED=false to stop this exemption.
 
-## Launch settings (not applied to Railway)
+## Launch defaults (environment overrides take precedence)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| REFERRALS_ENABLED | false | Issue links and accept new referral attribution |
+| REFERRALS_ENABLED | true | Issue links and accept new referral attribution |
 | REFERRAL_REWARD_CREDITS | 3 | Inviter credits, snapshotted at invitee registration |
 | REFERRAL_MAX_REWARDS | 50 | Lifetime rewarded friends per inviter |
-| GENERATION_LIMITS_ENABLED | false | Enable daily quota and bonus/paid ledger spending |
+| GENERATION_LIMITS_ENABLED | true | Enable daily quota and bonus/paid ledger spending |
 | DAILY_FREE_GENERATIONS | 3 | Free successful render actions per UTC day |
 | UNLIMITED_TELEGRAM_IDS | empty | Comma-separated admin/tester IDs exempt from quotas |
+| BETA_TESTERS_UNLIMITED | true | Existing access allowlist also exempts beta testers |
 
 The UTC day resets at 03:00 Minsk. One render action costs one generation, including
 three-version batches and long-video batches. At least one delivered clip constitutes
@@ -35,9 +38,11 @@ success. Downloads and failed attempts are free. Free daily allowance is used fi
 then existing credit-ledger balance. Credits accumulate during unlimited beta if
 referrals are explicitly enabled; this is stated in the referral screen.
 
-Test in staging with allowed test accounts before enabling. Set owner/brother IDs
-in UNLIMITED_TELEGRAM_IDS before turning on quotas. Keep sales disabled separately.
-No production environment variables are changed by this commit.
+To test quotas with an allowlisted test account, set BETA_TESTERS_UNLIMITED=false
+and keep only owner/brother IDs in UNLIMITED_TELEGRAM_IDS. Keep sales disabled.
+No production environment variables are changed by this commit: if Railway already
+sets REFERRALS_ENABLED=false or GENERATION_LIMITS_ENABLED=false, those values still
+override the new defaults. Runtime enablement must be verified with /referral and /balance.
 
 ## Transactions, restart and reconciliation
 
@@ -71,3 +76,10 @@ farming; review abuse and operating costs before opening unrestricted access.
 from the provided GIF (40 frames, four seconds per cycle). FFmpeg repeats it for the
 full source duration, preserves its original timing and adds no artificial bobbing.
 The opt-in switch and stored preference are unchanged.
+
+## Brand corner
+
+The existing opt-in switch now renders a rounded dark card with ReCut,
+«Клип за пару кликов» and t.me/contentcutbot. It scales with the canvas, moves below
+a title when present, and shares the input registry with the animated mascot.
+The address is visible video text, not a clickable video link.
