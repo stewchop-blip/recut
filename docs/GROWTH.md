@@ -6,8 +6,8 @@
   Start. Startup registers default and Russian descriptions with Telegram.
 - First private `/start` displays capabilities and three steps to the first MP4.
   A persistent onboarding flag is set only after Telegram accepts the welcome.
-  Later starts show the same guide when no current video is available; an existing
-  video keeps its resume action. Help is available from
+  Every /start clears the selected source in DB and memory and shows the guide.
+  /cancel also clears the selection even without an active job. Help is available from
   the home menu and `/help`. There is no promise of recommendation eligibility.
 - `Оформление → Персонаж снизу` is an opt-in, persistent switch, initially OFF.
   The user-supplied transparent dancing-cat GIF loops in the lower-left corner.

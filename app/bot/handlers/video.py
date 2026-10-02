@@ -1161,15 +1161,26 @@ async def on_mode_selected(call: CallbackQuery) -> None:
 
 
 
+async def reset_media_selection(user_id: int) -> None:
+    """Forget the selected source in DB and RAM without deleting running-job files."""
+    from app.services.current_media import get_current_media_service
+    await get_current_media_service().clear(user_id)
+    _pop_pending(user_id)
+    _mode_state.pop(user_id, None)
+    _awaiting_banner.discard(user_id)
+    _awaiting_title.discard(user_id)
+
+
 @router.callback_query(F.data == "replace_media")
 async def on_replace_media(call: CallbackQuery) -> None:
     user_id = call.from_user.id if call.from_user else 0
+    mode = get_selected_mode(user_id) or "prepare"
     try:
-        from app.services.current_media import get_current_media_service
-        await get_current_media_service().clear(user_id)
+        await reset_media_selection(user_id)
     except Exception as e:
         logger.warning("replace_media_clear_failed", user_id=user_id, error=str(e)[:150])
-    mode = get_selected_mode(user_id) or "prepare"
+        await call.answer("Не удалось сбросить видео. Попробуй ещё раз.", show_alert=True)
+        return
     _mode_state[user_id] = mode
     await call.message.edit_text(
         f"🔄 Новый источник для режима <b>{mode}</b>\n\nОтправь видео или ссылку.",

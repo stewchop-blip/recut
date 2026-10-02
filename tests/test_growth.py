@@ -315,3 +315,55 @@ async def test_pre_start_description_handles_locales_and_failure():
     assert len(BOT_DESCRIPTION) <= 512
     assert [c.kwargs['language_code'] for c in bot.set_my_description.call_args_list] == ['', 'ru']
     assert all(c.kwargs['description'] == BOT_DESCRIPTION for c in bot.set_my_description.call_args_list)
+
+
+@pytest.mark.parametrize('command', ['start', 'cancel', 'replace'])
+async def test_reset_forgets_completed_source_everywhere(sessions, settings, monkeypatch, tmp_path, command):
+    from app.bot.handlers import start, video
+    from app.database.session import db_manager
+    from app.services.current_media import get_current_media_service, resolve_current_media
+    from app.services import current_media
+    @asynccontextmanager
+    async def session():
+        async with sessions.begin() as s:
+            yield s
+    monkeypatch.setattr(db_manager, 'session', session)
+    monkeypatch.setattr(current_media, '_probe_path', AsyncMock(return_value=(1, 100, 100)))
+    source = tmp_path / 'old.mp4'
+    source.write_bytes(b'old-source')
+    async with sessions.begin() as s:
+        profile, _ = await ensure_profile(s, 20)
+        profile.onboarding_seen = True
+    await get_current_media_service().set_ready(20, source, job_id=None,
+        telegram_file_id='old-file', source_url='https://example.com/old')
+    video._pending_jobs[20] = SimpleNamespace(input_path=str(source))
+    other = object()
+    video._pending_jobs[21] = other
+    video._mode_state[20] = 'prepare'
+    video._awaiting_banner.add(20)
+    video._awaiting_title.add(20)
+    message = SimpleNamespace(chat=SimpleNamespace(type='private'), from_user=SimpleNamespace(id=20),
+        text='/start', answer=AsyncMock(), edit_text=AsyncMock(), bot=object())
+    try:
+        if command == 'start':
+            await start.cmd_start(message)
+            assert message.answer.call_args.args[0] == start.WELCOME
+        elif command == 'cancel':
+            await start.cmd_cancel(message)
+            assert 'сброшен' in message.answer.call_args.args[0]
+        else:
+            await video.on_replace_media(SimpleNamespace(from_user=message.from_user,
+                message=message, answer=AsyncMock()))
+        assert await resolve_current_media(20, message.bot) is None
+        assert 20 not in video._pending_jobs
+        assert 20 not in video._awaiting_banner and 20 not in video._awaiting_title
+        assert video._pending_jobs[21] is other
+        # A subsequent mode selection must ask for a NEW source.
+        call = SimpleNamespace(from_user=message.from_user, data='mode:prepare',
+                               message=message, answer=AsyncMock())
+        await video.on_mode_selected(call)
+        assert 'Пришли' in message.edit_text.call_args.args[0]
+    finally:
+        video._pending_jobs.pop(20, None)
+        video._pending_jobs.pop(21, None)
+        video._mode_state.pop(20, None)

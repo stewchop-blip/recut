@@ -183,6 +183,8 @@ async def test_cancel_does_not_delete_other_users_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(start.db_manager, "session", session)
     monkeypatch.setattr(JobRepository, "cancel_active_jobs", AsyncMock(return_value=(1, [1])))
     monkeypatch.setattr(config, "get_settings", lambda: SimpleNamespace(temp_dir=str(tmp_path)))
+    from app.bot.handlers import video
+    monkeypatch.setattr(video, "reset_media_selection", AsyncMock())
     own = tmp_path / "job_1_abcd"
     other = tmp_path / "job_11_abcd"
     own.mkdir()

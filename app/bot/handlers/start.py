@@ -74,6 +74,8 @@ async def cmd_start(message: types.Message) -> None:
         async with db_manager.session() as session:
             profile, _ = await ensure_profile(session, user_id, payload)
             first_visit = not profile.onboarding_seen
+        from app.bot.handlers.video import reset_media_selection
+        await reset_media_selection(user_id)
         if first_visit:
             await message.answer(WELCOME, parse_mode="HTML", reply_markup=HOME_MENU)
             async with db_manager.session() as session:
@@ -82,23 +84,7 @@ async def cmd_start(message: types.Message) -> None:
             return
     except Exception:
         logger.exception("onboarding_failed", user_id=user_id)
-        await message.answer(WELCOME, parse_mode="HTML", reply_markup=HOME_MENU)
-        return
-    # Item 11: CurrentMedia is the source of truth, not _pending_jobs.
-    # If media is recoverable → HOME with "Продолжить" info.
-    from app.services.current_media import resolve_current_media
-    user_id = message.from_user.id if message.from_user else 0
-    try:
-        cm = await resolve_current_media(user_id, message.bot)
-    except Exception:
-        cm = None
-    if cm is not None and cm.source_path and cm.source_path.is_file():
-        from app.bot.keyboards.inline import ACTION_MENU
-        await message.answer(
-            "🎬 <b>ReCut</b>\n\nТекущее видео готово. Продолжаем?",
-            parse_mode="HTML",
-            reply_markup=ACTION_MENU,
-        )
+        await message.answer("Не удалось начать заново. Попробуй /start ещё раз.")
         return
     await message.answer(
         WELCOME,
@@ -135,6 +121,8 @@ async def cmd_cancel(message: types.Message) -> None:
         async with db_manager.session() as session:
             repo = JobRepository(session)
             n, cancelled_ids = await repo.cancel_active_jobs(user_id, max_age_minutes=10)
+        from app.bot.handlers.video import reset_media_selection
+        await reset_media_selection(user_id)
     except Exception as e:
         logger.error("cancel_db_failed", user_id=user_id, error=str(e)[:200])
         await message.answer("❌ Не удалось отменить задачу. Попробуй ещё раз.")
@@ -163,6 +151,6 @@ async def cmd_cancel(message: types.Message) -> None:
         )
     else:
         await message.answer(
-            "ℹ️ Не было активных задач.\n"
-            "Можешь отправлять видео когда будешь готов."
+            "✅ Выбор видео сброшен.\n"
+            "Отправь новое видео или ссылку."
         )
