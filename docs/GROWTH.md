@@ -15,8 +15,9 @@
   processed result earns the inviter +3 credits by default. Downloads do not count.
   One inviter per user, first touch only, no self-referrals or existing-user referrals.
   Ledger key uniqueness + conditional updates prevent duplicate awards.
-- Limits and referrals are enabled by default; sales stay disabled. Access still
-  uses the existing allowlist; these flags do NOT open the bot to everyone.
+- Public access, limits and referrals are enabled by default; sales stay disabled.
+  Set PUBLIC_ACCESS_ENABLED=false to restore closed-beta access. Keep the existing
+  allowlist for operator permissions and tester exemptions; do not clear it at launch.
 - Current allowlisted beta testers remain unlimited by default. Do not add ordinary
   public users to that tester list. Set BETA_TESTERS_UNLIMITED=false to stop this exemption.
 
@@ -24,6 +25,7 @@
 
 | Variable | Default | Meaning |
 |---|---|---|
+| PUBLIC_ACCESS_ENABLED | true | Allow all users; false restores the beta allowlist |
 | REFERRALS_ENABLED | true | Issue links and accept new referral attribution |
 | REFERRAL_REWARD_CREDITS | 3 | Inviter credits, snapshotted at invitee registration |
 | REFERRAL_MAX_REWARDS | 50 | Lifetime rewarded friends per inviter |

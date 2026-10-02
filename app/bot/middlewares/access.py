@@ -1,9 +1,4 @@
-"""Access middleware — drops messages from non-whitelisted users.
-
-If `ALLOWED_TELEGRAM_USER_IDS` is empty, the bot rejects every user
-(safe default during closed beta). The rejection message is generic
-and reveals nothing about the bot's internals.
-"""
+"""Public access with an explicit switch back to the closed-beta allowlist."""
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
@@ -18,7 +13,7 @@ REJECTION_TEXT = "Бот пока работает в закрытом режи�
 
 
 class AccessMiddleware(BaseMiddleware):
-    """Reject updates from users not in the whitelist."""
+    """Allow public users, or enforce the allowlist when public access is off."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -45,6 +40,10 @@ class AccessMiddleware(BaseMiddleware):
         user_id = _extract_user_id(event)
         if user_id is None:
             return None
+
+        if get_settings().public_access_enabled:
+            data["telegram_user_id"] = user_id
+            return await handler(event, data)
 
         allowed = self._allowed_ids()
         if not allowed:

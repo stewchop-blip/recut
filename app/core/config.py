@@ -24,9 +24,9 @@ class Settings(BaseSettings):
     # === Telegram ===
     telegram_bot_token: str = Field(..., description="Telegram Bot Token from @BotFather")
 
-    # === Access control (whitelist) ===
-    # Comma-separated list of telegram user IDs allowed to use the bot.
-    # Empty / unset = bot rejects everyone (safe default during closed beta).
+    # Public launch. Set false to restore the closed-beta allowlist.
+    public_access_enabled: bool = True
+    # Keep existing IDs for operator access and beta-tester quota exemptions.
     allowed_telegram_user_ids: str = Field(
         default="",
         description="Comma-separated Telegram user IDs allowed to use the bot",
