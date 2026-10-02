@@ -159,7 +159,7 @@ async def test_onboarding_first_start_and_referral_capture(sessions, settings, m
         assert profile.onboarding_seen and profile.inviter_id == 10
     message.answer.reset_mock()
     await start.cmd_start(message)
-    assert 'Что сделать' in message.answer.call_args.args[0]
+    assert 'Первый ролик' in message.answer.call_args.args[0]
 
 
 async def test_onboarding_failed_send_can_retry(sessions, settings, monkeypatch):
@@ -271,3 +271,47 @@ def test_testers_keep_unlimited_without_exempting_new_users(settings, monkeypatc
     monkeypatch.setattr(settings, 'beta_testers_unlimited', False)
     assert not settings.has_unlimited_generations(10)
     assert settings.has_unlimited_generations(30)
+
+
+@pytest.mark.parametrize('payload', ['', ' src_tiktok', ' ref_' + 'a' * 24])
+async def test_public_start_routes_to_welcome(sessions, settings, monkeypatch, payload):
+    from datetime import datetime, timezone
+    from aiogram import Bot
+    from aiogram.types import Update, Message, User, Chat
+    from app.database.session import db_manager
+    from app.main import _build_dispatcher
+    from app.bot.handlers.start import WELCOME
+    monkeypatch.setattr(settings, 'public_access_enabled', True)
+    monkeypatch.setattr(settings, 'allowed_telegram_user_ids', '10')
+    @asynccontextmanager
+    async def session():
+        async with sessions.begin() as s:
+            yield s
+    monkeypatch.setattr(db_manager, 'session', session)
+    bot = Bot('123456789:test-placeholder')
+    request = AsyncMock(return_value=True)
+    monkeypatch.setattr(bot.session, 'make_request', request)
+    dispatcher = _build_dispatcher()
+    try:
+        await dispatcher.feed_update(bot, Update(update_id=1, message=Message(
+            message_id=1, date=datetime.now(timezone.utc), chat=Chat(id=20, type='private'),
+            from_user=User(id=20, is_bot=False, first_name='New'), text='/start' + payload)))
+        sent = request.call_args.args[1]
+        assert sent.text == WELCOME
+        assert sent.reply_markup.inline_keyboard[0][0].callback_data == 'mode:prepare'
+        async with sessions.begin() as s:
+            assert (await s.get(BotProfile, 20)).onboarding_seen
+    finally:
+        for router in list(dispatcher.sub_routers):
+            router._parent_router = None
+        dispatcher.sub_routers.clear()
+        await bot.session.close()
+
+
+async def test_pre_start_description_handles_locales_and_failure():
+    from app.bot.handlers.start import setup_bot_description, BOT_DESCRIPTION
+    bot = SimpleNamespace(set_my_description=AsyncMock(side_effect=[RuntimeError('offline'), True]))
+    await setup_bot_description(bot)
+    assert len(BOT_DESCRIPTION) <= 512
+    assert [c.kwargs['language_code'] for c in bot.set_my_description.call_args_list] == ['', 'ru']
+    assert all(c.kwargs['description'] == BOT_DESCRIPTION for c in bot.set_my_description.call_args_list)

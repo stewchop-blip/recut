@@ -11,6 +11,24 @@ from app.database.session import db_manager
 router = Router()
 logger = get_logger(__name__)
 
+BOT_DESCRIPTION = (
+    "🎬 ReCut — клип за пару кликов\n\n"
+    "Скачивай видео из TikTok, Instagram Reels и YouTube Shorts. "
+    "Делай вертикальные ролики, добавляй свою плашку и оформление "
+    "или находи интересные моменты в длинном видео.\n\n"
+    "Нажми «Начать», затем пришли ссылку или видео файлом. "
+    "Я покажу, что можно с ним сделать."
+)
+
+
+async def setup_bot_description(bot) -> None:
+    """Explain the product before Start, including Telegram's Russian override."""
+    for language in ("", "ru"):
+        try:
+            await bot.set_my_description(description=BOT_DESCRIPTION, language_code=language)
+        except Exception:
+            logger.exception("telegram_description_failed", language=language)
+
 
 WELCOME = (
     "🎬 <b>ReCut — подготовка видео для публикации</b>\n\n"
@@ -83,7 +101,7 @@ async def cmd_start(message: types.Message) -> None:
         )
         return
     await message.answer(
-        "🎬 <b>ReCut</b>\n\nЧто сделать?",
+        WELCOME,
         parse_mode="HTML",
         reply_markup=HOME_MENU,
     )

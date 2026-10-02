@@ -253,6 +253,8 @@ async def _on_startup(bot: Bot) -> None:
     except Exception as e:
         logger.warning("startup_cleanup_failed", error=str(e)[:80])
 
+    await start.setup_bot_description(bot)
+
     # Best-effort: register bot commands with Telegram. Wrapped because
     # redeploys trigger Flood control warnings if called too quickly.
     try:
