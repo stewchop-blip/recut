@@ -7,7 +7,7 @@ import subprocess
 import numpy as np
 import pytest
 
-from app.bot.keyboards.inline import MORE_MENU, mode_input_menu
+from app.bot.keyboards.inline import HOME_MENU, MORE_MENU, mode_input_menu
 from app.services.auto_edit_planner import MaximumTransformProfile, _MAX_PROFILES
 from app.services.media.ffmpeg import MediaService
 
@@ -30,6 +30,9 @@ def source_file(path, size='180x320', audio=True, duration=4):
 
 
 def test_mode_is_reachable_and_carries_its_own_action():
+    for menu in (HOME_MENU, mode_input_menu("prepare")):
+        assert any(b.callback_data == "mode:maximum_transform"
+                   for row in menu.inline_keyboard for b in row)
     assert any(b.callback_data == 'mode:maximum_transform'
                for row in MORE_MENU.inline_keyboard for b in row)
     assert mode_input_menu('maximum_transform').inline_keyboard[0][0].callback_data == 'action:maximum_transform'

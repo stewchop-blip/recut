@@ -18,6 +18,7 @@ from app.services.overlays.templates import BACKGROUNDS, TITLES
 
 HOME_MENU = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🎬 Сделать ролик", callback_data="mode:prepare")],
+    [InlineKeyboardButton(text="🚀 Максимальная обработка", callback_data="mode:maximum_transform")],
     [InlineKeyboardButton(text="✂️ Нарезать длинное видео", callback_data="mode:moments")],
     [InlineKeyboardButton(text="🎨 Оформление", callback_data="appearance:menu")],
     [InlineKeyboardButton(text="📖 Как пользоваться", callback_data="help:show"),
@@ -36,6 +37,8 @@ def mode_input_menu(mode: str) -> InlineKeyboardMarkup:
             text="✨ Сделать" if mode == "prepare" else "✂️ Найти моменты",
             callback_data="action:quick_prep" if mode == "prepare" else "action:analyze_long",
         )]]
+    if mode != "maximum_transform":
+        rows.append([InlineKeyboardButton(text="🚀 Максимальная обработка", callback_data="mode:maximum_transform")])
     rows.append([InlineKeyboardButton(text="🎨 Оформление", callback_data="appearance:menu")])
     rows.append([InlineKeyboardButton(text="••• Ещё", callback_data="more:menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -106,7 +109,7 @@ def fine_menu(background_id: str, title_id: str, brand: bool,
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🎨 Фон: {background_id}", callback_data="style:bg")],
         [InlineKeyboardButton(text=f"🏷 Заголовок: {title_id}", callback_data="style:title")],
-        [InlineKeyboardButton(text=f"🏷 Бренд-уголок: {'ВКЛ' if brand else 'ВЫКЛ'}", callback_data="style:brand")],
+        [InlineKeyboardButton(text=f"🏷 Водяной знак ReCut: {'ВКЛ' if brand else 'ВЫКЛ'}", callback_data="style:brand")],
         [InlineKeyboardButton(text=f"🔘 Плашка: {'ВКЛ' if cta_enabled else 'ВЫКЛ'}", callback_data="settings:toggle_cta")],
         [InlineKeyboardButton(text="🖼 Плашка (размер/позиция/время)", callback_data="banner:menu")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="appearance:menu")],

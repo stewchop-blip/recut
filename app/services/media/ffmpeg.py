@@ -339,7 +339,7 @@ class MediaService:
         background_id: 'blur' (default) — blurred copy of the source;
         'dark'/'light'/'accent' — solid color canvas (templates registry).
         title_text: burned at top safe area via drawtext (empty = off).
-        brand_corner: ReCut card with tagline and Telegram address in the top-right.
+        brand_corner: translucent ReCut watermark and Telegram address at the top-right.
 
         Strategy (single ffmpeg filter_complex pass):
         - bg: blurred source copy OR solid color (templates registry)
@@ -505,7 +505,7 @@ class MediaService:
         if brand_corner:
             from app.services.overlays.brand import render_brand
             import tempfile
-            brand_width = round(target_width * 0.38)
+            brand_width = round(target_width * 0.24)
             margin = round(target_width * 0.03)
             brand_x = target_width - brand_width - margin
             brand_y = (tbox.y + tbox.height + margin if title_used

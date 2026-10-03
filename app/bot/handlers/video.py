@@ -1048,7 +1048,7 @@ def render_fine_menu(s) -> tuple[str, types.InlineKeyboardMarkup]:
         "⚙️ <b>Тонкая настройка</b>\n\n"
         f"Фон: {bg.label if bg else '—'}\n"
         f"Заголовок: {ti.label if ti else '—'}\n"
-        f"Бренд-уголок: {'ВКЛ' if s.brand_corner else 'ВЫКЛ'}\n"
+        f"Водяной знак ReCut: {'ВКЛ' if s.brand_corner else 'ВЫКЛ'}\n"
         f"Плашка: {'ВКЛ' if s.cta_enabled else 'ВЫКЛ'}\n"
         f"Субтитры: {'ВКЛ' if s.subtitles_enabled else 'ВЫКЛ'}"
     )
@@ -1470,7 +1470,7 @@ async def on_fine_menu(call: CallbackQuery) -> None:
         "⚙️ <b>Тонкая настройка</b>\n\n"
         f"Фон: {bg.label if bg else '—'}\n"
         f"Заголовок: {ti.label if ti else '—'}\n"
-        f"Бренд-уголок: {'ВКЛ' if s.brand_corner else 'ВЫКЛ'}\n"
+        f"Водяной знак ReCut: {'ВКЛ' if s.brand_corner else 'ВЫКЛ'}\n"
         f"Плашка: {'ВКЛ' if s.cta_enabled else 'ВЫКЛ'}\n"
         f"Субтитры: {'ВКЛ' if s.subtitles_enabled else 'ВЫКЛ'}"
     )
