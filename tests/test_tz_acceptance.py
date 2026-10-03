@@ -47,7 +47,7 @@ def test_27_banner_sizes_differ():
     from app.services.media.ffmpeg import MediaService
     media = MediaService()
     widths = {}
-    for preset, expected in [("small", 260), ("medium", 367), ("large", 497)]:
+    for preset, expected in [("small", 454), ("medium", 648), ("large", 842)]:
         out = tmp / f"out_{preset}.mp4"
         import asyncio
         asyncio.run(media.burn_cta(video, banner, out, position="bottom",

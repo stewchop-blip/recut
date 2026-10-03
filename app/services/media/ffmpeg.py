@@ -871,8 +871,8 @@ class MediaService:
         """Overlay a banner (static or animated) over a window of the video.
 
         Safe-area sizing (audit #6): banner max width by size preset
-        (small 28% / medium 33% / large 38% of frame width), max height
-        15% of frame height. Never full-screen, never upscaled.
+        (small 42% / medium 60% / large 78% of frame width), with
+        proportional height caps. Preserve aspect ratio and allow upscaling.
         Positioning from actual main_w/main_h/overlay_w/overlay_h.
 
         overlay_type: png/webp — static image input; gif/mp4 — animated
@@ -888,10 +888,8 @@ class MediaService:
 
         x_expr, y_expr = _cta_position_exprs(position, margin)
         # --- Safe-area banner sizing (computed in Python; overlay only) ---
-        # max width  = 85% of video width (or full width minus side margins
-        #              for full_width_bottom)
-        # max height = 15% of video height
-        # scale preserves aspect ratio, never upscales, never crops.
+        # Size presets target visible frame width; height caps keep tall assets
+        # contained. Preserve aspect ratio, including when upscaling.
         banner_out_w = 0
         banner_out_h = 0
         video_w = 0
@@ -923,10 +921,10 @@ class MediaService:
             # Root cause of "small/medium/large look identical": old code
             # scaled with min(1.0, ...) so a small asset never upscaled and
             # every preset rendered at the asset's native size.
-            target_frac = {"small": 0.24, "medium": 0.34, "large": 0.46}.get(size_preset, 0.34)
+            target_frac = {"small": 0.42, "medium": 0.60, "large": 0.78}.get(size_preset, 0.60)
             # Phase 2: different max_h per preset so SMALL < MEDIUM < LARGE
             # visually holds (unless asset is extremely tall).
-            max_h_frac = {"small": 0.12, "medium": 0.18, "large": 0.24}.get(size_preset, 0.18)
+            max_h_frac = {"small": 0.16, "medium": 0.24, "large": 0.32}.get(size_preset, 0.24)
             max_h = video_h * max_h_frac
             if position == "full_width_bottom":
                 target_w = video_w - 2 * side_margin
