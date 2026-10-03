@@ -44,3 +44,20 @@ no-certifi` to honour its existing system CA configuration after the default
 certifi bundle did not trust the workspace certificate. TLS verification stayed
 on. That workspace-only option is not part of the production change. The live
 source/asset test used no Instagram cookies; Railway still needs runtime verification.
+
+## 2026-10-03: login redirects versus rate limits
+
+The upstream extractor calls a redirect to Instagram login an anonymous rate limit.
+This is not evidence of HTTP 429. Classify that redirect as AUTH_REQUIRED and reserve
+RATE_LIMITED for explicit 429 / Too Many Requests responses. Configured Instagram
+cookies now accompany the first request and are reused for the media transfer;
+failed authenticated requests are not immediately repeated with identical cookies.
+Instagram metadata requests use a one-second inter-request pause.
+
+The reported reel Dd332nVRB_3 downloaded completely (7,460,325 bytes) from the
+verification environment without cookies. This does NOT verify the Railway IP or
+its cookie configuration. If Railway continues receiving a login redirect, an
+operator must check server logs and configure/refresh INSTAGRAM_COOKIES_B64 securely
+in Railway; never send session cookies in chat or commit them. A true server-side
+429 cannot be removed by this code change. Existing limits and private-cookie
+cleanup remain enforced. Targeted download/security suite: 52 tests passed.

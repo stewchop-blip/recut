@@ -13,7 +13,7 @@ from app.pipeline.url_downloader import (DownloaderService, URLDownloadError,
     ('Requested content is not available, rate-limit reached or login required. Use cookies', 'INSTAGRAM_ACCESS_FAILED'),
     ('Instagram sent an empty media response. Use --cookies-from-browser', 'INSTAGRAM_EXTRACTOR_FAILED'),
     ('HTTP Error 429: Too Many Requests', 'INSTAGRAM_RATE_LIMITED'),
-    ('The webpage request was redirected to the login page. You have exceeded the rate-limit for accessing posts anonymously', 'INSTAGRAM_RATE_LIMITED'),
+    ('The webpage request was redirected to the login page. You have exceeded the rate-limit for accessing posts anonymously', 'INSTAGRAM_AUTH_REQUIRED'),
     ('Login required', 'INSTAGRAM_AUTH_REQUIRED'),
     ('Restricted Video', 'INSTAGRAM_RESTRICTED'),
     ('Download timed out. See cookies help', 'DOWNLOAD_TIMEOUT'),
@@ -54,7 +54,9 @@ async def test_instagram_reuses_metadata_and_cookie_context(tmp_path, monkeypatc
     monkeypatch.setattr(svc, '_run_ytdlp', run)
     result = await svc.download('https://www.instagram.com/reel/abc/?stkn=tracking', tmp_path)
     assert result.path.name == 'download.mp4'
-    assert len(calls) == (3 if cookie_retry else 2)
+    assert len(calls) == 2
+    assert ('--cookies' in calls[0]) == cookie_retry
+    assert '--sleep-requests' in calls[0]
     assert all(not p.exists() for p in cached)
     assert not list(tmp_path.glob('*cookies*'))
 
@@ -98,5 +100,5 @@ async def test_failed_cookie_retry_stays_structured_and_cleans_cookie(tmp_path, 
     monkeypatch.setattr(svc, '_run_ytdlp', run)
     with pytest.raises(StructuredDownloadError, match='INSTAGRAM_AUTH_REQUIRED'):
         await svc.download('https://www.instagram.com/reel/abc/', tmp_path)
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert not list(tmp_path.glob('*cookies*'))

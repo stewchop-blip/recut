@@ -97,8 +97,10 @@ def classify_ytdlp_error(stderr: str, platform: str) -> str:
         # yt-dlp's generic advice contains the word cookies even for extractor bugs.
         if "requested content is not available, rate-limit reached or login required" in s:
             return "INSTAGRAM_ACCESS_FAILED"
-        if any(m in s for m in ("http error 429", "too many requests", "exceeded the rate-limit")):
+        if any(m in s for m in ("http error 429", "too many requests")):
             return "INSTAGRAM_RATE_LIMITED"
+        if "webpage request was redirected to the login page" in s:
+            return "INSTAGRAM_AUTH_REQUIRED"
         if "empty media response" in s or "unable to extract" in s:
             return "INSTAGRAM_EXTRACTOR_FAILED"
         if any(m in s for m in ("isn't available to everyone", "certain audiences", "restricted video")):
@@ -180,24 +182,29 @@ class DownloaderService:
         platform = self._parse_source(url)
         cookie_file = _cookie_file_for(platform)
         info_file = None
-        use_cookies = False
+        # A configured Instagram session should not first hit the anonymous gate.
+        use_cookies = platform == "instagram" and cookie_file is not None
+        metadata_options = (["--sleep-requests", "1"] if platform == "instagram" else [])
 
         try:
             # Step 1: quick metadata probe without downloading.
-            # Item 16: attempt 1 public; retry ONCE with cookies on auth errors.
+            # Use configured Instagram authentication immediately. Other platforms
+            # retain the anonymous-first path and one authenticated retry.
             logger.info("url_metadata_start", url=f"{platform}://.../" + (url[-20:] if len(url) > 30 else url[-10:]), platform=platform,
                         cookie_configured=cookie_file is not None)
             info = None
             try:
                 info = await self._run_ytdlp(
-                    [self._ytdlp_path, "--dump-json", "--no-warnings", "--no-playlist", url],
+                    [self._ytdlp_path, "--dump-json", "--no-warnings", "--no-playlist",
+                     *metadata_options,
+                     *(["--cookies", str(cookie_file)] if use_cookies else []), url],
                     timeout=60,
                 )
             except URLDownloadError as e:
                 code = classify_ytdlp_error(getattr(e, "detail", str(e)), platform)
                 logger.warning("yt_dlp_metadata_failed", platform=platform,
                                error_code=code, stderr=str(e)[:300])
-                if cookie_file is not None and ("AUTH" in code or "RESTRICTED" in code
+                if cookie_file is not None and not use_cookies and ("AUTH" in code or "RESTRICTED" in code
                         or code in {"INSTAGRAM_ACCESS_FAILED", "INSTAGRAM_RATE_LIMITED", "INSTAGRAM_EXTRACTOR_FAILED"}):
                     logger.info("ytdlp_cookie_retry", platform=platform,
                                 stage="metadata", cookie_retry=True)
