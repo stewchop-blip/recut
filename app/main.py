@@ -261,6 +261,7 @@ async def _on_startup(bot: Bot) -> None:
         from aiogram.types import BotCommand
         await bot.set_my_commands([
             BotCommand(command="start", description="Начать"),
+            BotCommand(command="menu", description="Все функции"),
             BotCommand(command="help", description="Как пользоваться"),
             BotCommand(command="referral", description="Пригласить друга"),
             BotCommand(command="balance", description="Баланс обработок"),

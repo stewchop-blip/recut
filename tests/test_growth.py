@@ -153,13 +153,13 @@ async def test_onboarding_first_start_and_referral_capture(sessions, settings, m
     message = SimpleNamespace(chat=SimpleNamespace(type='private'), from_user=SimpleNamespace(id=20),
         text=f'/start ref_{parent.invite_token}', answer=AsyncMock(), bot=object())
     await start.cmd_start(message)
-    assert 'Первый ролик' in message.answer.call_args.args[0]
+    assert message.answer.call_args.args[0] == start.WELCOME
     async with sessions.begin() as s:
         profile = await s.get(BotProfile, 20)
         assert profile.onboarding_seen and profile.inviter_id == 10
     message.answer.reset_mock()
     await start.cmd_start(message)
-    assert 'Первый ролик' in message.answer.call_args.args[0]
+    assert message.answer.call_args.args[0] == start.WELCOME
 
 
 async def test_onboarding_failed_send_can_retry(sessions, settings, monkeypatch):
@@ -298,7 +298,7 @@ async def test_public_start_routes_to_welcome(sessions, settings, monkeypatch, p
             from_user=User(id=20, is_bot=False, first_name='New'), text='/start' + payload)))
         sent = request.call_args.args[1]
         assert sent.text == WELCOME
-        assert sent.reply_markup.inline_keyboard[0][0].callback_data == 'mode:prepare'
+        assert sent.reply_markup.inline_keyboard[0][0].callback_data == 'intake:link'
         async with sessions.begin() as s:
             assert (await s.get(BotProfile, 20)).onboarding_seen
     finally:
@@ -367,3 +367,14 @@ async def test_reset_forgets_completed_source_everywhere(sessions, settings, mon
         video._pending_jobs.pop(20, None)
         video._pending_jobs.pop(21, None)
         video._mode_state.pop(20, None)
+
+
+@pytest.mark.parametrize('action,hint', [('intake:link', 'Скопируй ссылку'), ('intake:video', 'скрепку')])
+async def test_start_buttons_prompt_for_input(action, hint):
+    from app.bot.handlers.start import intake_prompt
+    call = SimpleNamespace(data=action, answer=AsyncMock(),
+                           message=SimpleNamespace(answer=AsyncMock()))
+    await intake_prompt(call)
+    call.answer.assert_awaited_once()
+    assert hint in call.message.answer.call_args.args[0]
+    assert call.message.answer.call_args.kwargs['reply_markup'].force_reply

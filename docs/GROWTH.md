@@ -2,9 +2,10 @@
 
 ## Shipped behaviour
 
-- Telegram's pre-Start description explains capabilities and asks visitors to press
+- Telegram's pre-Start description asks visitors to send a video link and press
   Start. Startup registers default and Russian descriptions with Telegram.
-- First private `/start` displays capabilities and three steps to the first MP4.
+- Every private `/start` asks for a TikTok/Reel/Shorts link with two input buttons.
+  Link/upload buttons send a short ForceReply prompt; /menu opens all features.
   A persistent onboarding flag is set only after Telegram accepts the welcome.
   Every /start clears the selected source in DB and memory and shows the guide.
   /cancel also clears the selection even without an active job. Help is available from

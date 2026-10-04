@@ -12,12 +12,9 @@ router = Router()
 logger = get_logger(__name__)
 
 BOT_DESCRIPTION = (
-    "🎬 ReCut — клип за пару кликов\n\n"
-    "Скачивай видео из TikTok, Instagram Reels и YouTube Shorts. "
-    "Делай вертикальные ролики, добавляй свою плашку и оформление "
-    "или находи интересные моменты в длинном видео.\n\n"
-    "Нажми «Начать», затем пришли ссылку или видео файлом. "
-    "Я покажу, что можно с ним сделать."
+    "Скинь ссылку на TikTok, Reel или Shorts — я загружу видео сюда.\n\n"
+    "Потом сможешь обработать его в пару нажатий.\n\n"
+    "Нажми «Начать», чтобы прислать ссылку или своё видео."
 )
 
 
@@ -31,18 +28,39 @@ async def setup_bot_description(bot) -> None:
 
 
 WELCOME = (
-    "🎬 <b>ReCut — подготовка видео для публикации</b>\n\n"
-    "Отправь видео файлом или ссылку на TikTok, Reels или Shorts.\n\n"
-    "• Скачаю исходник по ссылке.\n"
-    "• Сделаю вертикальный ролик с оформлением, твоей плашкой и персонажем.\n"
-    "• Создам три монтажных варианта или найду моменты в длинном видео.\n\n"
-    "<b>Первый ролик — в три шага:</b>\n"
-    "1. Пришли видео или ссылку.\n"
-    "2. Нажми «Сделать».\n"
-    "3. Получи готовый MP4.\n\n"
-    "Плашку и персонажа можно включить в «Оформлении». "
-    "Максимальная обработка доступна отдельной кнопкой в меню."
+    "👋 <b>Скинь ссылку на TikTok, Reel или Shorts</b>\n"
+    "Я загружу видео сюда.\n\n"
+    "Потом сможешь обработать его в пару нажатий.\n\n"
+    "👇 Просто вставь ссылку"
 )
+
+START_MENU = types.InlineKeyboardMarkup(inline_keyboard=[
+    [types.InlineKeyboardButton(text="📎 Вставить ссылку", callback_data="intake:link")],
+    [types.InlineKeyboardButton(text="📤 Загрузить видео", callback_data="intake:video")],
+])
+
+
+@router.callback_query(F.data.in_({"intake:link", "intake:video"}))
+async def intake_prompt(call: types.CallbackQuery) -> None:
+    await call.answer()
+    if not call.message:
+        return
+    text = (
+        "📎 Скопируй ссылку на видео в TikTok, Instagram или YouTube "
+        "и вставь её в сообщение сюда."
+        if call.data == "intake:link" else
+        "📤 Нажми скрепку рядом с полем сообщения, выбери видео и отправь его сюда."
+    )
+    await call.message.answer(text, reply_markup=types.ForceReply(
+        selective=True, input_field_placeholder="Вставь ссылку на видео" if call.data == "intake:link"
+        else "Прикрепи видео через скрепку"))
+
+
+@router.message(Command("menu"))
+async def cmd_menu(message: types.Message) -> None:
+    from app.bot.keyboards.inline import HOME_MENU
+    await message.answer("Что сделать с видео?", reply_markup=HOME_MENU)
+
 
 HELP_TEXT = (
     "📖 <b>Как пользоваться ReCut</b>\n\n"
@@ -61,7 +79,6 @@ HELP_TEXT = (
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message) -> None:
-    from app.bot.keyboards.inline import HOME_MENU
     if message.chat.type != "private" or not message.from_user:
         return
     from sqlalchemy import update
@@ -77,7 +94,7 @@ async def cmd_start(message: types.Message) -> None:
         from app.bot.handlers.video import reset_media_selection
         await reset_media_selection(user_id)
         if first_visit:
-            await message.answer(WELCOME, parse_mode="HTML", reply_markup=HOME_MENU)
+            await message.answer(WELCOME, parse_mode="HTML", reply_markup=START_MENU)
             async with db_manager.session() as session:
                 await session.execute(update(BotProfile).where(
                     BotProfile.telegram_user_id == user_id).values(onboarding_seen=True))
@@ -89,7 +106,7 @@ async def cmd_start(message: types.Message) -> None:
     await message.answer(
         WELCOME,
         parse_mode="HTML",
-        reply_markup=HOME_MENU,
+        reply_markup=START_MENU,
     )
 
 
