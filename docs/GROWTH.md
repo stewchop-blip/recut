@@ -33,7 +33,7 @@
 | REFERRAL_REWARD_CREDITS | 3 | Inviter credits, snapshotted at invitee registration |
 | REFERRAL_MAX_REWARDS | 50 | Lifetime rewarded friends per inviter |
 | GENERATION_LIMITS_ENABLED | true | Enable daily quota and bonus/paid ledger spending |
-| DAILY_FREE_GENERATIONS | 3 | Free successful render actions per UTC day |
+| DAILY_FREE_GENERATIONS | 10 | Free successful render actions per UTC day |
 | UNLIMITED_TELEGRAM_IDS | empty | Comma-separated admin/tester IDs exempt from quotas |
 | BETA_TESTERS_UNLIMITED | true | Existing access allowlist also exempts beta testers |
 

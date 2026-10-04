@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     referral_reward_credits: int = Field(default=3, ge=1, le=100)
     referral_max_rewards: int = Field(default=50, ge=1, le=10000)
     generation_limits_enabled: bool = True
-    daily_free_generations: int = Field(default=3, ge=0, le=1000)
+    daily_free_generations: int = Field(default=10, ge=0, le=1000)
     unlimited_telegram_ids: str = ""
     beta_testers_unlimited: bool = True
 

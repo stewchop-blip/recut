@@ -35,7 +35,7 @@ def test_public_defaults_preserve_limits_and_operator_roles():
                    allowed_telegram_user_ids='10,11')
     assert cfg.public_access_enabled
     assert cfg.generation_limits_enabled and cfg.referrals_enabled
-    assert cfg.daily_free_generations == 3 and cfg.referral_reward_credits == 3
+    assert cfg.daily_free_generations == 10 and cfg.referral_reward_credits == 3
     assert not cfg.payments_enabled
     assert cfg.has_unlimited_generations(10)
     assert not cfg.has_unlimited_generations(20)
