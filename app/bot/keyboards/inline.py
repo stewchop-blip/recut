@@ -80,7 +80,7 @@ def audio_menu(current: str) -> InlineKeyboardMarkup:
 def appearance_menu(style_id: str, banner: bool, decoration: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🎭 Стиль: {style_id}", callback_data="style:pick")],
-        [InlineKeyboardButton(text=f"🖼 Плашка: {'✅' if banner else 'нет'}", callback_data="banner:menu")],
+        [InlineKeyboardButton(text=f"🖼 Плашка (баннер): {'✅' if banner else 'нет'}", callback_data="banner:menu")],
         [InlineKeyboardButton(text=f"🤖 Персонаж снизу: {'ВКЛ' if decoration else 'ВЫКЛ'}", callback_data="decoration:toggle")],
         [InlineKeyboardButton(text="🔧 Настроить вручную", callback_data="fine:menu")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
@@ -111,7 +111,7 @@ def fine_menu(background_id: str, title_id: str, brand: bool,
         [InlineKeyboardButton(text=f"🏷 Заголовок: {title_id}", callback_data="style:title")],
         [InlineKeyboardButton(text=f"🏷 Водяной знак ReCut: {'ВКЛ' if brand else 'ВЫКЛ'}", callback_data="style:brand")],
         [InlineKeyboardButton(text=f"🔘 Плашка: {'ВКЛ' if cta_enabled else 'ВЫКЛ'}", callback_data="settings:toggle_cta")],
-        [InlineKeyboardButton(text="🖼 Плашка (размер/позиция/время)", callback_data="banner:menu")],
+        [InlineKeyboardButton(text="🖼 Настроить плашку", callback_data="banner:menu")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="appearance:menu")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
     ])

@@ -1204,13 +1204,14 @@ async def on_banner_menu(call: CallbackQuery) -> None:
         logger.warning("banner_menu_db_failed", error=str(e)[:200])
     if file_id:
         text = (
-            "🖼 <b>Плашка</b>\n\n"
+            "🖼 <b>Плашка (баннер)</b>\n\n"
+            "Картинка или анимация поверх видео — например, логотип или реклама.\n\n"
             "Статус: ✅ Загружена\n"
             f"Положение: {getattr(s, 'cta_position', 'снизу')}\n"
             "Показ: последние сек."
         )
     else:
-        text = "🖼 <b>Плашка</b>\n\nПлашка пока не загружена."
+        text = "🖼 <b>Плашка (баннер)</b>\n\nПлашка и баннер — одно и то же: картинка или анимация поверх видео.\n\nЗагрузи, например, свой логотип или рекламную картинку."
     await call.message.edit_text(text, parse_mode="HTML", reply_markup=banner_menu(bool(file_id)))
     await call.answer()
 
@@ -1220,7 +1221,8 @@ async def on_banner_upload_request(call: CallbackQuery) -> None:
     user_id = call.from_user.id if call.from_user else 0
     _awaiting_banner.add(user_id)
     await call.message.edit_text(
-        "📎 Пришли плашку: <b>PNG, JPEG, WebP, GIF или короткий MP4</b>.\n\n"
+        "📎 Пришли плашку (баннер) — картинку или анимацию, которую наложим поверх видео.\n\n"
+        "Подойдут <b>PNG, JPEG, WebP, GIF или короткий MP4</b>.\n\n"
         "Важно: отправь её как <b>ФАЙЛ</b>, а не как фото —\n"
         "так сохранится качество и прозрачность.",
         parse_mode="HTML",

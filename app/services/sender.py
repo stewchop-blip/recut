@@ -128,7 +128,7 @@ def _build_caption(clip: FinalClip, send_path: Path | None = None) -> str:
     if clip.has_subtitles:
         flags.append("субтитры")
     if clip.has_cta:
-        flags.append("CTA")
+        flags.append("Плашка")
     flag_str = " · ".join(flags)
 
     path = send_path or clip.final_path
