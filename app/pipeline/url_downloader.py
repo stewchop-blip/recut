@@ -222,14 +222,16 @@ class DownloaderService:
                     "INSTAGRAM_AUTH_REQUIRED", "INSTAGRAM_ACCESS_FAILED", "INSTAGRAM_EXTRACTOR_FAILED",
                 }:
                     # One different public web query, not repeated failed requests.
-                    from app.pipeline.instagram_public import extract_public_video
+                    from app.pipeline.instagram_public import extract_public_video, PublicMetadataError
                     logger.info("instagram_public_fallback_start")
                     try:
                         info = [await asyncio.wait_for(extract_public_video(url), timeout=45)]
                         logger.info("instagram_public_fallback_ok")
                     except Exception as fallback_error:
                         logger.warning("instagram_public_fallback_failed",
-                                       error_type=type(fallback_error).__name__)
+                                       error_type=type(fallback_error).__name__,
+                                       reason=str(fallback_error) if isinstance(fallback_error, PublicMetadataError)
+                                       else "transport_or_unexpected_error")
                         raise StructuredDownloadError(code, getattr(e, "detail", str(e))) from e
                 else:
                     raise StructuredDownloadError(

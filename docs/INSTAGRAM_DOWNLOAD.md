@@ -82,3 +82,15 @@ Validation: 22 targeted tests passed. The new public query downloaded the user's
 DXRR2sziOG_ reel in full: 3,451,476 bytes, 1276x720, 16.55 seconds with audio.
 The local verification used the workspace's system CA (TLS verification stayed
 on); no CA override is shipped. Railway behavior still needs a user request.
+
+### Follow-up: Railway jobs 342–343
+
+The alternate path started, but both attempts ended with ValueError in ~0.15s.
+The old log omitted the fixed error reason, so the failing stage is unknown.
+Allow at most two HTTPS redirects within www.instagram.com for the initial
+public page (the original adapter rejected every redirect). External origins,
+custom ports and HTTP are rejected; GraphQL POST still never follows redirects.
+Fixed diagnostic codes now distinguish homepage HTTP/redirect/token failures,
+GraphQL HTTP/JSON failure and empty/mismatched/non-video metadata, without logging
+response bodies, session values or signed URLs. This is a bounded redirect
+handling correction plus diagnostic improvement, not confirmed Railway recovery.

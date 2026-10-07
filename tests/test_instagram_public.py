@@ -57,3 +57,46 @@ async def test_no_fallback_for_explicit_restrictions(tmp_path, monkeypatch, erro
     monkeypatch.setattr(svc, '_run_ytdlp', run)
     with pytest.raises(StructuredDownloadError):
         await svc.download('https://www.instagram.com/reel/abc/', tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_homepage_follows_same_origin_redirect():
+    from types import SimpleNamespace
+    from app.pipeline.instagram_public import public_homepage
+    calls = []
+    class Session:
+        async def get(self, url):
+            calls.append(url)
+            if len(calls) == 1:
+                return SimpleNamespace(status_code=302, headers={'Location': '/accounts/login/'})
+            return SimpleNamespace(status_code=200, text='public page')
+    assert (await public_homepage(Session())).text == 'public page'
+    assert calls == ['https://www.instagram.com/', 'https://www.instagram.com/accounts/login/']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('location', ['https://evil.test/', 'http://www.instagram.com/',
+                                      'https://127.0.0.1/', 'https://www.instagram.com:8443/'])
+async def test_homepage_rejects_external_redirect(location):
+    from types import SimpleNamespace
+    from app.pipeline.instagram_public import public_homepage, PublicMetadataError
+    class Session:
+        async def get(self, url):
+            assert url == 'https://www.instagram.com/'
+            return SimpleNamespace(status_code=302, headers={'Location':location})
+    with pytest.raises(PublicMetadataError, match='homepage_redirect_disallowed'):
+        await public_homepage(Session())
+
+
+@pytest.mark.asyncio
+async def test_homepage_redirect_loop_is_bounded():
+    from types import SimpleNamespace
+    from app.pipeline.instagram_public import public_homepage, PublicMetadataError
+    calls=[]
+    class Session:
+        async def get(self,url):
+            calls.append(url)
+            return SimpleNamespace(status_code=302, headers={'Location':'/'})
+    with pytest.raises(PublicMetadataError, match='homepage_redirect_limit'):
+        await public_homepage(Session())
+    assert len(calls) == 3
