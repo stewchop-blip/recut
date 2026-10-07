@@ -94,3 +94,14 @@ Fixed diagnostic codes now distinguish homepage HTTP/redirect/token failures,
 GraphQL HTTP/JSON failure and empty/mismatched/non-video metadata, without logging
 response bodies, session values or signed URLs. This is a bounded redirect
 handling correction plus diagnostic improvement, not confirmed Railway recovery.
+
+### Follow-up: job 346 returned metadata_empty
+
+The query completed but the expected v1 item was missing. That alone cannot
+establish IP blocking. Match anonymous CSRF cookies with X-CSRFToken, include
+fb_dtsg only when supplied by the public page, and support the shortcode-media
+response shapes also handled by instagrapi. No personal session is added.
+Differentiate GraphQL errors (numeric codes only), missing data, missing items
+and unknown schema; never log arbitrary error text or response bodies.
+Local full download of DXRR2sziOG_ still succeeds after the request changes;
+production recovery remains unconfirmed until a Railway request succeeds.

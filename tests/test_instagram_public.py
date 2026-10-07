@@ -100,3 +100,41 @@ async def test_homepage_redirect_loop_is_bounded():
     with pytest.raises(PublicMetadataError, match='homepage_redirect_limit'):
         await public_homepage(Session())
     assert len(calls) == 3
+
+
+def test_shortcode_response_is_supported():
+    info=video_info({'data':{'xdt_shortcode_media':{
+        'shortcode':'abc','owner':{'is_private':False},
+        'video_url':'https://video.cdninstagram.com/a.mp4','video_duration':5}}}, 'abc')
+    assert info['duration'] == 5
+
+
+@pytest.mark.parametrize('response,reason', [
+    ({'data':None,'errors':[{'code':123,'message':'PRIVATE_SECRET'}]}, 'graphql_errors_123'),
+    ({'data':None}, 'graphql_data_missing'),
+    ({'data':{'unexpected':'PRIVATE_SECRET'}}, 'metadata_schema_unknown'),
+    ({'data':{'xdt_api__v1__media__shortcode__web_info':None}}, 'metadata_items_missing')])
+def test_safe_error_diagnostics(response,reason):
+    from app.pipeline.instagram_public import PublicMetadataError
+    with pytest.raises(PublicMetadataError) as exc:
+        video_info(response,'abc')
+    assert str(exc.value) == reason
+
+
+@pytest.mark.asyncio
+async def test_anonymous_session_tokens_are_forwarded(monkeypatch):
+    from types import SimpleNamespace
+    from app.pipeline.instagram_public import extract_public_video
+    class Session:
+        cookies=SimpleNamespace(jar=[SimpleNamespace(name='csrftoken',domain='.instagram.com',value='test-csrf')])
+        async def __aenter__(self): return self
+        async def __aexit__(self,*args): pass
+        async def get(self,url):
+            return SimpleNamespace(status_code=200,text='["LSD",[],{"token":"test-lsd"}] ["DTSGInitData",[],{"token":"test-dtsg"}]')
+        async def post(self,url,headers,data):
+            assert headers['X-CSRFToken'] == 'test-csrf'
+            assert headers['X-FB-LSD'] == data['lsd'] == 'test-lsd'
+            assert data['fb_dtsg'] == 'test-dtsg'
+            return SimpleNamespace(status_code=200,json=lambda:payload())
+    monkeypatch.setattr('app.pipeline.instagram_public.AsyncSession',lambda **kw:Session())
+    assert (await extract_public_video('https://www.instagram.com/reel/abc/'))['id'] == 'abc'
