@@ -218,6 +218,19 @@ class DownloaderService:
                     except URLDownloadError as retry_error:
                         detail = getattr(retry_error, "detail", str(retry_error))
                         raise StructuredDownloadError(classify_ytdlp_error(detail, platform), detail) from retry_error
+                elif platform == "instagram" and not use_cookies and code in {
+                    "INSTAGRAM_AUTH_REQUIRED", "INSTAGRAM_ACCESS_FAILED", "INSTAGRAM_EXTRACTOR_FAILED",
+                }:
+                    # One different public web query, not repeated failed requests.
+                    from app.pipeline.instagram_public import extract_public_video
+                    logger.info("instagram_public_fallback_start")
+                    try:
+                        info = [await asyncio.wait_for(extract_public_video(url), timeout=45)]
+                        logger.info("instagram_public_fallback_ok")
+                    except Exception as fallback_error:
+                        logger.warning("instagram_public_fallback_failed",
+                                       error_type=type(fallback_error).__name__)
+                        raise StructuredDownloadError(code, getattr(e, "detail", str(e))) from e
                 else:
                     raise StructuredDownloadError(
                         code, getattr(e, "detail", str(e))) from e

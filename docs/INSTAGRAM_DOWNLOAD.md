@@ -61,3 +61,24 @@ operator must check server logs and configure/refresh INSTAGRAM_COOKIES_B64 secu
 in Railway; never send session cookies in chat or commit them. A true server-side
 429 cannot be removed by this code change. Existing limits and private-cookie
 cleanup remain enforced. Targeted download/security suite: 52 tests passed.
+
+## 2026-10-07: alternative public web query
+
+Railway job 339 still received a login redirect without an account session.
+Added one anonymous `PolarisPostRootQuery` request using the public web query
+shape currently used by instagrapi (`MEDIA_INFO_DOC_ID=27830990013244856`).
+Sources: https://github.com/subzeroid/instagrapi/blob/master/instagrapi/mixins/media.py
+and https://github.com/subzeroid/instagrapi/blob/master/instagrapi/mixins/public.py .
+The implementation is a small independent adapter, not a copied client library.
+It runs only after anonymous yt-dlp auth/access/extraction failure, never after
+explicit 429, audience restriction or authenticated failure. No account cookies,
+external service, or new dependency is required. Requests have time limits;
+redirects are disabled; returned post identity, private flag and HTTPS CDN hosts
+are checked. Existing yt-dlp file-size/duration limits and temporary cleanup remain.
+Only success/error type is logged, not response bodies or signed media URLs.
+This undocumented query can also stop working or be unavailable from Railway.
+
+Validation: 22 targeted tests passed. The new public query downloaded the user's
+DXRR2sziOG_ reel in full: 3,451,476 bytes, 1276x720, 16.55 seconds with audio.
+The local verification used the workspace's system CA (TLS verification stayed
+on); no CA override is shipped. Railway behavior still needs a user request.
