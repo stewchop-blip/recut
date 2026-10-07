@@ -344,11 +344,6 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
         return
     url = normalize_url(url)
     platform = get_platform_name(url)
-    # Temporary notice while Instagram access is being restored.
-    if platform == "instagram":
-        from app.bot.notices import INSTAGRAM_MAINTENANCE
-        await message.answer(INSTAGRAM_MAINTENANCE)
-        return
     from app.services.downloader.jobs import get_job_queue
     queue = get_job_queue()
     if queue.is_busy(user_id):

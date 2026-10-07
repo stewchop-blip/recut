@@ -4,7 +4,6 @@ from pathlib import Path
 from aiogram import F, Router, types
 from aiogram.filters import Command
 
-from app.bot.notices import INSTAGRAM_MAINTENANCE
 from app.core.logging import get_logger
 from app.database.repositories import JobRepository
 from app.database.session import db_manager
@@ -13,7 +12,7 @@ router = Router()
 logger = get_logger(__name__)
 
 BOT_DESCRIPTION = (
-    "Скинь ссылку на TikTok или YouTube Shorts — я загружу видео сюда.\n\n"
+    "Скинь ссылку на TikTok, Reel или Shorts — я загружу видео сюда.\n\n"
     "Потом сможешь обработать его в пару нажатий.\n\n"
     "Нажми «Начать», чтобы прислать ссылку или своё видео."
 )
@@ -29,11 +28,10 @@ async def setup_bot_description(bot) -> None:
 
 
 WELCOME = (
-    "👋 <b>Скинь ссылку на TikTok или YouTube Shorts</b>\n"
+    "👋 <b>Скинь ссылку на TikTok, Reel или Shorts</b>\n"
     "Я загружу видео сюда.\n\n"
     "Потом сможешь обработать его в пару нажатий.\n\n"
-    "👇 Просто вставь ссылку\n\n"
-    + INSTAGRAM_MAINTENANCE
+    "👇 Просто вставь ссылку"
 )
 
 START_MENU = types.InlineKeyboardMarkup(inline_keyboard=[
@@ -48,8 +46,8 @@ async def intake_prompt(call: types.CallbackQuery) -> None:
     if not call.message:
         return
     text = (
-        "📎 Скопируй ссылку на видео в TikTok или YouTube "
-        "и вставь её в сообщение сюда.\n\n" + INSTAGRAM_MAINTENANCE
+        "📎 Скопируй ссылку на видео в TikTok, Instagram или YouTube "
+        "и вставь её в сообщение сюда."
         if call.data == "intake:link" else
         "📤 Нажми скрепку рядом с полем сообщения, выбери видео и отправь его сюда."
     )
