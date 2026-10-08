@@ -17,14 +17,11 @@ import asyncio
 import json
 import re
 import shutil
-import subprocess
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 from app.core.logging import get_logger
-from app.core.config import get_settings
 
 logger = get_logger(__name__)
 
@@ -201,7 +198,7 @@ class DownloaderService:
                     timeout=60,
                 )
             except URLDownloadError as e:
-                code = classify_ytdlp_error(getattr(e, "detail", str(e)), platform)
+                code = getattr(e, "code", None) or classify_ytdlp_error(getattr(e, "detail", str(e)), platform)
                 logger.warning("yt_dlp_metadata_failed", platform=platform,
                                error_code=code, stderr=str(e)[:300])
                 if cookie_file is not None and not use_cookies and ("AUTH" in code or "RESTRICTED" in code
@@ -217,15 +214,15 @@ class DownloaderService:
                         use_cookies = True
                     except URLDownloadError as retry_error:
                         detail = getattr(retry_error, "detail", str(retry_error))
-                        raise StructuredDownloadError(classify_ytdlp_error(detail, platform), detail) from retry_error
+                        raise StructuredDownloadError(getattr(retry_error, "code", None) or classify_ytdlp_error(detail, platform), detail) from retry_error
                 elif platform == "instagram" and not use_cookies and code in {
                     "INSTAGRAM_AUTH_REQUIRED", "INSTAGRAM_ACCESS_FAILED", "INSTAGRAM_EXTRACTOR_FAILED",
                 }:
-                    # One different public web query, not repeated failed requests.
+                    # Bounded anonymous stages; GraphQL is the last metadata fallback.
                     from app.pipeline.instagram_public import extract_public_video, PublicMetadataError
                     logger.info("instagram_public_fallback_start")
                     try:
-                        info = [await asyncio.wait_for(extract_public_video(url), timeout=45)]
+                        info = [await asyncio.wait_for(extract_public_video(url), timeout=75)]
                         logger.info("instagram_public_fallback_ok")
                     except Exception as fallback_error:
                         logger.warning("instagram_public_fallback_failed",
@@ -286,7 +283,7 @@ class DownloaderService:
             try:
                 await self._run_ytdlp(download_args, timeout=timeout_s)
             except URLDownloadError as e:
-                code = classify_ytdlp_error(str(e), platform)
+                code = getattr(e, "code", None) or classify_ytdlp_error(str(e), platform)
                 logger.warning("yt_dlp_download_failed", platform=platform,
                                error_code=code, stderr=str(e)[:300],
                                cookie_retry=False)
@@ -300,7 +297,7 @@ class DownloaderService:
                         )
                     except URLDownloadError as retry_error:
                         detail = getattr(retry_error, "detail", str(retry_error))
-                        raise StructuredDownloadError(classify_ytdlp_error(detail, platform), detail) from retry_error
+                        raise StructuredDownloadError(getattr(retry_error, "code", None) or classify_ytdlp_error(detail, platform), detail) from retry_error
                 else:
                     raise StructuredDownloadError(code, str(e)) from e
 
@@ -380,6 +377,14 @@ class DownloaderService:
         if proc.returncode != 0:
             stderr_text = stderr.decode(errors="ignore")
             msg = stderr_text[:500]
+            if ("--load-info-json" in argv or any(
+                    re.match(r"https://(?:www\.)?(?:instagram\.com|instagr\.am)/", arg)
+                    for arg in argv)):
+                # Media-transfer stderr can contain signed CDN URLs. Keep only
+                # a fixed classification, also in exceptions consumed by job logs.
+                code = classify_ytdlp_error(stderr_text, "instagram")
+                logger.warning("yt_dlp_failed", rc=proc.returncode, error_code=code)
+                raise StructuredDownloadError(code, "Instagram request failed")
             logger.warning(
                 "yt_dlp_failed",
                 rc=proc.returncode,
@@ -406,7 +411,7 @@ class DownloaderService:
         """Single source of truth: app/services/downloader/url_utils.py
         (HOTFIX item 10). No parallel validation logic here."""
         from app.services.downloader.url_utils import (
-            get_platform_name, is_supported_url, normalize_url,
+            is_supported_url, normalize_url,
         )
         if not isinstance(url, str) or not url.strip():
             raise UnsupportedURLError("Empty URL")

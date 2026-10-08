@@ -102,3 +102,24 @@ async def test_failed_cookie_retry_stays_structured_and_cleans_cookie(tmp_path, 
         await svc.download('https://www.instagram.com/reel/abc/', tmp_path)
     assert len(calls) == 1
     assert not list(tmp_path.glob('*cookies*'))
+
+
+@pytest.mark.parametrize('source', [['https://www.instagram.com/reel/abc/'],
+                                   ['--load-info-json', '/tmp/instagram_info_test.json']])
+async def test_instagram_subprocess_error_never_exposes_signed_url(source, monkeypatch):
+    from types import SimpleNamespace
+    from app.pipeline import url_downloader
+    events = []
+    monkeypatch.setattr(url_downloader, 'logger', SimpleNamespace(
+        warning=lambda *args, **kwargs: events.append(kwargs)))
+    class Process:
+        returncode = 1
+        async def communicate(self):
+            return b'', b'ERROR: HTTP Error 403 https://video.fbcdn.net/video.mp4?token=SECRET'
+    async def create(*args, **kwargs): return Process()
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', create)
+    with pytest.raises(StructuredDownloadError) as error:
+        await DownloaderService()._run_ytdlp(['yt-dlp', *source])
+    assert error.value.code == 'INSTAGRAM_EXTRACTOR_FAILED'
+    assert 'SECRET' not in str(error.value)
+    assert 'fbcdn' not in str(events)

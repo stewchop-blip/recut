@@ -1,5 +1,10 @@
 import asyncio
+import json
+from types import SimpleNamespace
+
 import pytest
+
+from app.pipeline import instagram_public as public
 from app.pipeline.instagram_public import video_info
 from app.pipeline.url_downloader import DownloaderService, URLDownloadError, StructuredDownloadError
 
@@ -65,7 +70,7 @@ async def test_homepage_follows_same_origin_redirect():
     from app.pipeline.instagram_public import public_homepage
     calls = []
     class Session:
-        async def get(self, url):
+        async def get(self, url, **kwargs):
             calls.append(url)
             if len(calls) == 1:
                 return SimpleNamespace(status_code=302, headers={'Location': '/accounts/login/'})
@@ -81,7 +86,7 @@ async def test_homepage_rejects_external_redirect(location):
     from types import SimpleNamespace
     from app.pipeline.instagram_public import public_homepage, PublicMetadataError
     class Session:
-        async def get(self, url):
+        async def get(self, url, **kwargs):
             assert url == 'https://www.instagram.com/'
             return SimpleNamespace(status_code=302, headers={'Location':location})
     with pytest.raises(PublicMetadataError, match='homepage_redirect_disallowed'):
@@ -94,7 +99,7 @@ async def test_homepage_redirect_loop_is_bounded():
     from app.pipeline.instagram_public import public_homepage, PublicMetadataError
     calls=[]
     class Session:
-        async def get(self,url):
+        async def get(self,url, **kwargs):
             calls.append(url)
             return SimpleNamespace(status_code=302, headers={'Location':'/'})
     with pytest.raises(PublicMetadataError, match='homepage_redirect_limit'):
@@ -129,12 +134,184 @@ async def test_anonymous_session_tokens_are_forwarded(monkeypatch):
         cookies=SimpleNamespace(jar=[SimpleNamespace(name='csrftoken',domain='.instagram.com',value='test-csrf')])
         async def __aenter__(self): return self
         async def __aexit__(self,*args): pass
-        async def get(self,url):
+        async def get(self,url, **kwargs):
             return SimpleNamespace(status_code=200,text='["LSD",[],{"token":"test-lsd"}] ["DTSGInitData",[],{"token":"test-dtsg"}]')
-        async def post(self,url,headers,data):
+        async def post(self,url,headers,data, **kwargs):
             assert headers['X-CSRFToken'] == 'test-csrf'
             assert headers['X-FB-LSD'] == data['lsd'] == 'test-lsd'
             assert data['fb_dtsg'] == 'test-dtsg'
             return SimpleNamespace(status_code=200,json=lambda:payload())
     monkeypatch.setattr('app.pipeline.instagram_public.AsyncSession',lambda **kw:Session())
     assert (await extract_public_video('https://www.instagram.com/reel/abc/'))['id'] == 'abc'
+
+
+def response(data=None, status=200, text=''):
+    return SimpleNamespace(status_code=status, text=text, json=lambda: data)
+
+
+def embed_html(context):
+    return '<script>["init",[],[' + json.dumps({'contextJSON': json.dumps(context)}) + ']],</script>'
+
+
+class PublicSession:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+        self.calls = []
+        self.cookies = SimpleNamespace(jar=[])
+
+    async def __aenter__(self): return self
+    async def __aexit__(self, *args): pass
+
+    async def get(self, url, **kwargs):
+        self.calls.append(url)
+        assert 0 < kwargs['timeout'] <= 10
+        assert 'Cookie' not in kwargs.get('headers', {})
+        assert 'Authorization' not in kwargs.get('headers', {})
+        result = next(self.responses)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def post(self, url, **kwargs):
+        return await self.get(url, **kwargs)
+
+
+@pytest.mark.parametrize('media_id', ['123', '123_456', 123])
+async def test_oembed_media_id(media_id):
+    session = PublicSession([response({'media_id': media_id, 'html': 'unused'})])
+    assert await public.public_oembed(session, 'abc') == str(media_id)
+    assert session.calls == ['https://i.instagram.com/api/v1/oembed/']
+
+
+@pytest.mark.parametrize('data,reason', [({}, 'oembed_no_media_id'),
+    ({'media_id': '../secret'}, 'oembed_no_media_id'),
+    ({'media_id': True}, 'oembed_no_media_id'), ([], 'oembed_invalid_payload')])
+async def test_oembed_bad_payload(data, reason):
+    with pytest.raises(public.PublicMetadataError, match=reason):
+        await public.public_oembed(PublicSession([response(data)]), 'abc')
+
+
+@pytest.mark.parametrize('stage,status', [('oembed', 403), ('mobile_info', 401), ('embed', 302)])
+async def test_stage_http_reason(stage, status):
+    session = PublicSession([response(status=status)])
+    with pytest.raises(public.PublicMetadataError, match=f'{stage}_http_{status}'):
+        if stage == 'oembed': await public.public_oembed(session, 'abc')
+        elif stage == 'mobile_info': await public.mobile_info(session, '123', 'abc')
+        else: await public.public_embed(session, 'abc')
+
+
+@pytest.mark.parametrize('data', [{}, {'items': []}, {'items': [None]}, {'items': {}}])
+async def test_mobile_empty(data):
+    with pytest.raises(public.PublicMetadataError, match='mobile_info_empty'):
+        await public.mobile_info(PublicSession([response(data)]), '123', 'abc')
+
+
+async def test_mobile_missing_code_requires_matching_pk():
+    item = payload()['data']['xdt_api__v1__media__shortcode__web_info']['items'][0]
+    item.pop('code')
+    item['pk'] = '123'
+    assert (await public.mobile_info(PublicSession([response({'items': [item]})]), '123_456', 'abc'))['id'] == 'abc'
+    item['pk'] = '456'
+    with pytest.raises(public.PublicMetadataError, match='mobile_info_identity'):
+        await public.mobile_info(PublicSession([response({'items': [item]})]), '123', 'abc')
+
+
+@pytest.mark.parametrize('context', [
+    {'gql_data': {'shortcode_media': {'shortcode': 'abc', 'video_url': 'https://video.fbcdn.net/a.mp4'}}},
+    payload()['data']['xdt_api__v1__media__shortcode__web_info']['items'][0]])
+def test_embed_context_schemas(context):
+    assert public.embed_info(embed_html(context), 'abc')['id'] == 'abc'
+
+
+@pytest.mark.parametrize('html,reason', [('<html>login</html>', 'embed_parse_failed'),
+    ('"init",[],[{broken', 'embed_parse_failed'),
+    (embed_html({'gql_data': {}}), 'embed_no_video')])
+def test_embed_bad_payload(html, reason):
+    with pytest.raises(public.PublicMetadataError, match=reason):
+        public.embed_info(html, 'abc')
+
+
+def test_best_reasonable_quality_and_cdn_validation():
+    data = payload()
+    versions = data['data']['xdt_api__v1__media__shortcode__web_info']['items'][0]['video_versions']
+    versions.extend([{'url': 'https://video.fbcdn.net/hd.mp4', 'width': 1080, 'height': 1920},
+                     {'url': 'https://video.fbcdn.net/huge.mp4', 'width': 9000, 'height': 9000},
+                     {'url': 'https://video.fbcdn.net:8443/evil.mp4'}, None])
+    info = video_info(data, 'abc')
+    assert len(info['formats']) == 2
+    assert info['formats'][-1]['height'] == 1920
+
+
+@pytest.mark.parametrize('url', ['https://video.fbcdn.net:8443/x',
+    'https://secret@video.fbcdn.net/x', 'https://video.fbcdn.net:bad/x',
+    'https://video.fbcdn.net.evil.test/x', 'http://video.fbcdn.net/x', None])
+def test_disallowed_media_url(url):
+    assert not public.allowed_media_url(url)
+
+
+@pytest.mark.parametrize('path', ['mobile', 'embed_after_mobile', 'embed_after_oembed', 'graphql', 'failed_graphql'])
+async def test_pipeline_order(monkeypatch, path):
+    mobile = response({'items': payload()['data']['xdt_api__v1__media__shortcode__web_info']['items']})
+    responses = [response({'media_id': '123'}) if path != 'embed_after_oembed' else response({})]
+    if path != 'embed_after_oembed':
+        responses.append(mobile if path == 'mobile' else response({'items': []}))
+    if path != 'mobile':
+        responses.append(response(text=embed_html({'gql_data': payload()['data']}))
+            if path.startswith('embed') else response(text='login'))
+    if 'graphql' in path:
+        responses.extend([response(text='["LSD",[],{"token":"test"}]'),
+            response(payload() if path == 'graphql' else {'errors': [{'code': 1675004, 'message': 'SECRET'}]})])
+    session = PublicSession(responses)
+    def factory(**kwargs):
+        assert kwargs['allow_redirects'] is False
+        return session
+    monkeypatch.setattr(public, 'AsyncSession', factory)
+    if path == 'failed_graphql':
+        with pytest.raises(public.PublicMetadataError, match='^graphql_errors_1675004$'):
+            await public.extract_public_video('https://www.instagram.com/reel/abc/')
+    else:
+        assert (await public.extract_public_video('https://www.instagram.com/reel/abc/'))['id'] == 'abc'
+    expected = ['https://i.instagram.com/api/v1/oembed/']
+    if path != 'embed_after_oembed': expected.append('https://i.instagram.com/api/v1/media/123/info/')
+    if path != 'mobile': expected.append('https://www.instagram.com/p/abc/embed/captioned/')
+    if 'graphql' in path: expected.extend(['https://www.instagram.com/', 'https://www.instagram.com/api/graphql'])
+    assert session.calls == expected
+
+
+@pytest.mark.parametrize('error,reason', [(RuntimeError('SECRET signed-url'), 'embed_transport_error'),
+                                        (asyncio.TimeoutError(), 'embed_timeout')])
+async def test_transport_diagnostics_safe(error, reason, monkeypatch):
+    events = []
+    monkeypatch.setattr(public, 'logger', SimpleNamespace(info=lambda *a, **kw: events.append(kw),
+        warning=lambda *a, **kw: events.append(kw)))
+    async def operation(): raise error
+    with pytest.raises(public.PublicMetadataError, match=reason):
+        await public.public_stage('embed', operation)
+    assert 'SECRET' not in str(events)
+
+
+async def test_stage_cancellation_propagates():
+    async def operation(): raise asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await public.public_stage('oembed', operation)
+
+
+async def test_wall_clock_timeout_is_enforced(monkeypatch):
+    async def operation():
+        await asyncio.Event().wait()
+    original = asyncio.wait_for
+    async def short_wait(awaitable, timeout):
+        assert timeout == 12
+        return await original(awaitable, timeout=0.001)
+    monkeypatch.setattr(public.asyncio, 'wait_for', short_wait)
+    with pytest.raises(public.PublicMetadataError, match='oembed_timeout'):
+        await public.public_stage('oembed', operation)
+
+
+async def test_non_json_oembed_is_safe():
+    class Session(PublicSession):
+        async def get(self, *args, **kwargs):
+            def invalid(): raise ValueError('SECRET response body')
+            return SimpleNamespace(status_code=200, json=invalid)
+    with pytest.raises(public.PublicMetadataError, match='^oembed_not_json$'):
+        await public.public_oembed(Session([]), 'abc')

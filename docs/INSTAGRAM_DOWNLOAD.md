@@ -105,3 +105,99 @@ Differentiate GraphQL errors (numeric codes only), missing data, missing items
 and unknown schema; never log arbitrary error text or response bodies.
 Local full download of DXRR2sziOG_ still succeeds after the request changes;
 production recovery remains unconfirmed until a Railway request succeeds.
+
+## 2026-10-08: staged anonymous metadata fallback
+
+Railway returned `graphql_errors_1675004` after anonymous yt-dlp login redirects.
+That does not prove an IP block. Replace the single alternate-query attempt with:
+
+1. Existing yt-dlp metadata extraction.
+2. GET `https://i.instagram.com/api/v1/oembed/?url=https://www.instagram.com/p/{shortcode}/`
+   to obtain a validated numeric `media_id` (optionally suffixed with `_owner_id`).
+3. If an ID exists, GET `https://i.instagram.com/api/v1/media/{media_id}/info/`;
+   consume `items[0].video_versions`. Without an ID, skip this step.
+4. GET `https://www.instagram.com/p/{shortcode}/embed/captioned/`; decode the JSON
+   init argument and its `contextJSON`, accepting `gql_data.shortcode_media`,
+   `gql_data.xdt_shortcode_media`, the existing v1 item wrapper, or a mobile item.
+5. Existing anonymous homepage/session setup and `PolarisPostRootQuery` POST to
+   `https://www.instagram.com/api/graphql` with unchanged doc_id.
+6. If all metadata paths fail, preserve the structured Instagram error.
+
+This changes only Instagram's existing anonymous fallback eligibility. Explicit
+429/restriction failures and configured account-session failures retain their
+previous behavior. TikTok and uploaded-file pipelines are unchanged.
+
+Each public request has a 10-second timeout (homepage redirects: 5 seconds each,
+three requests maximum). Each oEmbed/mobile/embed stage has a 12-second wall-clock
+bound; the GraphQL stage has 30 seconds. The entire public fallback has 75 seconds.
+No stage retries. Redirects are disabled except the existing bounded same-origin
+homepage logic. Cancellation propagates. No credentials, bearer, user cookies,
+proxy, service, dependency or infrastructure changes are introduced.
+
+Mobile requests send the Instagram Android user-agent, Accept/Accept-Language and
+locale headers. Embed uses browser impersonation with HTML Accept/Accept-Language.
+We do not add Cobalt's transport/client-IP headers or pretend they are necessary.
+Only anonymous cookies issued by Instagram itself can accumulate in the request
+session. Existing GraphQL CSRF/LSD/fb_dtsg handling stays unchanged and runs last.
+
+Metadata validates post identity/privacy and HTTPS media URLs on subdomains of
+cdninstagram.com or fbcdn.net, without userinfo or custom ports. Valid video
+versions are ordered by pixel area, retaining the highest available reasonable
+quality (each dimension at most 4096); existing yt-dlp selection and transfer
+limits remain in effect. Returned metadata uses the existing owner-only temporary
+`--load-info-json` file and cleanup. This host check validates returned media URLs;
+it does not add a new redirect validator to yt-dlp's existing CDN transport.
+
+Stage logs: `instagram_public_stage_start`, `instagram_public_stage_ok`,
+`instagram_public_stage_failed`, and `instagram_public_stage_skipped`, with stage
+and fixed reason only. Reasons include `oembed_http_*`, `oembed_no_media_id`,
+`mobile_info_http_*`, `mobile_info_empty`, `embed_http_*`, `embed_parse_failed`,
+`embed_no_video`, `graphql_errors_*`, and stage-specific timeout/transport reasons.
+Body contents, signed URLs and session tokens are never added to these logs.
+Instagram subprocess failures now retain only their fixed structured code,
+including in exceptions subsequently consumed by job logs.
+
+### Source review and licensing
+
+- Cobalt Instagram service (inspected on 2026-10-08):
+  https://github.com/imputnet/cobalt/blob/main/api/src/processing/services/instagram.js
+  Latest commit affecting that file in the source history reviewed:
+  a6240d0192053c8fef2e2642a14017862bdcaa7f (2025-04-02).
+- Cobalt license: https://github.com/imputnet/cobalt/blob/main/LICENSE (AGPL-3.0).
+  ReCut independently implements the endpoint sequence and response schema;
+  no Cobalt source code, client library or dependencies are incorporated.
+- Current instagrapi documentation still describes oEmbed media IDs and labels
+  mobile `media_info_v1` as private API:
+  https://github.com/subzeroid/instagrapi/blob/master/docs/usage-guide/media.md
+  License: https://github.com/subzeroid/instagrapi/blob/master/LICENSE (MIT).
+  Its existing public-query implementation remains the reference for the final
+  GraphQL stage. Source review did not establish a newer open-source guarantee
+  that anonymous mobile info works on every server; it is a best-effort stage.
+
+### Live verification (workspace, not Railway)
+
+For DXRR2sziOG_, without an account or personal cookies:
+- oEmbed HTTP 200 returned a rich JSON object with a string `media_id`, `html`,
+  author/provider/thumbnail fields, dimensions, title, type and version.
+- Mobile info returned HTTP 403. Do not claim this private mobile endpoint is
+  generally accessible anonymously.
+- Embed HTTP 200 contained `contextJSON` with `context` and
+  `gql_data.shortcode_media`. It returned usable video metadata; GraphQL was skipped.
+- With yt-dlp metadata failure deliberately injected, the real fallback and
+  `--load-info-json` transfer downloaded 3,451,476 bytes. ffprobe confirmed
+  1276x720 video, audio, and 16.552971-second duration.
+- Default yt-dlp transfer first encountered the workspace's certificate trust
+  issue. Only the local verification command used `--compat-options no-certifi`
+  to use the system CA with TLS verification enabled; no production CA override
+  is shipped.
+
+After GitHub auto-deploy, submit that Reel to the bot and inspect the same job:
+`yt_dlp_metadata_failed` -> public stage events -> `instagram_public_fallback_ok`
+-> `url_download_file_created` -> successful Telegram delivery. An intermediate
+`mobile_info_http_403` is acceptable if embed succeeds. If all methods fail,
+collect stage/reason codes and the final structured error. Local success is not
+Railway runtime or Telegram delivery verification.
+
+Validation: 293 tests passed, including new fallback and diagnostic cases. Syntax compilation and
+focused undefined/unused import checks passed. The suite emitted existing datetime
+deprecations and an unrelated SQLite test-thread cleanup warning; no failed tests.
