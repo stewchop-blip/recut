@@ -296,3 +296,46 @@ behavior of this new stage still requires a Railway bot request after auto-deplo
 Validation of the post HTML addition: 338 tests passed, including staged failure
 transitions, identity/privacy/CDN rejection, gated HTML, and DASH-duration limits.
 Syntax/import and diff checks passed; no secrets or infrastructure changes added.
+
+### Optional Instagram-only proxy test
+
+Railway job 362 also returned `post_html_redirect_login`; all public routes for
+that request failed. Another network egress is a test, not proof of an IP block
+or a guaranteed fix. The bot remains hosted on Railway; no account cookies are needed.
+
+Set `INSTAGRAM_PROXY_URL` in Railway Variables to an operator-owned proxy URL,
+for example `http://USERNAME:PASSWORD@HOST:PORT` (percent-encode credentials).
+HTTP, HTTPS, SOCKS5 and SOCKS5H are accepted. Invalid configuration fails with
+`INSTAGRAM_PROXY_CONFIG_INVALID`, without logging the value. Empty/unset keeps
+the existing route. Never set global HTTP_PROXY/HTTPS_PROXY for this test.
+
+Only Instagram yt-dlp metadata, all public fallback requests, and its CDN media
+transfer use the proxy. TikTok, file uploads, Telegram and OpenRouter retain
+their existing behavior. Existing request and transfer timeouts remain in force;
+no extra retry or automatic proxy rotation is added. Use a provider sticky
+session so extraction and transfer share an egress IP. Full video traffic is
+billed by a bandwidth-based provider, not just metadata requests.
+
+Candidate for a small operator-run test: Decodo residential proxy, sticky session.
+Official trial page advertises 3 days and requires a payment card; it does not
+state an exact trial bandwidth allowance. Confirm the allowance and renewal
+conditions in the dashboard before activation. No subscription was purchased.
+Sources: https://decodo.com/proxies/free-trial and
+https://decodo.com/proxies/residential-proxies/pricing .
+Implementation uses the installed libraries' documented proxy support, without
+copying provider code: https://curl-cffi.readthedocs.io/en/latest/quick_start.html
+and https://github.com/yt-dlp/yt-dlp#network-options .
+
+After setting the variable and deployment, send DXRR2sziOG_ and DeJRGZmsFN5 to
+the bot once each. Check `instagram_network_route route=proxy`, metadata success
+or `instagram_public_stage_ok`, followed by media download success and actual
+Telegram delivery. HTTP 407 / `INSTAGRAM_PROXY_AUTH_REQUIRED` means proxy
+authentication failed; stage `_transport_error` / `_timeout` requires checking
+proxy connectivity. A valid proxy can still return Instagram login/error codes.
+Do not regard unit tests or proxy configuration alone as production success.
+Remove the variable to stop proxy traffic and restore the prior route.
+
+Validation: 366 tests passed; syntax/import, focused lint and diff checks passed.
+No real proxy credentials were available, so residential egress and Railway
+delivery remain unverified. Decodo's listed PAYG price is $4/GB plus applicable
+VAT, bought through Wallet in 1GB increments; full media traffic must be budgeted.

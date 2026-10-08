@@ -91,6 +91,8 @@ def classify_ytdlp_error(stderr: str, platform: str) -> str:
     if "timed out" in s or "timeout" in s:
         return "DOWNLOAD_TIMEOUT"
     if platform == "instagram":
+        if any(m in s for m in ("proxy authentication required", "http error 407", "tunnel connection failed: 407")):
+            return "INSTAGRAM_PROXY_AUTH_REQUIRED"
         # yt-dlp's generic advice contains the word cookies even for extractor bugs.
         if "requested content is not available, rate-limit reached or login required" in s:
             return "INSTAGRAM_ACCESS_FAILED"
@@ -177,6 +179,16 @@ class DownloaderService:
 
         url = self._validate(url)
         platform = self._parse_source(url)
+        proxy_options = []
+        if platform == "instagram":
+            from app.pipeline.instagram_proxy import instagram_proxy_url, InstagramProxyConfigError
+            try:
+                proxy = instagram_proxy_url()
+            except InstagramProxyConfigError:
+                raise StructuredDownloadError("INSTAGRAM_PROXY_CONFIG_INVALID",
+                                              "Instagram proxy configuration is invalid") from None
+            proxy_options = ["--proxy", proxy] if proxy else []
+            logger.info("instagram_network_route", route="proxy" if proxy else "direct")
         cookie_file = _cookie_file_for(platform)
         info_file = None
         # A configured Instagram session should not first hit the anonymous gate.
@@ -194,6 +206,7 @@ class DownloaderService:
                 info = await self._run_ytdlp(
                     [self._ytdlp_path, "--dump-json", "--no-warnings", "--no-playlist",
                      *metadata_options,
+                     *proxy_options,
                      *(["--cookies", str(cookie_file)] if use_cookies else []), url],
                     timeout=60,
                 )
@@ -273,6 +286,7 @@ class DownloaderService:
                 self._ytdlp_path,
                 "--no-warnings",
                 "--no-playlist",
+                *proxy_options,
                 "--merge-output-format", "mp4",
                 "--no-mtime",
                 "--max-filesize", str(max_size_mb * 1024 * 1024),

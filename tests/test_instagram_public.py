@@ -250,7 +250,12 @@ def test_disallowed_media_url(url):
 
 
 @pytest.mark.parametrize('path', ['mobile', 'embed_after_mobile', 'embed_after_oembed', 'graphql', 'failed_graphql'])
-async def test_pipeline_order(monkeypatch, path):
+@pytest.mark.parametrize('proxy', [None, 'http://test-user:test-pass@proxy.example:8000'])
+async def test_pipeline_order(monkeypatch, path, proxy):
+    if proxy:
+        monkeypatch.setenv('INSTAGRAM_PROXY_URL', proxy)
+    else:
+        monkeypatch.delenv('INSTAGRAM_PROXY_URL', raising=False)
     mobile = response({'items': payload()['data']['xdt_api__v1__media__shortcode__web_info']['items']})
     responses = [response({'media_id': '123'}) if path != 'embed_after_oembed' else response({})]
     responses.append(mobile if path == 'mobile' else response({'items': []}))
@@ -264,6 +269,7 @@ async def test_pipeline_order(monkeypatch, path):
     session = PublicSession(responses)
     def factory(**kwargs):
         assert kwargs['allow_redirects'] is False
+        assert kwargs.get('proxy') == proxy
         return session
     monkeypatch.setattr(public, 'AsyncSession', factory)
     if path == 'failed_graphql':

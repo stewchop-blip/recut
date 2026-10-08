@@ -2,6 +2,7 @@
 
 import logging
 import sys
+from urllib.parse import unquote, urlsplit
 from typing import Any
 
 import structlog
@@ -30,6 +31,16 @@ def mask_secrets_processor(logger: Any, method_name: str, event_dict: EventDict)
                settings.webhook_secret, settings.database_url,
                os.getenv("TIKTOK_COOKIES_B64", ""), os.getenv("INSTAGRAM_COOKIES_B64", "")]
     sensitive_keys.update({"cookie", "credential"})
+    proxy = os.getenv("INSTAGRAM_PROXY_URL", "").strip()
+    secrets.append(proxy)
+    sensitive_keys.update({"proxy_url", "proxy_auth"})
+    try:
+        parsed_proxy = urlsplit(proxy)
+        for component in (parsed_proxy.username, parsed_proxy.password):
+            if component:
+                secrets.extend((component, unquote(component)))
+    except ValueError:
+        pass
 
     def redact(value: Any, key: str = "") -> Any:
         if any(s in key.lower() for s in sensitive_keys):

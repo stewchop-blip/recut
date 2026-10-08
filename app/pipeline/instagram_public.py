@@ -340,8 +340,13 @@ async def extract_public_video(url: str) -> dict:
             or parsed.username or parsed.port not in {None, 443}):
         raise PublicMetadataError("unsupported_post")
     shortcode = match[1]
+    from app.pipeline.instagram_proxy import instagram_proxy_url, InstagramProxyConfigError
+    try:
+        proxy = instagram_proxy_url()
+    except InstagramProxyConfigError:
+        raise PublicMetadataError("instagram_proxy_config_invalid") from None
     async with AsyncSession(impersonate="chrome", timeout=REQUEST_TIMEOUT,
-                            allow_redirects=False) as session:
+                            allow_redirects=False, **({"proxy": proxy} if proxy else {})) as session:
         try:
             media_id = await public_stage("oembed", lambda: public_oembed(session, shortcode))
         except PublicMetadataError:
