@@ -258,6 +258,7 @@ async def test_pipeline_order(monkeypatch, path):
         responses.append(response(text=embed_html({'gql_data': payload()['data']}))
             if path.startswith('embed') else response(text='login'))
     if 'graphql' in path:
+        responses.append(response(text='login'))
         responses.extend([response(text='["LSD",[],{"token":"test"}]'),
             response(payload() if path == 'graphql' else {'errors': [{'code': 1675004, 'message': 'SECRET'}]})])
     session = PublicSession(responses)
@@ -273,7 +274,7 @@ async def test_pipeline_order(monkeypatch, path):
     expected = ['https://i.instagram.com/api/v1/oembed/']
     expected.append('https://i.instagram.com/api/v1/media/' + ('108252' if path == 'embed_after_oembed' else '123') + '/info/')
     if path != 'mobile': expected.append('https://www.instagram.com/p/abc/embed/captioned/')
-    if 'graphql' in path: expected.extend(['https://www.instagram.com/', 'https://www.instagram.com/api/graphql'])
+    if 'graphql' in path: expected.extend(['https://www.instagram.com/p/abc/', 'https://www.instagram.com/', 'https://www.instagram.com/api/graphql'])
     assert session.calls == expected
 
 
@@ -377,11 +378,92 @@ async def test_oembed_401_does_not_skip_mobile(monkeypatch):
 
 async def test_railway_failure_chain_reaches_graphql(monkeypatch):
     session = PublicSession([response(status=401), response(status=401),
-        redirect('/accounts/login/?next=SECRET'),
+        redirect('/accounts/login/?next=SECRET'), response(text='login'),
         response(text='["LSD",[],{"token":"test"}]'),
         response({'errors': [{'code': 1675004, 'message': 'SECRET'}]})])
     monkeypatch.setattr(public, 'AsyncSession', lambda **kwargs: session)
     with pytest.raises(public.PublicMetadataError, match='^graphql_errors_1675004$'):
         await public.extract_public_video('https://www.instagram.com/reel/abc/')
-    assert len(session.calls) == 5
+    assert len(session.calls) == 6
     assert not any('/accounts/login' in url for url in session.calls)
+
+
+def post_html(item):
+    return '<script>{"xig_polaris_media":' + json.dumps(item) + '}</script>'
+
+
+@pytest.mark.parametrize('wrapped', [True, False])
+def test_post_html_public_metadata(wrapped):
+    item = payload()['data']['xdt_api__v1__media__shortcode__web_info']['items'][0]
+    item['caption'] = {'text': 'A caption with } braces and "quotes"'}
+    data = {'if_not_gated_logged_out': item} if wrapped else item
+    info = public.post_html_info(post_html(data), 'abc')
+    assert info['id'] == 'abc'
+    assert info['duration'] == 4
+    assert info['title'] == item['caption']['text']
+
+
+@pytest.mark.parametrize('html,reason', [
+    ('<html>login</html>', 'post_html_media_missing'),
+    ('"xig_polaris_media": {bad', 'post_html_parse_failed'),
+    (post_html([]), 'post_html_invalid_media'),
+    (post_html({'if_not_gated_logged_out': None}), 'post_html_gated'),
+    (post_html({'code': 'abc', 'image_versions2': {'url': 'SECRET'}}), 'post_html_no_video')])
+def test_post_html_rejects_unavailable_media(html, reason):
+    with pytest.raises(public.PublicMetadataError, match='^' + reason + '$'):
+        public.post_html_info(html, 'abc')
+
+
+@pytest.mark.parametrize('changes', [{'code': 'another'}, {'private': True},
+    {'url': 'https://evil.test/secret'}, {'url': 'https://video.fbcdn.net:8443/secret'}])
+def test_post_html_preserves_identity_privacy_and_cdn_validation(changes):
+    item = payload(**changes)['data']['xdt_api__v1__media__shortcode__web_info']['items'][0]
+    with pytest.raises(public.PublicMetadataError):
+        public.post_html_info(post_html({'if_not_gated_logged_out': item}), 'abc')
+
+
+@pytest.mark.parametrize('status,location,reason', [(403, '', 'post_html_http_403'),
+    (302, '/accounts/login/?SECRET', 'post_html_redirect_login'),
+    (302, 'https://evil.test/?SECRET', 'post_html_http_302'),
+    (302, 'https://www.instagram.com:bad/', 'post_html_http_302')])
+async def test_post_html_http_diagnostics(status, location, reason):
+    session = PublicSession([SimpleNamespace(status_code=status, headers={'Location': location})])
+    with pytest.raises(public.PublicMetadataError, match='^' + reason + '$'):
+        await public.public_post_html(session, 'abc')
+    assert len(session.calls) == 1
+
+
+async def test_post_html_after_railway_login_redirect(monkeypatch):
+    item = payload()['data']['xdt_api__v1__media__shortcode__web_info']['items'][0]
+    session = PublicSession([response(status=401), response(status=401),
+        redirect('/accounts/login/?next=SECRET'),
+        response(text=post_html({'if_not_gated_logged_out': item}))])
+    monkeypatch.setattr(public, 'AsyncSession', lambda **kwargs: session)
+    assert (await public.extract_public_video('https://www.instagram.com/reel/abc/'))['id'] == 'abc'
+    assert session.calls[-1] == 'https://www.instagram.com/p/abc/'
+    assert not any('graphql' in url for url in session.calls)
+
+
+@pytest.mark.parametrize('attribute,seconds', [('PT98.520813S', 98.520813),
+    ('PT1H2M3.5S', 3723.5), ('PT2M', 120), ('PT', None), ('PT0S', None),
+    ('PTnanS', None), ('PT-1S', None)])
+def test_dash_duration(attribute, seconds):
+    assert public.dash_duration('<MPD mediaPresentationDuration="' + attribute + '"/>') == seconds
+
+
+async def test_post_html_dash_duration_enforces_download_limit(tmp_path, monkeypatch):
+    item = payload()['data']['xdt_api__v1__media__shortcode__web_info']['items'][0]
+    item.pop('video_duration')
+    item['video_dash_manifest'] = '<MPD mediaPresentationDuration="PT98.520813S"/>'
+    info = public.post_html_info(post_html({'if_not_gated_logged_out': item}), 'abc')
+    assert info['duration'] == 98.520813
+    svc = DownloaderService()
+    async def extract(url): return info
+    async def run(args, **kwargs):
+        assert '--dump-json' in args, 'Oversized-duration media must not be transferred'
+        raise URLDownloadError('Login required')
+    monkeypatch.setattr(public, 'extract_public_video', extract)
+    monkeypatch.setattr(svc, '_run_ytdlp', run)
+    from app.pipeline.url_downloader import VideoTooLongError
+    with pytest.raises(VideoTooLongError):
+        await svc.download('https://www.instagram.com/reel/abc/', tmp_path, max_duration_seconds=90)

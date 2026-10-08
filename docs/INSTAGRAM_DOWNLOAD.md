@@ -245,3 +245,54 @@ verification remained enabled and no production certificate settings changed.
 
 Follow-up validation: 314 tests passed; syntax/import checks and diff whitespace
 checks passed. No account cookies, secrets or infrastructure files were added.
+
+### Follow-up: Railway job 360 — confirmed embed login wall
+
+The last deployed version did run. For DeJRGZmsFN5 it returned:
+`oembed_http_401` -> ID derived from shortcode -> `mobile_info_http_401` ->
+`embed_redirect_login` -> `graphql_errors_1675004`. The embed 302 is now known
+to be a login redirect, not an unhandled canonical transition. This establishes
+that those anonymous paths did not expose this Reel from that Railway request;
+it does not establish a permanent block of the entire IP or every public path.
+
+Add a separate public logged-out post HTML stage **after embed, before GraphQL**.
+GET `https://www.instagram.com/p/{shortcode}/` using a search-crawler user-agent
+and consume only its inline `xig_polaris_media.if_not_gated_logged_out` media
+object (or the equivalent direct media node). This is not another GraphQL header
+or doc_id variant. The response contains actual video_versions, not just an
+OpenGraph preview image. Keep existing shortcode/privacy/CDN checks and format
+quality selection. A null gated node is rejected; no account gate is crossed.
+No redirect is followed, no network request is made for a returned manifest.
+The stage has the same 10-second request / 12-second wall-clock limits as other
+public stages. Total fallback bound is now 90 seconds for all five public stages.
+
+Some HTML media objects omit video_duration. Read the finite ISO time duration
+attribute from the inline video_dash_manifest so the existing pre-transfer
+length check still applies. For the reported Reel this is PT98.520813S. An absent
+or invalid duration stays unknown, as in the existing metadata mechanisms; file
+size and transfer timeout limits always remain active.
+
+New diagnostics: `post_html_http_*`, `post_html_redirect_login`,
+`post_html_media_missing`, `post_html_parse_failed`, `post_html_invalid_media`,
+`post_html_gated`, `post_html_no_video`. Stage/HTTP classification is logged,
+never arbitrary response text, signed URLs, tracking values or manifest contents.
+Existing GraphQL remains the last attempt, unchanged.
+
+Source review: https://github.com/inkitori/igembed/blob/main/worker.js uses this
+public HTML schema and request route. GitHub reported no declared repository
+license on review. No source code, parser, dependencies or Worker infrastructure
+from that repository were copied. ReCut independently reads the observed JSON
+schema with the standard-library JSON decoder and its existing media adapter.
+Do not adopt the source comments' claims of stability or universal anonymous access.
+
+Live local verification: the post HTML returned HTTP 200, a matching public
+shortcode and three video_versions. With the prior oEmbed/mobile/embed failures
+injected, the real HTML fallback and existing --load-info-json transfer downloaded
+16,493,650 bytes; ffprobe confirmed 720x1280 video, audio and 98.635510 seconds.
+Only the verification command used system CA via --compat-options no-certifi;
+TLS validation stayed enabled, with no production trust changes. Production
+behavior of this new stage still requires a Railway bot request after auto-deploy.
+
+Validation of the post HTML addition: 338 tests passed, including staged failure
+transitions, identity/privacy/CDN rejection, gated HTML, and DASH-duration limits.
+Syntax/import and diff checks passed; no secrets or infrastructure changes added.

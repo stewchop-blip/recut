@@ -221,6 +221,66 @@ async def public_embed(session, shortcode):
         url = target
 
 
+def dash_duration(manifest):
+    """Read only the MPD duration attribute; never fetch manifest URLs."""
+    if not isinstance(manifest, str) or len(manifest) > 1_000_000:
+        return None
+    number = r"(\d{1,9}(?:\.\d{1,9})?)"
+    match = re.search(r"\bmediaPresentationDuration\s*=\s*['\"]PT(?:"
+                      + number + r"H)?(?:" + number + r"M)?(?:" + number + r"S)?['\"]", manifest)
+    if not match or not any(match.groups()):
+        return None
+    duration = sum(float(value or 0) * unit for value, unit in zip(match.groups(), (3600, 60, 1)))
+    return duration if duration > 0 else None
+
+
+def post_html_info(html, shortcode):
+    """Read the public media node rendered into the logged-out post page."""
+    if len(html) > 5_000_000:
+        raise PublicMetadataError("post_html_parse_failed")
+    match = re.search(r'"xig_polaris_media"\s*:\s*', html)
+    if not match:
+        raise PublicMetadataError("post_html_media_missing")
+    try:
+        wrapper, _ = json.JSONDecoder().raw_decode(html[match.end():])
+    except ValueError:
+        raise PublicMetadataError("post_html_parse_failed") from None
+    if not isinstance(wrapper, dict):
+        raise PublicMetadataError("post_html_invalid_media")
+    if "if_not_gated_logged_out" in wrapper:
+        item = wrapper["if_not_gated_logged_out"]
+        if not isinstance(item, dict):
+            raise PublicMetadataError("post_html_gated")
+    else:
+        item = wrapper
+    if not item.get("video_versions"):
+        raise PublicMetadataError("post_html_no_video")
+    if not item.get("video_duration"):
+        item = {**item, "video_duration": dash_duration(item.get("video_dash_manifest"))}
+    return video_info({"data": {"xdt_api__v1__media__shortcode__web_info":
+                              {"items": [item]}}}, shortcode)
+
+
+async def public_post_html(session, shortcode):
+    response = await session.get(f"https://www.instagram.com/p/{shortcode}/",
+        headers={"User-Agent": "Googlebot/2.1 (+http://www.google.com/bot.html)",
+                 "Accept": "text/html", "Accept-Language": "en-US,en;q=0.9"},
+        timeout=REQUEST_TIMEOUT)
+    if response.status_code in {301, 302, 303, 307, 308}:
+        # Diagnose only; this stage never follows a redirect or logs Location.
+        try:
+            target = urlsplit(urljoin(f"https://www.instagram.com/p/{shortcode}/",
+                                     response.headers.get("Location", "")))
+        except ValueError:
+            target = None
+        if (target and target.hostname == "www.instagram.com"
+                and target.path.startswith("/accounts/login")):
+            raise PublicMetadataError("post_html_redirect_login")
+    if response.status_code != 200:
+        raise PublicMetadataError(f"post_html_http_{response.status_code}")
+    return post_html_info(response.text, shortcode)
+
+
 async def public_graphql(session, shortcode):
     home = await public_homepage(session)
     token = re.search(r'\["LSD",\[\],\{"token":"([^"]+)"', home.text)
@@ -294,6 +354,10 @@ async def extract_public_video(url: str) -> dict:
             pass
         try:
             return await public_stage("embed", lambda: public_embed(session, shortcode))
+        except PublicMetadataError:
+            pass
+        try:
+            return await public_stage("post_html", lambda: public_post_html(session, shortcode))
         except PublicMetadataError:
             pass
         return await public_stage("graphql", lambda: public_graphql(session, shortcode))

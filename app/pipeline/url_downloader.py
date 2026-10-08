@@ -222,7 +222,7 @@ class DownloaderService:
                     from app.pipeline.instagram_public import extract_public_video, PublicMetadataError
                     logger.info("instagram_public_fallback_start")
                     try:
-                        info = [await asyncio.wait_for(extract_public_video(url), timeout=75)]
+                        info = [await asyncio.wait_for(extract_public_video(url), timeout=90)]
                         logger.info("instagram_public_fallback_ok")
                     except Exception as fallback_error:
                         logger.warning("instagram_public_fallback_failed",
