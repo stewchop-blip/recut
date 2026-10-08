@@ -172,14 +172,53 @@ def embed_info(html, shortcode):
     raise PublicMetadataError("embed_parse_failed")
 
 
+def shortcode_media_id(shortcode):
+    """Instagram shortcodes encode the media PK as a URL-safe base-64 integer."""
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,28}", shortcode):
+        raise PublicMetadataError("shortcode_id_invalid")
+    media_id = 0
+    # Extended links append extra information after the 11-character media code.
+    for char in shortcode[:11]:
+        media_id = media_id * 64 + alphabet.index(char)
+    if not media_id:
+        raise PublicMetadataError("shortcode_id_invalid")
+    return str(media_id)
+
+
 async def public_embed(session, shortcode):
-    response = await session.get(
-        f"https://www.instagram.com/p/{shortcode}/embed/captioned/",
-        headers={"Accept": "text/html", "Accept-Language": "en-US,en;q=0.9"},
-        timeout=REQUEST_TIMEOUT)
-    if response.status_code != 200:
-        raise PublicMetadataError(f"embed_http_{response.status_code}")
-    return embed_info(response.text, shortcode)
+    url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
+    for attempt in range(3):
+        response = await session.get(url,
+            headers={"Accept": "text/html", "Accept-Language": "en-US,en;q=0.9"},
+            timeout=REQUEST_TIMEOUT)
+        if response.status_code not in {301, 302, 303, 307, 308}:
+            if response.status_code != 200:
+                raise PublicMetadataError(f"embed_http_{response.status_code}")
+            return embed_info(response.text, shortcode)
+        location = response.headers.get("Location", "")
+        try:
+            target = urljoin(url, location)
+            parsed = urlsplit(target)
+            allowed_origin = (location and parsed.scheme == "https"
+                and parsed.hostname == "www.instagram.com" and not parsed.username
+                and not parsed.password and parsed.port in {None, 443})
+        except ValueError:
+            allowed_origin = False
+        if not allowed_origin:
+            raise PublicMetadataError("embed_redirect_disallowed")
+        if parsed.path.startswith("/accounts/login"):
+            raise PublicMetadataError("embed_redirect_login")
+        if parsed.path.startswith(("/challenge", "/accounts/suspended")):
+            raise PublicMetadataError("embed_redirect_challenge")
+        if not re.fullmatch(r"/(?:p|reel|reels|tv)/" + re.escape(shortcode)
+                            + r"(?:/embed(?:/captioned)?)?/?", parsed.path):
+            raise PublicMetadataError("embed_redirect_path_disallowed")
+        logger.info("instagram_embed_redirect", status=response.status_code,
+                    target_kind="embed" if "/embed" in parsed.path else "post")
+        if attempt == 2:
+            raise PublicMetadataError("embed_redirect_limit")
+        url = target
 
 
 async def public_graphql(session, shortcode):
@@ -243,18 +282,16 @@ async def extract_public_video(url: str) -> dict:
     shortcode = match[1]
     async with AsyncSession(impersonate="chrome", timeout=REQUEST_TIMEOUT,
                             allow_redirects=False) as session:
-        media_id = None
         try:
             media_id = await public_stage("oembed", lambda: public_oembed(session, shortcode))
         except PublicMetadataError:
+            # oEmbed authentication must not prevent the independent mobile attempt.
+            media_id = shortcode_media_id(shortcode)
+            logger.info("instagram_public_media_id", source="shortcode")
+        try:
+            return await public_stage("mobile_info", lambda: mobile_info(session, media_id, shortcode))
+        except PublicMetadataError:
             pass
-        if media_id:
-            try:
-                return await public_stage("mobile_info", lambda: mobile_info(session, media_id, shortcode))
-            except PublicMetadataError:
-                pass
-        else:
-            logger.info("instagram_public_stage_skipped", stage="mobile_info", reason="oembed_no_media_id")
         try:
             return await public_stage("embed", lambda: public_embed(session, shortcode))
         except PublicMetadataError:

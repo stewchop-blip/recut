@@ -201,3 +201,47 @@ Railway runtime or Telegram delivery verification.
 Validation: 293 tests passed, including new fallback and diagnostic cases. Syntax compilation and
 focused undefined/unused import checks passed. The suite emitted existing datetime
 deprecations and an unrelated SQLite test-thread cleanup warning; no failed tests.
+
+### Follow-up: Railway job 358 (2026-10-08)
+
+The deployed staged code ran for DeJRGZmsFN5. Actual reasons:
+`oembed_http_401` -> mobile info skipped -> `embed_http_302` ->
+`graphql_errors_1675004`. The previous log did not record the embed redirect
+category, so its destination is unknown. This does not establish an IP block.
+A startup Telegram getUpdates conflict also appeared; that is separate from the
+Instagram request, which reached all logged metadata stages.
+
+Fix two concrete limitations of the adapter:
+- When oEmbed fails, derive the numeric media PK from the shortcode and make the
+  independent mobile info attempt once. This is the standard Instagram ID codec,
+  cross-checked against instagrapi `media_pk_from_code` and its documented examples:
+  https://github.com/subzeroid/instagrapi/blob/master/instagrapi/mixins/media.py
+  In the local live response, decoding DeJRGZmsFN5 gave 4001804950495581049,
+  matching oEmbed's numeric PK. No owner ID or authentication is needed to compute it.
+- Follow at most two embed redirects within HTTPS www.instagram.com, restricted
+  to the same post's canonical/embed paths. Reject external origins, userinfo,
+  custom ports, unrelated post IDs and paths. Keep the existing 12-second total
+  embed-stage bound. A login redirect ends immediately with `embed_redirect_login`;
+  challenge/suspension gives `embed_redirect_challenge`. Allowed transitions log
+  only HTTP status and `target_kind=post|embed`, never Location or its query.
+  `embed_redirect_disallowed`, `embed_redirect_path_disallowed` and
+  `embed_redirect_limit` distinguish unsafe targets and loops.
+
+GraphQL request shape/doc_id, headers, CDN validation, transfer limits and
+infrastructure are unchanged. Login redirects are not treated as downloadable
+media or followed to an account sign-in page. These changes enable previously
+skipped attempts; they do not guarantee anonymous access from Railway.
+
+Local anonymous verification of DeJRGZmsFN5 returned oEmbed HTTP 200, mobile info
+HTTP 403, and embed HTTP 200 with usable metadata (duration 98.52 seconds). Thus
+this Reel was available from the verification environment while Railway reported
+401/302. The next production attempt must establish whether its redirect is a
+canonical transition or a login wall and whether derived-ID mobile info works.
+
+The full local fallback transfer also succeeded for DeJRGZmsFN5: 16,493,650 bytes,
+720x1280 video with audio, ffprobe duration 98.635510 seconds. As before, only the
+verification command used the system CA via `--compat-options no-certifi`; TLS
+verification remained enabled and no production certificate settings changed.
+
+Follow-up validation: 314 tests passed; syntax/import checks and diff whitespace
+checks passed. No account cookies, secrets or infrastructure files were added.

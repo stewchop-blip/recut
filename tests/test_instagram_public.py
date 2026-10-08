@@ -146,7 +146,7 @@ async def test_anonymous_session_tokens_are_forwarded(monkeypatch):
 
 
 def response(data=None, status=200, text=''):
-    return SimpleNamespace(status_code=status, text=text, json=lambda: data)
+    return SimpleNamespace(status_code=status, text=text, headers={}, json=lambda: data)
 
 
 def embed_html(context):
@@ -191,7 +191,7 @@ async def test_oembed_bad_payload(data, reason):
         await public.public_oembed(PublicSession([response(data)]), 'abc')
 
 
-@pytest.mark.parametrize('stage,status', [('oembed', 403), ('mobile_info', 401), ('embed', 302)])
+@pytest.mark.parametrize('stage,status', [('oembed', 403), ('mobile_info', 401), ('embed', 403)])
 async def test_stage_http_reason(stage, status):
     session = PublicSession([response(status=status)])
     with pytest.raises(public.PublicMetadataError, match=f'{stage}_http_{status}'):
@@ -253,8 +253,7 @@ def test_disallowed_media_url(url):
 async def test_pipeline_order(monkeypatch, path):
     mobile = response({'items': payload()['data']['xdt_api__v1__media__shortcode__web_info']['items']})
     responses = [response({'media_id': '123'}) if path != 'embed_after_oembed' else response({})]
-    if path != 'embed_after_oembed':
-        responses.append(mobile if path == 'mobile' else response({'items': []}))
+    responses.append(mobile if path == 'mobile' else response({'items': []}))
     if path != 'mobile':
         responses.append(response(text=embed_html({'gql_data': payload()['data']}))
             if path.startswith('embed') else response(text='login'))
@@ -272,7 +271,7 @@ async def test_pipeline_order(monkeypatch, path):
     else:
         assert (await public.extract_public_video('https://www.instagram.com/reel/abc/'))['id'] == 'abc'
     expected = ['https://i.instagram.com/api/v1/oembed/']
-    if path != 'embed_after_oembed': expected.append('https://i.instagram.com/api/v1/media/123/info/')
+    expected.append('https://i.instagram.com/api/v1/media/' + ('108252' if path == 'embed_after_oembed' else '123') + '/info/')
     if path != 'mobile': expected.append('https://www.instagram.com/p/abc/embed/captioned/')
     if 'graphql' in path: expected.extend(['https://www.instagram.com/', 'https://www.instagram.com/api/graphql'])
     assert session.calls == expected
@@ -315,3 +314,74 @@ async def test_non_json_oembed_is_safe():
             return SimpleNamespace(status_code=200, json=invalid)
     with pytest.raises(public.PublicMetadataError, match='^oembed_not_json$'):
         await public.public_oembed(Session([]), 'abc')
+
+
+@pytest.mark.parametrize('code,pk', [('B1LbfVPlwIA', '2110901750722920960'),
+    ('B-fKL9qpeab', '2278584739065882267'),
+    ('CCQQsCXjOaBfS3I2PppqsNkxElV', '2346448800803776129')])
+def test_shortcode_media_id_known_examples(code, pk):
+    assert public.shortcode_media_id(code) == pk
+
+
+@pytest.mark.parametrize('code', ['', 'AAAA', '../bad', 'abc?secret'])
+def test_invalid_shortcode_media_id(code):
+    with pytest.raises(public.PublicMetadataError, match='shortcode_id_invalid'):
+        public.shortcode_media_id(code)
+
+
+def redirect(location):
+    return SimpleNamespace(status_code=302, headers={'Location': location})
+
+
+async def test_embed_follows_bounded_canonical_redirect():
+    session = PublicSession([redirect('/reel/abc/embed/captioned/?secret=unused'),
+        response(text=embed_html({'gql_data': payload()['data']}))])
+    assert (await public.public_embed(session, 'abc'))['id'] == 'abc'
+    assert session.calls == ['https://www.instagram.com/p/abc/embed/captioned/',
+                            'https://www.instagram.com/reel/abc/embed/captioned/?secret=unused']
+
+
+@pytest.mark.parametrize('location,reason', [
+    ('https://evil.test/path?SECRET', 'embed_redirect_disallowed'),
+    ('http://www.instagram.com/p/abc/embed/', 'embed_redirect_disallowed'),
+    ('https://www.instagram.com:8443/p/abc/embed/', 'embed_redirect_disallowed'),
+    ('https://www.instagram.com:bad/p/abc/embed/', 'embed_redirect_disallowed'),
+    ('https://secret@www.instagram.com/p/abc/embed/', 'embed_redirect_disallowed'),
+    ('', 'embed_redirect_disallowed'),
+    ('/p/another/embed/', 'embed_redirect_path_disallowed'),
+    ('/unrelated/?SECRET', 'embed_redirect_path_disallowed'),
+    ('/accounts/login/?next=SECRET', 'embed_redirect_login'),
+    ('/challenge/SECRET', 'embed_redirect_challenge')])
+async def test_embed_redirect_diagnostics_safe(location, reason):
+    session = PublicSession([redirect(location)])
+    with pytest.raises(public.PublicMetadataError, match='^' + reason + '$'):
+        await public.public_embed(session, 'abc')
+    assert len(session.calls) == 1
+
+
+async def test_embed_redirect_loop_is_bounded():
+    session = PublicSession([redirect('/p/abc/embed/')] * 3)
+    with pytest.raises(public.PublicMetadataError, match='embed_redirect_limit'):
+        await public.public_embed(session, 'abc')
+    assert len(session.calls) == 3
+
+
+async def test_oembed_401_does_not_skip_mobile(monkeypatch):
+    session = PublicSession([response(status=401), response({'items':
+        payload()['data']['xdt_api__v1__media__shortcode__web_info']['items']})])
+    monkeypatch.setattr(public, 'AsyncSession', lambda **kwargs: session)
+    assert (await public.extract_public_video('https://www.instagram.com/reel/abc/'))['id'] == 'abc'
+    assert session.calls == ['https://i.instagram.com/api/v1/oembed/',
+                            'https://i.instagram.com/api/v1/media/108252/info/']
+
+
+async def test_railway_failure_chain_reaches_graphql(monkeypatch):
+    session = PublicSession([response(status=401), response(status=401),
+        redirect('/accounts/login/?next=SECRET'),
+        response(text='["LSD",[],{"token":"test"}]'),
+        response({'errors': [{'code': 1675004, 'message': 'SECRET'}]})])
+    monkeypatch.setattr(public, 'AsyncSession', lambda **kwargs: session)
+    with pytest.raises(public.PublicMetadataError, match='^graphql_errors_1675004$'):
+        await public.extract_public_video('https://www.instagram.com/reel/abc/')
+    assert len(session.calls) == 5
+    assert not any('/accounts/login' in url for url in session.calls)
