@@ -31,7 +31,7 @@ def test_invalid_config_is_safe(value, monkeypatch):
 
 @pytest.mark.parametrize("platform", ["instagram", "tiktok"])
 @pytest.mark.parametrize("fallback", [False, True])
-async def test_route_is_scoped_and_covers_metadata_and_media(tmp_path, monkeypatch, platform, fallback):
+async def test_route_is_scoped_to_metadata_and_media_is_direct(tmp_path, monkeypatch, platform, fallback):
     import app.pipeline.instagram_public as public
     proxy = "http://route-user:route-pass@proxy.example:8000"
     monkeypatch.setenv("INSTAGRAM_PROXY_URL", proxy)
@@ -55,10 +55,10 @@ async def test_route_is_scoped_and_covers_metadata_and_media(tmp_path, monkeypat
            else "https://www.tiktok.com/@test/video/1234567890")
     await service.download(url, tmp_path)
     assert len(calls) == 2
-    for args in calls:
+    for index, args in enumerate(calls):
         assert ("--proxy" in args) == (platform == "instagram")
         if platform == "instagram":
-            assert args[args.index("--proxy") + 1] == proxy
+            assert args[args.index("--proxy") + 1] == (proxy if index == 0 else "")
     assert public_download.await_count == int(fallback and platform == "instagram")
     assert ("--load-info-json" in calls[-1]) == (platform == "instagram")
 

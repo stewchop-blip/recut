@@ -1,0 +1,7 @@
+{
+  "name": "recut-instagram-resolver",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-09",
+  "workers_dev": true,
+  "observability": {"enabled": false}
+}

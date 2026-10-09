@@ -389,3 +389,42 @@ no production TLS configuration changed. Railway validation remains required.
 
 Validation: 376 tests passed (7 existing datetime deprecation warnings).
 Syntax/import, focused lint, diff and changed-file secret-pattern checks passed.
+
+## Cloudflare metadata resolver (2026-10-09)
+
+A limited diagnostic Worker on Cloudflare's official anonymous Playground
+returned `source=post_html`, `ok=true`, `signed_url_received=true` for
+`DXRR2sziOG_`. This confirms metadata access from that Cloudflare preview
+request, not MP4 transfer from Railway or Telegram delivery. It is not a
+permanent deployment. No Cloudflare account/session/API key was available.
+
+The production Worker, deployment instructions and independent direct-CDN
+probe are in `tools/instagram-resolver/`. The independently written Worker
+tries embed, public HTML, then the existing GraphQL 271 route, bounded to four
+six-second requests and two MB per response. The Worker never transfers MP4.
+
+Set `INSTAGRAM_RESOLVER_URL` to your published HTTPS `*.workers.dev/instagram`
+endpoint and the same random `INSTAGRAM_RESOLVER_SECRET` in Worker Secrets and
+Railway Variables. The secret goes in `X-ReCut-Resolver-Secret`, not URL/query.
+No production secret was created, committed or logged. The Python client has
+a 28-second wall-clock bound, 32 KB response cap, no redirects, and validates
+returned identity, source, dimensions, duration and CDN host. It discards
+arbitrary upstream diagnostic text and extra fields.
+
+Order after anonymous yt-dlp auth/access/extraction failure:
+optional resolver -> existing local public extractor if disabled/unavailable ->
+existing `--load-info-json` download. Explicit restrictions/rate-limit errors
+retain the previous behavior. TikTok, Telegram, uploads and database do not
+call the resolver. No startup configuration or new dependencies are required.
+
+**This supersedes the earlier optional proxy section's media routing:**
+`INSTAGRAM_PROXY_URL` now affects extraction only. Instagram MP4 uses
+`--proxy ""` and goes directly from Railway to CDN. No automatic paid video
+proxy retry is added. An IP-bound CDN URL can still fail across egress; the
+independent `probe.py` and real bot request must verify it. Remove resolver
+variables to disable the external route. Run the probe from Railway if possible,
+then send `DXRR2sziOG_` and collect resolver success, file creation, and Telegram
+delivery for the same job. Do not declare production recovery from tests alone.
+
+Validation: 403 Python tests and 26 Worker tests passed. Seven existing datetime
+deprecation warnings. Syntax/import, focused lint and diff checks passed.

@@ -231,18 +231,25 @@ class DownloaderService:
                 elif platform == "instagram" and not use_cookies and code in {
                     "INSTAGRAM_AUTH_REQUIRED", "INSTAGRAM_ACCESS_FAILED", "INSTAGRAM_EXTRACTOR_FAILED",
                 }:
-                    # Bounded anonymous stages; GraphQL is the last metadata fallback.
+                    # Configured external egress first, avoiding the full local
+                    # stage ladder when Railway cannot obtain public metadata.
+                    from app.pipeline.instagram_resolver import extract_resolved_video
+                    resolved = await extract_resolved_video(url)
+                    if resolved is not None:
+                        info = [resolved]
+                    # If disabled/unavailable, retain every existing local stage.
                     from app.pipeline.instagram_public import extract_public_video, PublicMetadataError
-                    logger.info("instagram_public_fallback_start")
-                    try:
-                        info = [await asyncio.wait_for(extract_public_video(url), timeout=90)]
-                        logger.info("instagram_public_fallback_ok")
-                    except Exception as fallback_error:
-                        logger.warning("instagram_public_fallback_failed",
-                                       error_type=type(fallback_error).__name__,
-                                       reason=str(fallback_error) if isinstance(fallback_error, PublicMetadataError)
-                                       else "transport_or_unexpected_error")
-                        raise StructuredDownloadError(code, getattr(e, "detail", str(e))) from e
+                    if resolved is None:
+                        logger.info("instagram_public_fallback_start")
+                        try:
+                            info = [await asyncio.wait_for(extract_public_video(url), timeout=90)]
+                            logger.info("instagram_public_fallback_ok")
+                        except Exception as fallback_error:
+                            logger.warning("instagram_public_fallback_failed",
+                                           error_type=type(fallback_error).__name__,
+                                           reason=str(fallback_error) if isinstance(fallback_error, PublicMetadataError)
+                                           else "transport_or_unexpected_error")
+                            raise StructuredDownloadError(code, getattr(e, "detail", str(e))) from e
                 else:
                     raise StructuredDownloadError(
                         code, getattr(e, "detail", str(e))) from e
@@ -286,7 +293,9 @@ class DownloaderService:
                 self._ytdlp_path,
                 "--no-warnings",
                 "--no-playlist",
-                *proxy_options,
+                # Instagram proxy traffic is metadata-only. The signed CDN URL
+                # is reused below; an empty proxy also disables inherited proxies.
+                *(["--proxy", ""] if platform == "instagram" else []),
                 "--merge-output-format", "mp4",
                 "--no-mtime",
                 "--max-filesize", str(max_size_mb * 1024 * 1024),

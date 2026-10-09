@@ -29,7 +29,8 @@ def mask_secrets_processor(logger: Any, method_name: str, event_dict: EventDict)
     import os
     secrets = [settings.telegram_bot_token, settings.openrouter_api_key,
                settings.webhook_secret, settings.database_url,
-               os.getenv("TIKTOK_COOKIES_B64", ""), os.getenv("INSTAGRAM_COOKIES_B64", "")]
+               os.getenv("TIKTOK_COOKIES_B64", ""), os.getenv("INSTAGRAM_COOKIES_B64", ""),
+               os.getenv("INSTAGRAM_RESOLVER_SECRET", "")]
     sensitive_keys.update({"cookie", "credential"})
     proxy = os.getenv("INSTAGRAM_PROXY_URL", "").strip()
     secrets.append(proxy)
