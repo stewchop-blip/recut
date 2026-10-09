@@ -5,6 +5,7 @@ Independent adapter for undocumented endpoints; see docs/INSTAGRAM_DOWNLOAD.md.
 import asyncio
 import json
 import re
+from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit
 
 from curl_cffi.requests import AsyncSession
@@ -23,7 +24,21 @@ MOBILE_HEADERS = {
     "X-IG-Mapped-Locale": "en_US",
 }
 
-DOC_ID = "27830990013244856"
+@dataclass(frozen=True)
+class GraphQLStrategy:
+    name: str
+    endpoint: str
+    doc_id: str
+    relay_flags: tuple[tuple[str, bool], ...]
+
+
+GRAPHQL_STRATEGIES = (
+    GraphQLStrategy("graphql_media_info_278", "https://www.instagram.com/api/graphql",
+                    "27830990013244856", (("PolarisShortDramaEnabled", False),
+                                          ("PolarisMultiCaptionCarouselEnabled", True))),
+    GraphQLStrategy("graphql_post_root_271", "https://www.instagram.com/graphql/query",
+                    "27128499623469141", (("PolarisAIGMMediaWebLabelEnabled", False),)),
+)
 
 
 class PublicMetadataError(ValueError):
@@ -281,7 +296,7 @@ async def public_post_html(session, shortcode):
     return post_html_info(response.text, shortcode)
 
 
-async def public_graphql(session, shortcode):
+async def public_graphql(session, shortcode, strategy=GRAPHQL_STRATEGIES[0]):
     home = await public_homepage(session)
     token = re.search(r'\["LSD",\[\],\{"token":"([^"]+)"', home.text)
     if not token:
@@ -297,14 +312,14 @@ async def public_graphql(session, shortcode):
         if cookie.name == "csrftoken" and cookie.domain.lstrip(".") in {"instagram.com", "www.instagram.com"}:
             headers["X-CSRFToken"] = cookie.value
             break
-    body = {"lsd": token[1], "doc_id": DOC_ID, "server_timestamps": "true",
+    body = {"lsd": token[1], "doc_id": strategy.doc_id, "server_timestamps": "true",
             "variables": json.dumps({"shortcode": shortcode,
-                "__relay_internal__pv__PolarisShortDramaEnabledrelayprovider": False,
-                "__relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider": True})}
+                **{f"__relay_internal__pv__{name}relayprovider": value
+                   for name, value in strategy.relay_flags}})}
     dtsg = re.search(r'\["DTSG(?:Init|Initial)Data",\[\],\{"token":"([^"]+)"', home.text)
     if dtsg:
         body["fb_dtsg"] = dtsg[1]
-    response = await session.post("https://www.instagram.com/api/graphql", headers=headers, data=body, timeout=REQUEST_TIMEOUT)
+    response = await session.post(strategy.endpoint, headers=headers, data=body, timeout=REQUEST_TIMEOUT)
     if response.status_code != 200:
         raise PublicMetadataError(f"graphql_http_{response.status_code}")
     try:
@@ -316,14 +331,33 @@ async def public_graphql(session, shortcode):
     return video_info(payload, shortcode)
 
 
+_SAFE_REASON = re.compile(
+    r"(?:embed_(?:no_video|parse_failed|redirect_(?:challenge|disallowed|limit|login|path_disallowed))"
+    r"|graphql_(?:data_missing|errors(?:_[0-9]{1,12}){0,3}|invalid_payload|not_json)"
+    r"|homepage_(?:redirect_disallowed|redirect_limit|token_missing)"
+    r"|metadata_(?:identity_or_privacy|items_missing|no_video|schema_unknown)"
+    r"|mobile_info_(?:empty|identity|invalid_payload|not_json)"
+    r"|oembed_(?:no_media_id|invalid_payload|not_json)"
+    r"|post_html_(?:gated|invalid_media|media_missing|no_video|parse_failed|redirect_login)"
+    r"|shortcode_id_invalid"
+    r"|(?:homepage|oembed|mobile_info|embed|post_html|graphql)_http_[1-5][0-9]{2})"
+)
+
+
 async def public_stage(stage, operation):
     logger.info("instagram_public_stage_start", stage=stage)
     try:
         # Total wall-clock bound, including redirects/parsing in a stage.
-        result = await asyncio.wait_for(operation(), timeout=30 if stage == "graphql" else 12)
+        result = await asyncio.wait_for(operation(), timeout=12)
     except PublicMetadataError as error:
-        logger.warning("instagram_public_stage_failed", stage=stage, reason=str(error))
-        raise
+        reason = str(error)
+        # Only locally defined diagnostic vocabulary may enter logs/summary.
+        if not _SAFE_REASON.fullmatch(reason):
+            reason = "unexpected_error"
+        if stage.startswith("graphql_"):
+            reason = stage + "_" + reason.removeprefix("graphql_")
+        logger.warning("instagram_public_stage_failed", stage=stage, reason=reason)
+        raise PublicMetadataError(reason) from None
     except Exception as error:
         reason = f"{stage}_timeout" if isinstance(error, asyncio.TimeoutError) else f"{stage}_transport_error"
         logger.warning("instagram_public_stage_failed", stage=stage, reason=reason)
@@ -347,22 +381,19 @@ async def extract_public_video(url: str) -> dict:
         raise PublicMetadataError("instagram_proxy_config_invalid") from None
     async with AsyncSession(impersonate="chrome", timeout=REQUEST_TIMEOUT,
                             allow_redirects=False, **({"proxy": proxy} if proxy else {})) as session:
-        try:
-            media_id = await public_stage("oembed", lambda: public_oembed(session, shortcode))
-        except PublicMetadataError:
-            # oEmbed authentication must not prevent the independent mobile attempt.
-            media_id = shortcode_media_id(shortcode)
-            logger.info("instagram_public_media_id", source="shortcode")
-        try:
-            return await public_stage("mobile_info", lambda: mobile_info(session, media_id, shortcode))
-        except PublicMetadataError:
-            pass
-        try:
-            return await public_stage("embed", lambda: public_embed(session, shortcode))
-        except PublicMetadataError:
-            pass
-        try:
-            return await public_stage("post_html", lambda: public_post_html(session, shortcode))
-        except PublicMetadataError:
-            pass
-        return await public_stage("graphql", lambda: public_graphql(session, shortcode))
+        # Public web surfaces first; numeric media ID needs no oEmbed request.
+        operations = [
+            ("post_html", lambda: public_post_html(session, shortcode)),
+            ("embed", lambda: public_embed(session, shortcode)),
+            *((strategy.name, lambda strategy=strategy: public_graphql(session, shortcode, strategy))
+              for strategy in GRAPHQL_STRATEGIES),
+            ("mobile_info", lambda: mobile_info(session, shortcode_media_id(shortcode), shortcode)),
+        ]
+        failures = {}
+        for stage, operation in operations:
+            try:
+                return await public_stage(stage, operation)
+            except PublicMetadataError as error:
+                failures[stage] = str(error)
+        logger.warning("instagram_public_fallback_exhausted", attempts=failures)
+        raise PublicMetadataError("public_fallback_exhausted")

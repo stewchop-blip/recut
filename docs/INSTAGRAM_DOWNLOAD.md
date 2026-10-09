@@ -339,3 +339,53 @@ Validation: 366 tests passed; syntax/import, focused lint and diff checks passed
 No real proxy credentials were available, so residential egress and Railway
 delivery remain unverified. Decodo's listed PAYG price is $4/GB plus applicable
 VAT, bought through Wallet in 1GB increments; full media traffic must be budgeted.
+
+### Independent PostRoot GraphQL strategy (October 2026)
+
+Current fallback order after anonymous yt-dlp failure:
+
+1. Googlebot GET `https://www.instagram.com/p/{shortcode}/`.
+2. GET `https://www.instagram.com/p/{shortcode}/embed/captioned/`.
+3. POST `https://www.instagram.com/api/graphql`, doc_id `27830990013244856`,
+   ShortDrama=false and MultiCaptionCarousel=true relay variables.
+4. POST `https://www.instagram.com/graphql/query`, doc_id `27128499623469141`,
+   AIGMMediaWebLabel=false relay variable.
+5. GET `https://i.instagram.com/api/v1/media/{derived_media_id}/info/`.
+
+The new strategy is independently confirmed by Instaloader's current
+`instaloader/structures.py` (`Post._obtain_metadata`), under the MIT license:
+https://github.com/instaloader/instaloader/blob/master/instaloader/structures.py
+https://github.com/instaloader/instaloader/blob/master/LICENSE
+Only the endpoint/query protocol was used; no implementation was copied.
+Existing query 278 remains available. Experimental ActionLoad IDs are not added.
+
+Numeric media ID is derived locally from shortcode; oEmbed is no longer in the
+critical path. Its adapter remains covered for reference. Each GraphQL strategy
+bootstraps anonymous web tokens in the existing session and submits its query
+at most once. Each stage has a 12-second wall-clock bound (including redirects,
+bootstrap and parsing), requests have at most 10 seconds, and the downloader's
+existing total 90-second bound remains. There are no error retries.
+
+GraphQL diagnostics now identify the query, for example
+`graphql_media_info_278_errors_1675004`,
+`graphql_post_root_271_errors_1675004`, or
+`graphql_post_root_271_data_missing`. Exhaustion logs
+`instagram_public_fallback_exhausted` with an `attempts` map of all five stages.
+Only approved fixed reasons, HTTP statuses and numeric error codes enter it;
+arbitrary exceptions, response text, tokens and signed URLs are excluded.
+CDN validation, quality selection and `--load-info-json` transfer are retained.
+
+After automatic Railway deployment, verify its commit SHA, then submit
+`https://www.instagram.com/reel/DXRR2sziOG_/` once. Look for
+`instagram_public_stage_ok stage=graphql_post_root_271` if earlier stages fail,
+then `instagram_public_fallback_ok`, `url_download_file_created`, and actual
+Telegram delivery with audio. If it fails, obtain the complete `attempts` map.
+Unit tests and local metadata access do not establish a Railway fix.
+
+Local live probe of the new query on this run ended in curl timeout (code 28),
+without a usable response; it does not confirm endpoint success or an Instagram
+rejection. A system CA bundle was used for the probe with TLS verification on;
+no production TLS configuration changed. Railway validation remains required.
+
+Validation: 376 tests passed (7 existing datetime deprecation warnings).
+Syntax/import, focused lint, diff and changed-file secret-pattern checks passed.

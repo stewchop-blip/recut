@@ -249,38 +249,43 @@ def test_disallowed_media_url(url):
     assert not public.allowed_media_url(url)
 
 
-@pytest.mark.parametrize('path', ['mobile', 'embed_after_mobile', 'embed_after_oembed', 'graphql', 'failed_graphql'])
+@pytest.mark.parametrize('path', ['post_html', 'embed', 'graphql_278', 'graphql_271', 'mobile', 'exhausted'])
 @pytest.mark.parametrize('proxy', [None, 'http://test-user:test-pass@proxy.example:8000'])
 async def test_pipeline_order(monkeypatch, path, proxy):
     if proxy:
         monkeypatch.setenv('INSTAGRAM_PROXY_URL', proxy)
     else:
         monkeypatch.delenv('INSTAGRAM_PROXY_URL', raising=False)
-    mobile = response({'items': payload()['data']['xdt_api__v1__media__shortcode__web_info']['items']})
-    responses = [response({'media_id': '123'}) if path != 'embed_after_oembed' else response({})]
-    responses.append(mobile if path == 'mobile' else response({'items': []}))
-    if path != 'mobile':
-        responses.append(response(text=embed_html({'gql_data': payload()['data']}))
-            if path.startswith('embed') else response(text='login'))
-    if 'graphql' in path:
-        responses.append(response(text='login'))
-        responses.extend([response(text='["LSD",[],{"token":"test"}]'),
-            response(payload() if path == 'graphql' else {'errors': [{'code': 1675004, 'message': 'SECRET'}]})])
+    item = payload()['data']['xdt_api__v1__media__shortcode__web_info']['items'][0]
+    responses = [response(text=post_html(item)) if path == 'post_html'
+                 else redirect('/accounts/login/?SECRET')]
+    expected = ['https://www.instagram.com/p/abc/']
+    if path != 'post_html':
+        responses.append(response(text=embed_html(item)) if path == 'embed'
+                         else redirect('/accounts/login/?SECRET'))
+        expected.append('https://www.instagram.com/p/abc/embed/captioned/')
+    if path not in {'post_html', 'embed'}:
+        for name, strategy in zip(('graphql_278', 'graphql_271'), public.GRAPHQL_STRATEGIES):
+            responses.extend([response(text='["LSD",[],{"token":"test"}]'),
+                response(payload() if path == name else
+                         {'errors': [{'code': 1675004, 'message': 'SECRET'}]})])
+            expected.extend(['https://www.instagram.com/', strategy.endpoint])
+            if path == name:
+                break
+    if path in {'mobile', 'exhausted'}:
+        responses.append(response({'items': [item]}) if path == 'mobile' else response(status=401))
+        expected.append('https://i.instagram.com/api/v1/media/108252/info/')
     session = PublicSession(responses)
     def factory(**kwargs):
         assert kwargs['allow_redirects'] is False
         assert kwargs.get('proxy') == proxy
         return session
     monkeypatch.setattr(public, 'AsyncSession', factory)
-    if path == 'failed_graphql':
-        with pytest.raises(public.PublicMetadataError, match='^graphql_errors_1675004$'):
+    if path == 'exhausted':
+        with pytest.raises(public.PublicMetadataError, match='^public_fallback_exhausted$'):
             await public.extract_public_video('https://www.instagram.com/reel/abc/')
     else:
         assert (await public.extract_public_video('https://www.instagram.com/reel/abc/'))['id'] == 'abc'
-    expected = ['https://i.instagram.com/api/v1/oembed/']
-    expected.append('https://i.instagram.com/api/v1/media/' + ('108252' if path == 'embed_after_oembed' else '123') + '/info/')
-    if path != 'mobile': expected.append('https://www.instagram.com/p/abc/embed/captioned/')
-    if 'graphql' in path: expected.extend(['https://www.instagram.com/p/abc/', 'https://www.instagram.com/', 'https://www.instagram.com/api/graphql'])
     assert session.calls == expected
 
 
@@ -373,25 +378,29 @@ async def test_embed_redirect_loop_is_bounded():
     assert len(session.calls) == 3
 
 
-async def test_oembed_401_does_not_skip_mobile(monkeypatch):
-    session = PublicSession([response(status=401), response({'items':
-        payload()['data']['xdt_api__v1__media__shortcode__web_info']['items']})])
-    monkeypatch.setattr(public, 'AsyncSession', lambda **kwargs: session)
-    assert (await public.extract_public_video('https://www.instagram.com/reel/abc/'))['id'] == 'abc'
-    assert session.calls == ['https://i.instagram.com/api/v1/oembed/',
-                            'https://i.instagram.com/api/v1/media/108252/info/']
-
-
-async def test_railway_failure_chain_reaches_graphql(monkeypatch):
-    session = PublicSession([response(status=401), response(status=401),
-        redirect('/accounts/login/?next=SECRET'), response(text='login'),
+async def test_railway_failure_summary_is_complete_and_safe(monkeypatch):
+    events = []
+    monkeypatch.setattr(public, 'logger', SimpleNamespace(
+        info=lambda *a, **kw: events.append((a, kw)),
+        warning=lambda *a, **kw: events.append((a, kw))))
+    session = PublicSession([redirect('/accounts/login/?SECRET'),
+        redirect('/accounts/login/?SECRET'),
         response(text='["LSD",[],{"token":"test"}]'),
-        response({'errors': [{'code': 1675004, 'message': 'SECRET'}]})])
+        response({'errors': [{'code': 1675004, 'message': 'SECRET'}]}),
+        response(text='["LSD",[],{"token":"test"}]'),
+        response({'data': None}), response(status=401)])
     monkeypatch.setattr(public, 'AsyncSession', lambda **kwargs: session)
-    with pytest.raises(public.PublicMetadataError, match='^graphql_errors_1675004$'):
+    with pytest.raises(public.PublicMetadataError, match='^public_fallback_exhausted$'):
         await public.extract_public_video('https://www.instagram.com/reel/abc/')
-    assert len(session.calls) == 6
-    assert not any('/accounts/login' in url for url in session.calls)
+    assert events[-1] == (('instagram_public_fallback_exhausted',), {'attempts': {
+        'post_html': 'post_html_redirect_login', 'embed': 'embed_redirect_login',
+        'graphql_media_info_278': 'graphql_media_info_278_errors_1675004',
+        'graphql_post_root_271': 'graphql_post_root_271_data_missing',
+        'mobile_info': 'mobile_info_http_401'}})
+    assert 'SECRET' not in str(events)
+    assert len(session.calls) == 7
+    assert not any('/accounts/login' in url or '/oembed/' in url for url in session.calls)
+
 
 
 def post_html(item):
@@ -439,17 +448,6 @@ async def test_post_html_http_diagnostics(status, location, reason):
     assert len(session.calls) == 1
 
 
-async def test_post_html_after_railway_login_redirect(monkeypatch):
-    item = payload()['data']['xdt_api__v1__media__shortcode__web_info']['items'][0]
-    session = PublicSession([response(status=401), response(status=401),
-        redirect('/accounts/login/?next=SECRET'),
-        response(text=post_html({'if_not_gated_logged_out': item}))])
-    monkeypatch.setattr(public, 'AsyncSession', lambda **kwargs: session)
-    assert (await public.extract_public_video('https://www.instagram.com/reel/abc/'))['id'] == 'abc'
-    assert session.calls[-1] == 'https://www.instagram.com/p/abc/'
-    assert not any('graphql' in url for url in session.calls)
-
-
 @pytest.mark.parametrize('attribute,seconds', [('PT98.520813S', 98.520813),
     ('PT1H2M3.5S', 3723.5), ('PT2M', 120), ('PT', None), ('PT0S', None),
     ('PTnanS', None), ('PT-1S', None)])
@@ -473,3 +471,79 @@ async def test_post_html_dash_duration_enforces_download_limit(tmp_path, monkeyp
     from app.pipeline.url_downloader import VideoTooLongError
     with pytest.raises(VideoTooLongError):
         await svc.download('https://www.instagram.com/reel/abc/', tmp_path, max_duration_seconds=90)
+
+
+@pytest.mark.parametrize('strategy', public.GRAPHQL_STRATEGIES)
+async def test_graphql_request_shape(strategy):
+    class Session(PublicSession):
+        async def post(self, url, headers, data, **kwargs):
+            assert url == strategy.endpoint
+            assert data['doc_id'] == strategy.doc_id
+            expected = {'shortcode': 'abc'}
+            if strategy.name == 'graphql_media_info_278':
+                expected.update({
+                    '__relay_internal__pv__PolarisShortDramaEnabledrelayprovider': False,
+                    '__relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider': True})
+            else:
+                expected['__relay_internal__pv__PolarisAIGMMediaWebLabelEnabledrelayprovider'] = False
+            assert json.loads(data['variables']) == expected
+            assert headers['X-FB-Friendly-Name'] == 'PolarisPostRootQuery'
+            return await super().post(url, headers=headers, data=data, **kwargs)
+    session = Session([response(text='["LSD",[],{"token":"test"}]'), response(payload())])
+    assert (await public.public_graphql(session, 'abc', strategy))['id'] == 'abc'
+
+
+@pytest.mark.parametrize('data,reason', [
+    ({'data': None}, 'data_missing'),
+    ({'data': None, 'errors': [{'message': 'SECRET'}]}, 'errors'),
+    ({'errors': [{'code': 1675004, 'message': 'SECRET'}]}, 'errors_1675004'),
+    (payload(code='another'), 'metadata_identity_or_privacy'),
+    (payload(url='https://video.fbcdn.net.evil.test/SECRET'), 'metadata_no_video')])
+async def test_second_graphql_failure_is_named_and_safe(data, reason):
+    strategy = public.GRAPHQL_STRATEGIES[1]
+    session = PublicSession([response(text='["LSD",[],{"token":"test"}]'), response(data)])
+    with pytest.raises(public.PublicMetadataError, match='^graphql_post_root_271_' + reason + '$'):
+        await public.public_stage(strategy.name, lambda: public.public_graphql(session, 'abc', strategy))
+    assert session.calls.count(strategy.endpoint) == 1
+
+
+async def test_arbitrary_public_exception_is_not_logged(monkeypatch):
+    events = []
+    monkeypatch.setattr(public, 'logger', SimpleNamespace(info=lambda *a, **kw: None,
+        warning=lambda *a, **kw: events.append(kw)))
+    async def operation():
+        raise public.PublicMetadataError('SECRET signed-url token body')
+    with pytest.raises(public.PublicMetadataError, match='^unexpected_error$'):
+        await public.public_stage('embed', operation)
+    assert 'SECRET' not in str(events)
+
+
+async def test_second_graphql_cancellation_stops_pipeline(monkeypatch):
+    calls = []
+    async def stage(name, operation):
+        calls.append(name)
+        if name == 'graphql_post_root_271':
+            raise asyncio.CancelledError()
+        raise public.PublicMetadataError('metadata_no_video')
+    monkeypatch.setattr(public, 'public_stage', stage)
+    monkeypatch.setattr(public, 'AsyncSession', lambda **kwargs: PublicSession([]))
+    with pytest.raises(asyncio.CancelledError):
+        await public.extract_public_video('https://www.instagram.com/reel/abc/')
+    assert calls == ['post_html', 'embed', 'graphql_media_info_278', 'graphql_post_root_271']
+
+
+async def test_all_stages_have_bounded_wall_clock(monkeypatch):
+    budgets = []
+    original = asyncio.wait_for
+    async def bounded(awaitable, timeout):
+        budgets.append(timeout)
+        return await original(awaitable, timeout=0.001)
+    class HangingSession(PublicSession):
+        async def get(self, *args, **kwargs):
+            await asyncio.Event().wait()
+    monkeypatch.setattr(public.asyncio, 'wait_for', bounded)
+    monkeypatch.setattr(public, 'AsyncSession', lambda **kwargs: HangingSession([]))
+    with pytest.raises(public.PublicMetadataError, match='public_fallback_exhausted'):
+        await public.extract_public_video('https://www.instagram.com/reel/abc/')
+    assert budgets == [12] * 5
+    assert sum(budgets) < 90
