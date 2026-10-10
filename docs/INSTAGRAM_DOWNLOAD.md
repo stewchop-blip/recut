@@ -428,3 +428,44 @@ delivery for the same job. Do not declare production recovery from tests alone.
 
 Validation: 403 Python tests and 26 Worker tests passed. Seven existing datetime
 deprecation warnings. Syntax/import, focused lint and diff checks passed.
+
+### Independent last-resort metadata fallback (2026-10-10)
+
+The supplied Railway log shows job 410 failing before processing: yt-dlp login
+redirect, both public HTML surfaces gated, both GraphQL queries returning 1675004,
+and mobile info returning 401. No configured Worker was called. Another doc ID
+cannot be treated as a fix for this server-side access gate.
+
+After the existing optional Worker and local stages fail, ReCut now calls the
+public SnapInsta.nl website metadata endpoint, once, with a 30-second total
+budget. This is a website endpoint, **not a guaranteed supported integration
+API**. Its public client describes the request at https://snapinsta.nl/app.js
+(`fetch-instagram-media`). No third-party source code was copied. The adapter
+uses the existing curl-cffi dependency; no accounts, cookies or secrets needed.
+
+Only the canonical public Instagram URL is submitted, with tracking queries
+removed. Response size is capped at 256 KiB; redirects are rejected. The canonical
+URL and item identity must match the input. Only a single video with an
+explicitly audio-bearing MP4 variant and an HTTPS Instagram CDN URL is accepted.
+Provider proxy downloads, captions, arbitrary headers, filenames, executable
+scripts, carousels and silent high-resolution tracks are not imported. MP4 goes
+through the existing downloader and downstream validation/limits/cleanup.
+TikTok, YouTube, Telegram uploads and successful direct Instagram requests do
+not call this fallback. Disable it with `INSTAGRAM_EXTERNAL_FALLBACK=false`.
+
+Events: `instagram_external_start`, `instagram_external_ok`,
+`instagram_external_no_video`, `instagram_external_failed`; no response contents
+or signed media URLs are logged. A provider failure retains the original
+structured error and terminates the job normally. Cancellation propagates.
+
+Live development probe: DXRR2sziOG_ resolved via the independent provider; its
+signed CDN URL returned HTTP 200, 3,451,476 bytes. FFprobe confirmed video
+1276x720, audio and 16.552971 seconds. DeJRGZmsFN5 returned provider HTTP 403 and
+was correctly rejected. These checks demonstrate a working independent route,
+not universal availability or Railway-to-Telegram delivery. Production success
+requires a completed download/delivery and the new fallback event in Railway.
+
+A second live probe through the new adapter resolved DY2PcmxiBE2 and downloaded
+751,171 bytes, HTTP 200; FFprobe confirmed 576x1024, audio, 15.834603 seconds.
+Both probes used the actual adapter and streamed provider response. Temporary
+probe files were removed after inspection.

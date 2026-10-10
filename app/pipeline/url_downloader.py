@@ -249,7 +249,11 @@ class DownloaderService:
                                            error_type=type(fallback_error).__name__,
                                            reason=str(fallback_error) if isinstance(fallback_error, PublicMetadataError)
                                            else "transport_or_unexpected_error")
-                            raise StructuredDownloadError(code, getattr(e, "detail", str(e))) from e
+                            from app.pipeline.instagram_external import extract_external_video
+                            external = await extract_external_video(url)
+                            if external is None:
+                                raise StructuredDownloadError(code, getattr(e, "detail", str(e))) from e
+                            info = [external]
                 else:
                     raise StructuredDownloadError(
                         code, getattr(e, "detail", str(e))) from e
