@@ -56,6 +56,7 @@ from app.bot.keyboards.inline import (
 from app.core.config import get_settings
 from app.services.overlays.templates import BACKGROUNDS, TITLES
 from app.core.logging import get_logger
+from app.services.appearance import effective_branding
 from app.database.repositories import (
     JobRepository,
     UserSettingsRepository,
@@ -137,12 +138,15 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
     if not user_id:
         return
 
+    from app.bot.middlewares.render_queue import active_render_users
+    if user_id in active_render_users:
+        await message.answer("Подожди завершения обработки, затем отправь следующее видео.")
+        return
     settings = get_settings()
 
     # Banner upload state takes priority: a document while waiting for a
     # banner asset is the banner, not a video (HOTFIX routing fix).
-    doc_only = message.document and not (message.video or message.video_note or message.animation)
-    if doc_only and user_id in _awaiting_banner:
+    if user_id in _awaiting_banner:
         await _handle_banner_asset(message, bot)
         return
 
@@ -307,7 +311,7 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
         menu = mode_input_menu(selected_mode)
         _mode_state.pop(user_id, None)
     else:
-        menu = mode_input_menu("moments" if duration_sec >= SMART_CLIPS_MIN_SECONDS else "prepare")
+        menu = mode_input_menu("prepare")
     await _safe_edit_text(status_msg, text, reply_markup=menu, parse_mode="HTML")
 
 
@@ -316,6 +320,10 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
     """Accept a supported video URL, download, then show actions."""
     user_id: int = message.from_user.id if message.from_user else 0
     if not user_id:
+        return
+    from app.bot.middlewares.render_queue import active_render_users
+    if user_id in active_render_users:
+        await message.answer("Подожди завершения обработки, затем отправь следующее видео.")
         return
     # 1. Active input states take priority
     if user_id in _awaiting_title:
@@ -326,13 +334,13 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
             return
         async with db_manager.session() as session:
             await UserSettingsRepository(session).update_fields(
-                user_id, title_id="custom", custom_title=text_input[:100],
+                user_id, title_id="custom", custom_title=text_input[:100], style_id="custom",
             )
-        await message.answer(f"✅ Заголовок сохранён: «{text_input[:100]}»")
+        await message.answer("✅ Заголовок сохранён.")
         return
     if user_id in _awaiting_banner:
         await message.answer(
-            "📎 Жду файл плашки: PNG, JPG, WebP, GIF или короткий MP4.",
+            "📎 Жду файл баннера: PNG, JPG, WebP, GIF или короткий MP4.",
             reply_markup=BANNER_CANCEL_MENU,
         )
         return
@@ -381,7 +389,7 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
 
     logger.info(
         "download_request", user_id=user_id, job_id=job_id,
-        normalized_url=url, platform=platform, raw_text_len=len(text),
+        platform=platform,
     )
 
     # HOTFIX item 11: run_download (semaphore + per-user lock + inflight dedup).
@@ -513,7 +521,7 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
         menu = mode_input_menu(selected_mode)
         _mode_state.pop(user_id, None)
     else:
-        menu = mode_input_menu("moments" if duration_sec >= SMART_CLIPS_MIN_SECONDS else "prepare")
+        menu = mode_input_menu("prepare")
     logger.info("url_ready_for_actions", user_id=user_id, job_id=job_id, menu=type(menu).__name__)
     await _safe_edit_text(status_msg, text_out, reply_markup=menu, parse_mode="HTML")
 
@@ -557,7 +565,8 @@ def _pop_pending(user_id: int) -> _PendingJob | None:
 async def on_quick_prep(call: CallbackQuery) -> None:
     user_id = call.from_user.id if call.from_user else 0
     pending = _get_pending(user_id)
-    if pending is None:
+    if pending is None or not Path(pending.input_path).is_file():
+        pending = None
         # Phase 1 recovery (audit #14/51): reuse current media from DB
         # instead of asking the user to re-send the video.
         try:
@@ -582,11 +591,15 @@ async def on_quick_prep(call: CallbackQuery) -> None:
 
     settings = get_settings()
     input_path = Path(pending.input_path)
-    job_dir = Path(pending.job_dir)
+    job_dir = get_temp_manager()._job_dir(f"job_{pending.job_id}_{uuid.uuid4().hex[:8]}")
+    job_dir.mkdir(parents=True, exist_ok=True)
 
-    await _edit_status(call.message, "🎬 Подготавливаю…\n\n⏳ FFmpeg в работе…")
+    await _edit_status(call.message, "🎬 Делаю ролик…")
 
     try:
+        from app.database.models import JobStatus
+        async with db_manager.session() as session:
+            await JobRepository(session).set_status(pending.job_id, JobStatus.RENDERING)
         # Load user's CTA settings
         cta_asset: Path | None = None
         cta_enabled = False
@@ -599,7 +612,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
 
         async with db_manager.session() as session:
             srepo = UserSettingsRepository(session)
-            s = await srepo.get(user_id)
+            s = await srepo.get_or_create(user_id)
             if s is not None:
                 cta_enabled = s.cta_enabled
                 cta_position = s.cta_position
@@ -631,18 +644,28 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             if cta_enabled and cta_asset is None:
                 logger.info("cta_no_user_banner_skipping_overlay", user_id=user_id)
 
-        # The callback carries the mode even after upload consumes _mode_state.
-        maximum_transform = call.data == "action:maximum_transform"
+        from app.services.appearance import effective_branding, output_geometry, download_asset, validate_image
+        width, height, bitrate = output_geometry(s, settings)
+        logo_asset = None
+        if s.logo_enabled and s.logo_telegram_file_id:
+            logo_asset = await download_asset(call.bot, s.logo_telegram_file_id, job_dir / "logo.png")
+            validate_image(logo_asset)
+        maximum_transform = call.data == "action:maximum_transform" or s.processing_style == "maximum"
         # Run QuickPrep
         pipeline = QuickPrepPipeline()
         result = await pipeline.run(
             input_video=input_path,
             maximum_transform=maximum_transform,
+            subtitles_enabled=s.subtitles_enabled,
+            subtitle_style=s.subtitle_style,
+            subtitle_language=s.subtitle_language,
+            logo_asset=logo_asset,
+            recut_branding=effective_branding(s),
             job_dir=job_dir,
-            target_width=settings.output_width,
-            target_height=settings.output_height,
+            target_width=width,
+            target_height=height,
             target_fps=settings.output_fps,
-            video_bitrate=settings.output_video_bitrate,
+            video_bitrate=bitrate,
             audio_bitrate=settings.output_audio_bitrate,
             cta_asset=cta_asset if cta_enabled else None,
             cta_position=cta_position,
@@ -650,8 +673,8 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             cta_duration_seconds=cta_duration_seconds,
             cta_start_seconds=cta_start_seconds,
             cta_min_margin_px=settings.cta_min_margin_px,
-            output_width=settings.output_width,
-            output_height=settings.output_height,
+            output_width=width,
+            output_height=height,
             cta_size_preset=cta_size,
             cta_overlay_type=overlay_type,
             background_id=getattr(s, "background_id", "blur") if s else "blur",
@@ -676,7 +699,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
         final_clip = FinalClip(
             index=1,
             final_path=result.final_path,
-            has_subtitles=False,  # QuickPrep does not run Whisper
+            has_subtitles=result.has_subtitles,
             has_cta=result.has_cta,
             size_bytes=result.size_bytes,
         )
@@ -689,7 +712,8 @@ async def on_quick_prep(call: CallbackQuery) -> None:
         if send_result.sent:
             await _edit_status(
                 call.message,
-                f"✅ Готово. Исходник сохранён — можно сделать иначе.\n\n🆔 Job #{pending.job_id}",
+                "✅ Готово. Исходник сохранён — можно сделать иначе." +
+                ("\nСубтитры не добавлены: речь не распознана или обработка не удалась." if result.warnings else ""),
                 reply_markup=RESULT_MENU_PREPARE,
             )
             async with db_manager.session() as session:
@@ -844,9 +868,15 @@ async def on_analyze_long(call: CallbackQuery) -> None:
 async def on_url_original(call: CallbackQuery) -> None:
     """Send the downloaded URL video as-is, without Recut processing."""
     user_id = call.from_user.id if call.from_user else 0
-    pending = _pop_pending(user_id)
+    pending = _get_pending(user_id)
+    if pending is None or not Path(pending.input_path).is_file():
+        from app.services.current_media import resolve_current_media
+        cm = await resolve_current_media(user_id, call.bot)
+        if cm and cm.source_path and cm.source_path.is_file():
+            pending = _PendingJob(cm.job_id or 0, call.message.chat.id, str(cm.source_path),
+                str(cm.source_path.parent), call.message.message_id)
     if pending is None:
-        await call.answer("⚠️ Сначала отправь ссылку.", show_alert=True)
+        await call.answer("⚠️ Сначала отправь видео.", show_alert=True)
         return
     await call.answer("📥 Отправляю оригинал…")
     path = Path(pending.input_path)
@@ -854,158 +884,27 @@ async def on_url_original(call: CallbackQuery) -> None:
         await _fail_job(pending.job_id, "FILE_GONE")
         await call.message.edit_text("❌ Исходник не найден.")
         return
-    # Send the actual downloaded video file, not the status message.
     try:
-        await call.message.answer_video(
-            video=types.FSInputFile(path),
-            caption="Оригинал",
-        )
-    except Exception:
-        # Fall back to document if Telegram rejects it as video.
-        await call.message.answer_document(
-            document=types.FSInputFile(path),
-            caption="Оригинал",
-        )
-    async with db_manager.session() as session:
-        repo = JobRepository(session)
-        await repo.mark_completed(pending.job_id, clips_generated=0)
-    await _safe_edit_text(
-        call.message,
-        "✅ Готово. Исходник сохранён — можно сделать иначе.",
-        reply_markup=RESULT_MENU_PREPARE,
-    )
-    try:
+        try:
+            await call.message.answer_video(video=types.FSInputFile(path), caption="Оригинал")
+        except Exception:
+            await call.message.answer_document(document=types.FSInputFile(path), caption="Оригинал")
+        async with db_manager.session() as session:
+            await JobRepository(session).mark_completed(pending.job_id, clips_generated=0)
+        await _safe_edit_text(call.message, "✅ Оригинал отправлен. Можно сделать ролик.",
+                             reply_markup=mode_input_menu("prepare"))
+        _pop_pending(user_id)
         get_temp_manager().cleanup_job(Path(pending.job_dir).name)
     except Exception:
-        pass
+        logger.warning("original_delivery_failed", user_id=user_id, error_code="SEND_FAILED")
+        await _fail_job(pending.job_id, "SEND_FAILED")
+        await _safe_edit_text(call.message, "Не удалось отправить оригинал. Попробуй ещё раз.",
+                             reply_markup=mode_input_menu("prepare"))
 
 
 @router.callback_query(F.data == "url:recut")
 async def on_url_recut(call: CallbackQuery) -> None:
-    """Run Recut QuickPrep on the downloaded URL video."""
-    user_id = call.from_user.id if call.from_user else 0
-    pending = _get_pending(user_id)
-    if pending is None:
-        await call.answer("⚠️ Сначала отправь ссылку.", show_alert=True)
-        return
-    await call.answer("🚀 Запускаю Recut…")
-    settings = get_settings()
-    input_path = Path(pending.input_path)
-    job_dir = Path(pending.job_dir)
-    await _edit_status(call.message, "🎬 Подготавливаю…\n\n⏳ FFmpeg в работе…")
-    cta_asset: Path | None = None
-    cta_enabled = False
-    cta_position = "bottom"
-    cta_mode = "end"
-    cta_duration_seconds = 4.0
-    cta_start_seconds = 0.0
-    cta_size = "medium"
-    overlay_type = "png"
-    async with db_manager.session() as session:
-        srepo = UserSettingsRepository(session)
-        s = await srepo.get(user_id)
-        if s is not None:
-            cta_enabled = s.cta_enabled
-            cta_position = s.cta_position
-            cta_mode = s.cta_mode
-            cta_duration_seconds = s.cta_duration_seconds
-            cta_start_seconds = s.cta_start_seconds
-            cta_size = getattr(s, "cta_size", None) or "medium"
-            overlay_type = getattr(s, "overlay_type", None) or "png"
-
-        # Resolve CTA asset: prefer telegram_file_id (Railway-safe),
-        # then local path, then default static banner.
-        if cta_enabled:
-            bot_instance = call.bot
-            if s is not None and s.cta_telegram_file_id:
-                try:
-                    tg_file = await bot_instance.get_file(s.cta_telegram_file_id)
-                    ext = {"png": "png", "webp": "webp", "gif": "gif", "mp4": "mp4"}.get(overlay_type, "png")
-                    banner_path = job_dir / f"cta_user.{ext}"
-                    await bot_instance.download_file(tg_file.file_path, destination=banner_path)
-                    cta_asset = banner_path
-                    logger.info("cta_loaded_from_telegram_file_id", user_id=user_id)
-                except Exception as e:
-                    logger.warning("cta_telegram_file_id_load_failed", error=str(e)[:200])
-            if cta_asset is None and s is not None and s.cta_asset_path:
-                p = Path(s.cta_asset_path)
-                if p.exists():
-                    cta_asset = p
-        if cta_enabled and cta_asset is None:
-            logger.info("cta_no_user_banner_skipping_overlay", user_id=user_id)
-    pipeline = QuickPrepPipeline()
-    try:
-        result = await pipeline.run(
-            input_video=input_path,
-            job_dir=job_dir,
-            target_width=settings.output_width,
-            target_height=settings.output_height,
-            target_fps=settings.output_fps,
-            video_bitrate=settings.output_video_bitrate,
-            audio_bitrate=settings.output_audio_bitrate,
-            cta_asset=cta_asset if cta_enabled else None,
-            cta_position=cta_position,
-            cta_mode=cta_mode,
-            cta_duration_seconds=cta_duration_seconds,
-            cta_start_seconds=cta_start_seconds,
-            cta_min_margin_px=settings.cta_min_margin_px,
-            output_width=settings.output_width,
-            output_height=settings.output_height,
-            cta_size_preset=cta_size,
-            cta_overlay_type=overlay_type,
-            background_id=getattr(s, "background_id", "blur") if s else "blur",
-            title_text=_resolve_title_text(s),
-            brand_corner=bool(getattr(s, "brand_corner", False)) if s else False,
-            decoration_id="mascot" if s and getattr(s, "decoration_enabled", False) else "",
-            audio_preset=getattr(s, "audio_preset", "original") if s else "original",
-            overlay_is_animated=bool(getattr(s, "overlay_is_animated", False)) if s else False,
-        )
-    except Exception as e:
-        logger.error("quickprep_failed", user_id=user_id, job_id=pending.job_id, error=str(e)[:200])
-        await _fail_job(pending.job_id, "QUICKPREP_FAILED", str(e)[:500])
-        await _edit_status(call.message, f"❌ Не удалось подготовить видео.\n\nОшибка в логах.")
-        try:
-            get_temp_manager().cleanup_job(job_dir.name)
-        except Exception:
-            pass
-        return
-    await _edit_status(
-        call.message,
-        f"✅ Готово. Отправляю…\n\n"
-        f"📦 {result.size_bytes // 1024 // 1024} МБ · {result.width}×{result.height}",
-    )
-    sender = TelegramSender(call.bot)
-    from app.pipeline.final_renderer import FinalClip, FinalJob
-    final_clip = FinalClip(
-        index=1,
-        final_path=result.final_path,
-        has_subtitles=False,
-        has_cta=result.has_cta,
-        size_bytes=result.size_bytes,
-    )
-    send_result = await sender.send(
-        final_job=FinalJob(clips=(final_clip,)),
-        chat_id=pending.chat_id,
-        reply_to_message_id=pending.status_message_id,
-    )
-    if send_result.sent:
-        await _edit_status(
-            call.message,
-            "✅ Готово. Исходник сохранён — можно сделать иначе.\n\n🆔 Job #" + str(pending.job_id),
-            reply_markup=RESULT_MENU_PREPARE,
-        )
-        async with db_manager.session() as session:
-            repo = JobRepository(session)
-            await repo.mark_completed(pending.job_id, clips_generated=1)
-    else:
-        await _edit_status(
-            call.message,
-            "❌ Не удалось отправить видео.\n\n🆔 Job #" + str(pending.job_id),
-        )
-    try:
-        get_temp_manager().cleanup_job(job_dir.name)
-    except Exception:
-        pass
+    await on_quick_prep(call)
 
 
 @router.callback_query(F.data == "action:settings")
@@ -1048,33 +947,23 @@ def render_fine_menu(s) -> tuple[str, types.InlineKeyboardMarkup]:
         "⚙️ <b>Тонкая настройка</b>\n\n"
         f"Фон: {bg.label if bg else '—'}\n"
         f"Заголовок: {ti.label if ti else '—'}\n"
-        f"Водяной знак ReCut: {'ВКЛ' if s.brand_corner else 'ВЫКЛ'}\n"
-        f"Плашка: {'ВКЛ' if s.cta_enabled else 'ВЫКЛ'}\n"
+        f"Водяной знак ReCut: {'ВКЛ' if effective_branding(s) else 'ВЫКЛ'}\n"
+        f"Баннер: {'ВКЛ' if s.cta_enabled else 'ВЫКЛ'}\n"
         f"Субтитры: {'ВКЛ' if s.subtitles_enabled else 'ВЫКЛ'}"
     )
     markup = fine_menu(
         bg.label if bg else "—",
         ti.label if ti else "—",
-        bool(getattr(s, "brand_corner", False)),
+        effective_branding(s),
         bool(s.cta_enabled),
+        bool(s.decoration_enabled),
     )
     return text, markup
 
 
 def render_appearance(s, user_id: int) -> tuple[str, types.InlineKeyboardMarkup]:
-    bg = BACKGROUNDS.get(getattr(s, "background_id", "blur"))
-    title = TITLES.get(getattr(s, "title_id", "none") or "none")
-    style_label = _STYLE_LABELS.get(getattr(s, "style_id", None) or "", "Свой")
-    has_banner = bool(s.cta_telegram_file_id)
-    text = (
-        "🎨 <b>Оформление</b>\n\n"
-        f"Стиль: {style_label}\n"
-        f"Фон: {bg.label if bg else getattr(s, 'background_id', 'blur')}\n"
-        f"Плашка: {'✅' if has_banner else 'нет'}\n"
-        f"Заголовок: {title.label if title else 'без текста'}\n"
-        f"Персонаж снизу: {'включён' if getattr(s, 'decoration_enabled', False) else 'выключен'}"
-    )
-    return text, appearance_menu(style_label, has_banner, bool(getattr(s, "decoration_enabled", False)))
+    from app.bot.handlers.appearance import appearance_view
+    return appearance_view(s)
 
 # ---------------------------------------------------------------------------
 # HOME / mode selection / banner section (audit #1, #3-9, #33)
@@ -1165,6 +1054,9 @@ async def reset_media_selection(user_id: int) -> None:
     """Forget the selected source in DB and RAM without deleting running-job files."""
     from app.services.current_media import get_current_media_service
     await get_current_media_service().clear(user_id)
+    from app.bot.handlers.appearance import _awaiting_logo
+    _awaiting_logo.discard(user_id)
+    _awaiting_banner.discard(user_id)
     _pop_pending(user_id)
     _mode_state.pop(user_id, None)
     _awaiting_banner.discard(user_id)
@@ -1204,27 +1096,30 @@ async def on_banner_menu(call: CallbackQuery) -> None:
         logger.warning("banner_menu_db_failed", error=str(e)[:200])
     if file_id:
         text = (
-            "🖼 <b>Плашка (баннер)</b>\n\n"
+            "🖼 <b>Баннер</b>\n\n"
             "Картинка или анимация поверх видео — например, логотип или реклама.\n\n"
-            "Статус: ✅ Загружена\n"
-            f"Положение: {getattr(s, 'cta_position', 'снизу')}\n"
-            "Показ: последние сек."
+            "Статус: ✅ Загружен\n"
+            f"Положение: {CTA_POSITIONS.get(s.cta_position, 'Снизу')}\n"
+            f"Показ: {'весь ролик' if s.cta_mode == 'full' else 'начало ролика' if s.cta_mode == 'start' else 'конец ролика'}\n"
+            f"Использование: {'включено' if s.cta_enabled else 'выключено'}"
         )
     else:
-        text = "🖼 <b>Плашка (баннер)</b>\n\nПлашка и баннер — одно и то же: картинка или анимация поверх видео.\n\nЗагрузи, например, свой логотип или рекламную картинку."
-    await call.message.edit_text(text, parse_mode="HTML", reply_markup=banner_menu(bool(file_id)))
+        text = "🖼 <b>Баннер</b>\n\nКартинка или анимация поверх видео.\n\nЗагрузи, например, свой логотип или рекламную картинку."
+    await call.message.edit_text(text, parse_mode="HTML", reply_markup=banner_menu(bool(file_id), bool(s.cta_enabled) if file_id else False))
     await call.answer()
 
 
 @router.callback_query(F.data == "banner:upload")
 async def on_banner_upload_request(call: CallbackQuery) -> None:
     user_id = call.from_user.id if call.from_user else 0
+    from app.bot.handlers.appearance import _awaiting_logo
+    _awaiting_logo.discard(user_id)
     _awaiting_banner.add(user_id)
     await call.message.edit_text(
-        "📎 Пришли плашку (баннер) — картинку или анимацию, которую наложим поверх видео.\n\n"
+        "📎 Пришли баннер — картинку или анимацию, которую наложим поверх видео.\n\n"
         "Подойдут <b>PNG, JPEG, WebP, GIF или короткий MP4</b>.\n\n"
-        "Важно: отправь её как <b>ФАЙЛ</b>, а не как фото —\n"
-        "так сохранится качество и прозрачность.",
+        "Для прозрачности и лучшего качества отправь как <b>файл</b> —\n"
+        "PNG особенно хорошо подходит для прозрачного фона.",
         parse_mode="HTML",
         reply_markup=BANNER_CANCEL_MENU,
     )
@@ -1251,11 +1146,12 @@ async def on_banner_delete(call: CallbackQuery) -> None:
         s = await UserSettingsRepository(session).update_fields(user_id)
         s.cta_telegram_file_id = None
         s.cta_enabled = False
+        s.cta_asset_path = None
     await call.message.edit_text(
-        "🗑 Плашка удалена.",
+        "🗑 Баннер удалён.",
         reply_markup=banner_menu(False),
     )
-    await call.answer("Плашка удалена")
+    await call.answer("Баннер удалён")
 
 
 @router.callback_query(F.data == "banner:preview")
@@ -1266,7 +1162,7 @@ async def on_banner_preview(call: CallbackQuery) -> None:
         s = await UserSettingsRepository(session).get_or_create(user_id)
         file_id = s.cta_telegram_file_id
     if not file_id:
-        await call.answer("Плашка не загружена", show_alert=True)
+        await call.answer("Баннер не загружен", show_alert=True)
         return
     try:
         bot = call.bot
@@ -1274,7 +1170,7 @@ async def on_banner_preview(call: CallbackQuery) -> None:
         buf = io.BytesIO()
         await bot.download_file(tg_file.file_path if hasattr(tg_file, "file_path") else tg_file, destination=buf)
     except Exception:
-        await call.answer("Не удалось загрузить плашку", show_alert=True)
+        await call.answer("Не удалось загрузить баннер", show_alert=True)
         return
     buf.seek(0)
 
@@ -1316,7 +1212,7 @@ async def on_banner_preview(call: CallbackQuery) -> None:
         )
         video = types.FSInputFile(preview)
         await call.message.answer_video(
-            video, caption="Так плашка будет выглядеть на видео (3 сек).",
+            video, caption="Так баннер будет выглядеть на видео (3 сек).",
         )
         await call.answer()
         return
@@ -1327,7 +1223,7 @@ async def on_banner_preview(call: CallbackQuery) -> None:
         return
 
     photo = types.BufferedInputFile(buf.getvalue(), filename="banner.png")
-    await call.message.answer_photo(photo, caption="Так выглядит твоя плашка.")
+    await call.message.answer_photo(photo, caption="Так выглядит твой баннер.")
     await call.answer()
 
 
@@ -1337,8 +1233,8 @@ async def on_toggle_cta(call: CallbackQuery) -> None:
     async with db_manager.session() as session:
         s = await UserSettingsRepository(session).update_fields(user_id)
         s.cta_enabled = not s.cta_enabled
-    await on_fine_menu(call)
-    await _safe_answer(call, f"Плашка {'включена' if s.cta_enabled else 'выключена'}")
+    await on_banner_menu(call)
+    await _safe_answer(call, f"Баннер {'включён' if s.cta_enabled else 'выключен'}")
 
 
 @router.callback_query(F.data == "settings:toggle_subs")
@@ -1353,13 +1249,13 @@ async def on_toggle_subs(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "settings:position")
 async def on_settings_position(call: CallbackQuery) -> None:
-    await call.message.edit_text("📍 Положение плашки:", reply_markup=POSITION_MENU)
+    await call.message.edit_text("📍 Положение баннера:", reply_markup=POSITION_MENU)
     await call.answer()
 
 
 @router.callback_query(F.data == "settings:timing")
 async def on_settings_timing(call: CallbackQuery) -> None:
-    await call.message.edit_text("⏱ Когда показывать плашку?", reply_markup=TIMING_MENU)
+    await call.message.edit_text("⏱ Когда показывать баннер?", reply_markup=TIMING_MENU)
     await call.answer()
 
 
@@ -1382,27 +1278,8 @@ def _resolve_title_text(s) -> str:
 
 @router.callback_query(F.data == "appearance:menu")
 async def on_appearance_menu(call: CallbackQuery) -> None:
-    """🎨 Оформление — summary + presets + плашка (PART 15)."""
-    user_id = call.from_user.id if call.from_user else 0
-    async with db_manager.session() as session:
-        s = await UserSettingsRepository(session).get_or_create(user_id)
-    bg = BACKGROUNDS.get(getattr(s, "background_id", "blur"))
-    title = TITLES.get(getattr(s, "title_id", "none") or "none")
-    style_label = _STYLE_LABELS.get(getattr(s, "style_id", None) or "", "Свой")
-    has_banner = bool(s.cta_telegram_file_id)
-    text = (
-        "🎨 <b>Оформление</b>\n\n"
-        f"Стиль: {style_label}\n"
-        f"Фон: {bg.label if bg else getattr(s, 'background_id', 'blur')}\n"
-        f"Плашка: {'✅' if has_banner else 'нет'}\n"
-        f"Заголовок: {title.label if title else 'без текста'}\n"
-        f"Персонаж снизу: {'включён' if getattr(s, 'decoration_enabled', False) else 'выключен'}"
-    )
-    await call.message.edit_text(
-        text, parse_mode="HTML",
-        reply_markup=appearance_menu(style_label, has_banner, bool(getattr(s, "decoration_enabled", False))),
-    )
-    await call.answer()
+    from app.bot.handlers.appearance import show_appearance
+    await show_appearance(call)
 
 
 _STYLE_LABELS = {"clean": "Чистый", "meme": "Мем", "brand": "Бренд", "custom": "Свой"}
@@ -1472,8 +1349,8 @@ async def on_fine_menu(call: CallbackQuery) -> None:
         "⚙️ <b>Тонкая настройка</b>\n\n"
         f"Фон: {bg.label if bg else '—'}\n"
         f"Заголовок: {ti.label if ti else '—'}\n"
-        f"Водяной знак ReCut: {'ВКЛ' if s.brand_corner else 'ВЫКЛ'}\n"
-        f"Плашка: {'ВКЛ' if s.cta_enabled else 'ВЫКЛ'}\n"
+        f"Водяной знак ReCut: {'ВКЛ' if effective_branding(s) else 'ВЫКЛ'}\n"
+        f"Баннер: {'ВКЛ' if s.cta_enabled else 'ВЫКЛ'}\n"
         f"Субтитры: {'ВКЛ' if s.subtitles_enabled else 'ВЫКЛ'}"
     )
     await call.message.edit_text(
@@ -1481,8 +1358,9 @@ async def on_fine_menu(call: CallbackQuery) -> None:
         reply_markup=fine_menu(
             bg.label if bg else "—",
             ti.label if ti else "—",
-            bool(getattr(s, "brand_corner", False)),
+            effective_branding(s),
             bool(s.cta_enabled),
+            bool(s.decoration_enabled),
         ),
     )
     await call.answer()
@@ -1596,14 +1474,8 @@ async def on_style_title(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "style:brand")
 async def on_style_brand_toggle(call: CallbackQuery) -> None:
-    user_id = call.from_user.id if call.from_user else 0
-    async with db_manager.session() as session:
-        repo = UserSettingsRepository(session)
-        s = await repo.get_or_create(user_id)
-        new_val = not bool(s.brand_corner)
-        await repo.update_fields(user_id, brand_corner=new_val)
-    await call.answer(f"Бренд-уголок {'включён' if new_val else 'выключен'}")
-    await on_fine_menu(call)
+    from app.bot.handlers.appearance import toggle_branding
+    await toggle_branding(call)
 
 
 @router.callback_query(F.data.startswith("style_bg:"))
@@ -1615,7 +1487,7 @@ async def on_set_background(call: CallbackQuery) -> None:
         await call.answer("Неизвестный фон")
         return
     async with db_manager.session() as session:
-        await UserSettingsRepository(session).update_fields(user_id, background_id=bg_id)
+        await UserSettingsRepository(session).update_fields(user_id, background_id=bg_id, style_id="custom")
     await call.answer(f"Фон: {BACKGROUNDS[bg_id].label}")
     await on_fine_menu(call)
 
@@ -1637,14 +1509,14 @@ async def on_set_title(call: CallbackQuery) -> None:
         await call.answer()
         return
     async with db_manager.session() as session:
-        await UserSettingsRepository(session).update_fields(user_id, title_id=title_id)
+        await UserSettingsRepository(session).update_fields(user_id, title_id=title_id, style_id="custom")
     await _safe_answer(call, f"Заголовок: {TITLES[title_id].label}")
     await on_fine_menu(call)
 
 
 @router.callback_query(F.data == "settings:size")
 async def on_settings_size(call: CallbackQuery) -> None:
-    await call.message.edit_text("📏 Размер плашки:", reply_markup=SIZE_MENU)
+    await call.message.edit_text("📏 Размер баннера:", reply_markup=SIZE_MENU)
     await call.answer()
 
 
@@ -1746,13 +1618,13 @@ async def _handle_banner_asset(message: types.Message, bot: Bot) -> None:
     if user_id not in _awaiting_banner:
         return  # not waiting for a banner
 
-    doc = message.document
+    doc = message.document or message.video or message.animation or (message.photo[-1] if message.photo else None)
     if not doc or not doc.file_id:
         await message.answer("❌ Не удалось получить файл.")
         return
 
-    mime = (doc.mime_type or "").lower()
-    filename = (doc.file_name or "").lower()
+    mime = (getattr(doc, "mime_type", None) or ("image/jpeg" if message.photo else "")).lower()
+    filename = (getattr(doc, "file_name", None) or "").lower()
     # (mime prefix, overlay_type, is_animated) — JPEG added (item 18).
     accepted = [
         ("image/png", "png", False),
@@ -1778,75 +1650,35 @@ async def _handle_banner_asset(message: types.Message, bot: Bot) -> None:
         return  # waiting state KEPT — the next valid file must be accepted
     overlay_type, is_animated = entry[1], entry[2]
 
-    # Download temporarily, validate, then store file_id in DB.
-    try:
-        _USER_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-        ext = {"png": "png", "jpeg": "jpg", "webp": "webp", "gif": "gif", "mp4": "mp4"}[overlay_type]
-        tmp_path = _USER_ASSETS_DIR / f"_tmp_banner_{user_id}.{ext}"
-        file = await bot.get_file(doc.file_id)
-        await bot.download_file(file.file_path, destination=tmp_path)
-    except Exception as e:
-        logger.error("banner_download_failed", user_id=user_id, error=str(e)[:200])
-        await message.answer("❌ Не удалось скачать файл.")
+    from app.services.appearance import download_asset, validate_image, MAX_ASSET_BYTES, MAX_ASSET_SIDE
+    if (doc.file_size or 0) > MAX_ASSET_BYTES:
+        await message.answer("Файл слишком большой. Максимум 10 МБ.")
         return
-
-    # Content detection via Pillow (item 18) — MIME alone is not trusted.
-    if overlay_type in ("png", "jpeg", "webp"):
-        try:
-            from PIL import Image
-            img = Image.open(tmp_path)
-            fmt = (img.format or "").upper()
-            fmt_to_type = {"PNG": "png", "JPEG": "jpeg", "WEBP": "webp"}
-            if fmt_to_type.get(fmt) != overlay_type:
-                tmp_path.unlink(missing_ok=True)
-                await message.answer(
-                    f"❌ Внутри файла не {overlay_type.upper()} "
-                    f"(определён формат: {fmt or 'неизвестен'})."
-                )
-                return
-            if overlay_type == "webp":
-                # Animated WebP: n_frames > 1
-                is_animated = getattr(img, "n_frames", 1) > 1
-            if img.mode not in ("RGBA", "RGB"):
-                img = img.convert("RGBA")
-            w, h = img.size
-            if w <= 0 or h <= 0:
-                tmp_path.unlink(missing_ok=True)
-                await message.answer("❌ Изображение повреждено.")
-                return
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            await message.answer("❌ Не удалось прочитать изображение.")
-            return
-    else:
-        # GIF / MP4: validate via probe (ffmpeg must read it).
-        try:
-            from app.services.media.probe import get_probe_service
-            m = await get_probe_service().probe(tmp_path)
-            if m.duration_seconds <= 0:
-                raise ValueError("no duration")
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            await message.answer("❌ Не удалось прочитать файл. Попробуй другой формат.")
-            return
-
-    # Store Telegram file_id + overlay meta in DB (survives Railway redeploy).
-    async with db_manager.session() as session:
-        await UserSettingsRepository(session).update_fields(
-            user_id,
-            cta_telegram_file_id=doc.file_id,
-            overlay_type=overlay_type,
-            overlay_is_animated=is_animated,
-            cta_enabled=True,
-        )
-    tmp_path.unlink(missing_ok=True)
-    # State cleared ONLY after a successful save (item 17).
+    try:
+        with tempfile.TemporaryDirectory(prefix="recut_banner_") as directory:
+            tmp_path = Path(directory) / "asset"
+            await download_asset(bot, doc.file_id, tmp_path)
+            if overlay_type != "mp4":
+                import asyncio
+                actual_type, is_animated = await asyncio.to_thread(validate_image, tmp_path, allow_animation=True)
+                if actual_type != overlay_type:
+                    raise ValueError("ASSET_FORMAT_MISMATCH")
+            else:
+                m = await get_probe_service().probe(tmp_path)
+                if not (0 < m.duration_seconds <= 30 and 0 < m.width <= MAX_ASSET_SIDE and 0 < m.height <= MAX_ASSET_SIDE):
+                    raise ValueError("ASSET_VIDEO_LIMIT")
+            async with db_manager.session() as session:
+                await UserSettingsRepository(session).update_fields(user_id,
+                    cta_telegram_file_id=doc.file_id, cta_asset_path=None,
+                    overlay_type=overlay_type, overlay_is_animated=is_animated, cta_enabled=True)
+    except Exception as exc:
+        logger.warning("banner_save_failed", user_id=user_id, error_code="ASSET_INVALID",
+                       error_type=type(exc).__name__)
+        await message.answer("Не удалось сохранить баннер. Проверь формат и размер: до 10 МБ, до 4096 пикселей, анимация до 30 секунд.")
+        return
     _awaiting_banner.discard(user_id)
-
-    kind = "статичная" if not is_animated else "анимированная"
-    await message.answer(f"✅ Плашка сохранена ({kind})")
-    from app.bot.keyboards.inline import banner_menu
-    await message.answer("Настройки плашки:", reply_markup=banner_menu(True))
+    await message.answer("✅ Баннер сохранён. Он автоматически применяется к следующим роликам.",
+                         reply_markup=banner_menu(True))
 
 
 # ---------------------------------------------------------------------------
@@ -1858,13 +1690,7 @@ async def on_banner_photo_wrong_input(message: types.Message) -> None:
     """User sent a photo (not a file). Must respond clearly when in banner-upload state."""
     user_id = message.from_user.id if message.from_user else 0
     if user_id in _awaiting_banner:
-        await message.answer(
-            "❌ Ты отправил изображение как фото.\n\n"
-            "Пришли PNG через:\n"
-            "Скрепка → Файл\n\n"
-            "Это нужно, чтобы сохранить качество и прозрачность.",
-            reply_markup=BANNER_CANCEL_MENU,
-        )
+        await _handle_banner_asset(message, message.bot)
 
 
 # ---------------------------------------------------------------------------

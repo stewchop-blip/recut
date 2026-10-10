@@ -194,6 +194,16 @@ class UserSettings(Base):
 
     decoration_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
 
+    # Appearance v2: additive preferences; entitlement is server-managed only.
+    logo_telegram_file_id: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    logo_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
+    recut_branding: Mapped[bool] = mapped_column(default=True, nullable=False)
+    premium_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    processing_style: Mapped[str] = mapped_column(String(20), default="standard", nullable=False)
+    output_quality: Mapped[str] = mapped_column(String(20), default="standard", nullable=False)
+    subtitle_style: Mapped[str] = mapped_column(String(20), default="standard", nullable=False)
+    subtitle_language: Mapped[str] = mapped_column(String(10), default="", nullable=False)
+
     # Subtitles (default OFF — quick prep does NOT run Whisper automatically)
     subtitles_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
 

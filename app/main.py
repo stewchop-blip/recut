@@ -11,7 +11,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 
-from app.bot.handlers import start, video, payments, referrals, admin
+from app.bot.handlers import start, video, payments, referrals, admin, appearance
 from app.bot.middlewares.access import AccessMiddleware
 from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
@@ -28,6 +28,8 @@ def _build_dispatcher() -> Dispatcher:
     from app.bot.middlewares.analytics import AnalyticsMiddleware
     dp.message.middleware.register(AnalyticsMiddleware())
     dp.callback_query.middleware.register(AnalyticsMiddleware())
+    from app.bot.middlewares.render_queue import RenderQueueMiddleware
+    dp.callback_query.middleware.register(RenderQueueMiddleware())
     from app.bot.middlewares.generations import GenerationMiddleware
     dp.callback_query.middleware.register(GenerationMiddleware())
     # Financial events and commands must precede broad video/text handlers.
@@ -35,6 +37,7 @@ def _build_dispatcher() -> Dispatcher:
     dp.include_router(payments.router)
     dp.include_router(start.router)
     dp.include_router(referrals.router)
+    dp.include_router(appearance.router)
     dp.include_router(video.router)
     return dp
 
@@ -134,6 +137,14 @@ async def run_schema_migrations() -> None:
     from sqlalchemy import text
     # (column, SQL type) pairs added to user_settings over time.
     columns = [
+        ("logo_telegram_file_id", "VARCHAR(200)"),
+        ("logo_enabled", "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("recut_branding", "BOOLEAN NOT NULL DEFAULT TRUE"),
+        ("premium_until", "TIMESTAMP WITH TIME ZONE"),
+        ("processing_style", "VARCHAR(20) NOT NULL DEFAULT 'standard'"),
+        ("output_quality", "VARCHAR(20) NOT NULL DEFAULT 'standard'"),
+        ("subtitle_style", "VARCHAR(20) NOT NULL DEFAULT 'standard'"),
+        ("subtitle_language", "VARCHAR(10) NOT NULL DEFAULT ''"),
         ("cta_telegram_file_id", "VARCHAR(200)"),
         ("cta_size", "VARCHAR(10)"),
         ("overlay_type", "VARCHAR(10) DEFAULT 'png'"),
@@ -270,8 +281,16 @@ async def _on_startup(bot: Bot) -> None:
     except Exception as e:
         logger.warning("telegram_commands_skipped", error=str(e)[:80])
 
+    from app.services.output.cleanup import get_cleanup_service
+    bot._recut_cleanup_task = asyncio.create_task(get_cleanup_service().run_periodic())
+
 
 async def _on_shutdown(bot: Bot) -> None:
+    task = getattr(bot, "_recut_cleanup_task", None)
+    if task is not None:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
     with suppress(Exception):
         await db_manager.close()
     with suppress(Exception):

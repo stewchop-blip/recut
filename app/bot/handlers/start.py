@@ -4,6 +4,7 @@ from pathlib import Path
 from aiogram import F, Router, types
 from aiogram.filters import Command
 
+from app.bot.keyboards.inline import HOME_MENU
 from app.core.logging import get_logger
 from app.database.repositories import JobRepository
 from app.database.session import db_manager
@@ -28,16 +29,14 @@ async def setup_bot_description(bot) -> None:
 
 
 WELCOME = (
-    "👋 <b>Скинь ссылку на TikTok, Reel или Shorts</b>\n"
-    "Я загружу видео сюда.\n\n"
-    "Потом сможешь обработать его в пару нажатий.\n\n"
-    "👇 Просто вставь ссылку"
+    "Добро пожаловать в ReCut 👋\n\n"
+    "Отправь ссылку на Reel, TikTok или Shorts либо загрузи видео.\n\n"
+    "Можно скачать оригинал или подготовить ролик для публикации: "
+    "добавить субтитры, свой баннер и логотип.\n"
+    "Сохранённое оформление применяется автоматически."
 )
 
-START_MENU = types.InlineKeyboardMarkup(inline_keyboard=[
-    [types.InlineKeyboardButton(text="📎 Вставить ссылку", callback_data="intake:link")],
-    [types.InlineKeyboardButton(text="📤 Загрузить видео", callback_data="intake:video")],
-])
+START_MENU = HOME_MENU
 
 
 @router.callback_query(F.data.in_({"intake:link", "intake:video"}))
@@ -63,17 +62,18 @@ async def cmd_menu(message: types.Message) -> None:
 
 
 HELP_TEXT = (
-    "📖 <b>Как пользоваться ReCut</b>\n\n"
-    "<b>Короткое видео:</b> отправь файл или ссылку, затем нажми «Сделать». "
-    "В «Ещё» доступны три варианта и максимальная обработка со сменой цвета, скорости и звука.\n\n"
-    "<b>Оформление:</b> выбери стиль, загрузи свою плашку (баннер) или включи персонажа снизу. Плашка — это картинка или анимация поверх видео. "
-    "Настройки сохраняются для следующих роликов.\n\n"
-    "<b>Длинное видео:</b> выбери «Нарезать длинное видео» и отправь источник. "
-    "Бот подберёт моменты; субтитры доступны в обработке длинных видео.\n\n"
-    "Скачать исходник можно без обработки. Изменение оформления не гарантирует "
-    "попадания в рекомендации площадок.\n\n"
-    "/referral — приглашения и бонусы\n/balance — баланс обработок\n"
-    "/cancel — отменить зависшую задачу\nПоддержка: @stewchop"
+    "❓ <b>Как пользоваться ReCut</b>\n\n"
+    "<b>1. Отправь видео</b>\n"
+    "Вставь ссылку на Instagram, TikTok или YouTube либо прикрепи видео.\n\n"
+    "<b>2. Нажми «Сделать ролик»</b>\n"
+    "Бот применит сохранённое оформление и пришлёт готовый файл. "
+    "«Оригинал» возвращает видео без обработки.\n\n"
+    "<b>3. Настрой оформление, если нужно</b>\n"
+    "В «⚙️ Оформление» доступны субтитры, формат, качество, баннер и логотип. "
+    "Чтобы добавить баннер, открой «🖼 Баннер» → «Загрузить баннер» и отправь файл. "
+    "Настройки сохраняются для следующих видео.\n\n"
+    "/cancel — отменить задачу\n/referral — приглашения и бонусы\n"
+    "/balance — баланс обработок\nПоддержка: @stewchop"
 )
 
 

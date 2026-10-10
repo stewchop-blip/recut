@@ -31,7 +31,7 @@ def source_file(path, size='180x320', audio=True, duration=4):
 
 def test_mode_is_reachable_and_carries_its_own_action():
     for menu in (HOME_MENU, mode_input_menu("prepare")):
-        assert any(b.callback_data == "mode:maximum_transform"
+        assert not any(b.callback_data == "mode:maximum_transform"
                    for row in menu.inline_keyboard for b in row)
     assert any(b.callback_data == 'mode:maximum_transform'
                for row in MORE_MENU.inline_keyboard for b in row)
@@ -135,12 +135,17 @@ async def test_callback_passes_mode_to_pipeline(tmp_path, monkeypatch, action, e
         yield object()
 
     monkeypatch.setattr(video.db_manager, 'session', session)
-    monkeypatch.setattr(video, 'UserSettingsRepository', lambda _: SimpleNamespace(get=AsyncMock(return_value=None)))
+    monkeypatch.setattr(video, 'UserSettingsRepository', lambda _: SimpleNamespace(get_or_create=AsyncMock(return_value=SimpleNamespace(
+        cta_enabled=False, logo_enabled=False, processing_style='standard', subtitles_enabled=False,
+        subtitle_style='standard', subtitle_language='', cta_position='bottom', cta_mode='end',
+        cta_duration_seconds=4, cta_start_seconds=0))))
+    monkeypatch.setattr(video, 'JobRepository', lambda _: SimpleNamespace(set_status=AsyncMock()))
     pipeline = SimpleNamespace(run=AsyncMock(side_effect=RuntimeError('stop after handoff')))
     monkeypatch.setattr(video, 'QuickPrepPipeline', lambda: pipeline)
     monkeypatch.setattr(video, '_edit_status', AsyncMock())
     monkeypatch.setattr(video, '_fail_job', AsyncMock())
-    monkeypatch.setattr(video, 'get_temp_manager', lambda: SimpleNamespace(cleanup_job=Mock()))
+    monkeypatch.setattr(video, 'get_temp_manager', lambda: SimpleNamespace(cleanup_job=Mock(), _job_dir=lambda name: tmp_path/name))
+    (tmp_path / 'source.mp4').write_bytes(b'source')
     user_id = 987655
     monkeypatch.setitem(video._pending_jobs, user_id, video._PendingJob(
         job_id=7, chat_id=1, input_path=str(tmp_path / 'source.mp4'),

@@ -35,6 +35,7 @@ def test_schema_migration_adds_column_idempotent(tmp_path):
                 )
             """))
 
+            await conn.execute(text("INSERT INTO user_settings (telegram_user_id, cta_enabled, cta_asset_path) VALUES (10, 1, 'existing-banner')"))
             # Verify old schema lacks cta_telegram_file_id
             res = await conn.execute(text("PRAGMA table_info(user_settings)"))
             cols = [row[1] for row in res.fetchall()]
@@ -51,6 +52,10 @@ def test_schema_migration_adds_column_idempotent(tmp_path):
                 cols = [row[1] for row in res.fetchall()]
                 assert "cta_telegram_file_id" in cols
                 assert "decoration_enabled" in cols
+                assert {"logo_telegram_file_id", "logo_enabled", "recut_branding", "premium_until",
+                        "output_quality", "processing_style", "subtitle_style", "subtitle_language"} <= set(cols)
+                existing = (await conn.execute(text("SELECT cta_enabled, cta_asset_path, recut_branding, logo_enabled, premium_until FROM user_settings WHERE telegram_user_id=10"))).one()
+                assert tuple(existing) == (1, 'existing-banner', 1, 0, None)
 
             # Pass 2: Run migration again -> must not fail
             await run_schema_migrations()
@@ -59,6 +64,10 @@ def test_schema_migration_adds_column_idempotent(tmp_path):
                 cols = [row[1] for row in res.fetchall()]
                 assert "cta_telegram_file_id" in cols
                 assert "decoration_enabled" in cols
+                assert {"logo_telegram_file_id", "logo_enabled", "recut_branding", "premium_until",
+                        "output_quality", "processing_style", "subtitle_style", "subtitle_language"} <= set(cols)
+                existing = (await conn.execute(text("SELECT cta_enabled, cta_asset_path, recut_branding, logo_enabled, premium_until FROM user_settings WHERE telegram_user_id=10"))).one()
+                assert tuple(existing) == (1, 'existing-banner', 1, 0, None)
         finally:
             db_manager._engine = old_engine
             await engine.dispose()

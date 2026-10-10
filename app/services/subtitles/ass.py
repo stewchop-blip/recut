@@ -170,4 +170,4 @@ def _fmt_ts(seconds: float) -> str:
 
 def _escape(text: str) -> str:
     """ASS dialogue text needs newlines escaped; rest is safe."""
-    return text.replace("\n", " ").replace("\r", " ")
+    return text.replace("\\", "／").replace("{", "（").replace("}", "）").replace("\n", " ").replace("\r", " ")

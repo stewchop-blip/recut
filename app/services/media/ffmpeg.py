@@ -324,6 +324,7 @@ class MediaService:
         background_id: str = "blur",
         title_text: str = "",
         brand_corner: bool = False,
+        defer_branding: bool = False,
         decoration_id: str = "",
         decoration_avoid_bottom_banner: bool = False,
         audio_preset: str = "original",
@@ -501,6 +502,10 @@ class MediaService:
             except Exception as e:
                 logger.warning("title_png_failed_fallback_drawtext", error=str(e)[:150])
 
+        from app.services.appearance import branding_required
+        policy = branding_required.get()
+        if policy is not None and not defer_branding:
+            brand_corner = policy
         brand_png = None
         if brand_corner:
             from app.services.overlays.brand import render_brand

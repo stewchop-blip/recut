@@ -40,6 +40,8 @@ class QuickPrepResult:
     height: int
     duration_seconds: float
     has_cta: bool
+    has_subtitles: bool = False
+    warnings: tuple[str, ...] = ()
 
 
 class QuickPrepPipeline:
@@ -77,6 +79,11 @@ class QuickPrepPipeline:
         audio_preset: str = "original",
         decoration_id: str = "",
         maximum_transform: bool = False,
+        subtitles_enabled: bool = False,
+        subtitle_style: str = "standard",
+        subtitle_language: str = "",
+        logo_asset: Path | None = None,
+        recut_branding: bool | None = None,
         transformation_preset: str = "custom",  # PART 23: clean / meme / brand / custom
     ) -> QuickPrepResult:
         media = self._media or get_media_service()
@@ -150,8 +157,9 @@ class QuickPrepPipeline:
                 title_text = TITLES.get(preset_cfg.title_id, TITLES.get("none")).text
             else:
                 title_text = ""
-            brand_corner = preset_cfg.brand_corner
-            audio_preset = preset_cfg.audio_preset
+            if recut_branding is None:
+                brand_corner = preset_cfg.brand_corner
+                audio_preset = preset_cfg.audio_preset
         speed = getattr(preset_cfg, "speed", 1.0) if preset_cfg is not None else 1.0
         color_preset = getattr(preset_cfg, "color_preset", "original") if preset_cfg is not None else "original"
         layout_id = getattr(preset_cfg, "layout_id", "pip") if preset_cfg is not None else "pip"
@@ -178,6 +186,13 @@ class QuickPrepPipeline:
         # (cta_size remains from user DB settings unless preset explicitly
         # overrides — kept at user value for simplicity.)
 
+        # A final stamp follows user assets; never let a preset disable Free branding.
+        stamp_after_assets = bool(recut_branding and (cta_asset is not None or logo_asset is not None))
+        if recut_branding is not None:
+            brand_corner = bool(recut_branding and not stamp_after_assets)
+        warnings = []
+        has_subtitles = False
+
         # 3. Style rendering — ALWAYS through make_vertical/TemplateCompositor
         # (TZ Phase 10/11): normalization != style rendering. A vertical
         # source no longer bypasses background/title/brand/banner layout.
@@ -196,6 +211,7 @@ class QuickPrepPipeline:
                 background_id=background_id,
                 title_text=title_text,
                 brand_corner=brand_corner,
+                defer_branding=recut_branding is not None,
                 audio_preset=audio_preset,
                 speed=speed,
                 color_preset=color_preset,
@@ -221,6 +237,20 @@ class QuickPrepPipeline:
             # a geometry/render failure must fail the job clearly.
             logger.error("quickprep_vertical_failed_no_fallback", error=str(e)[:300])
             raise QuickPrepError(f"Vertical render failed: {e}") from e
+
+        if subtitles_enabled:
+            from app.pipeline.appearance_stages import add_subtitles
+            try:
+                subtitle_path = await add_subtitles(media, current, job_dir,
+                    style=subtitle_style, language=subtitle_language)
+                has_subtitles = subtitle_path != current
+                current = subtitle_path
+                if not has_subtitles:
+                    warnings.append("SUBTITLES_NO_SPEECH")
+            except Exception as exc:
+                logger.warning("subtitles_stage_failed", error_code="SUBTITLES_FAILED",
+                               error_type=type(exc).__name__)
+                warnings.append("SUBTITLES_FAILED")
 
         # 3. CTA overlay — ONLY the user's asset. No default "Recut"
         # placeholder: no user banner → no overlay (audit: no stubs).
@@ -266,6 +296,19 @@ class QuickPrepPipeline:
                         cta_path=str(effective_cta_asset),
                     )
                     raise QuickPrepError(f"CTA overlay failed: {e}") from e
+
+        from app.pipeline.appearance_stages import add_corner_asset
+        if logo_asset is not None:
+            current = await add_corner_asset(current, logo_asset, job_dir / "with_logo.mp4",
+                width=target_width, height=target_height, logo=True,
+                avoid_top=bool(cta_asset and cta_position.startswith("top")))
+        if stamp_after_assets:
+            from app.services.overlays.brand import render_brand
+            stamp = job_dir / "recut.png"
+            stamp.write_bytes(render_brand(max(80, round(target_width * .18))))
+            current = await add_corner_asset(current, stamp, job_dir / "with_recut.mp4",
+                width=target_width, height=target_height,
+                avoid_top=bool(cta_asset and cta_position.startswith("top")))
 
         # 4. Clean final export (loudnorm + strip metadata).
         final_path = job_dir / "final.mp4"
@@ -319,4 +362,6 @@ class QuickPrepPipeline:
             height=final_meta.height,
             duration_seconds=final_meta.duration_seconds,
             has_cta=has_cta,
+            has_subtitles=has_subtitles,
+            warnings=tuple(warnings),
         )

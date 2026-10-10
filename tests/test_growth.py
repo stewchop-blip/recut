@@ -298,7 +298,7 @@ async def test_public_start_routes_to_welcome(sessions, settings, monkeypatch, p
             from_user=User(id=20, is_bot=False, first_name='New'), text='/start' + payload)))
         sent = request.call_args.args[1]
         assert sent.text == WELCOME
-        assert sent.reply_markup.inline_keyboard[0][0].callback_data == 'intake:link'
+        assert sent.reply_markup.inline_keyboard[0][0].callback_data == 'mode:prepare'
         async with sessions.begin() as s:
             assert (await s.get(BotProfile, 20)).onboarding_seen
     finally:
