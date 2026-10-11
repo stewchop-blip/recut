@@ -76,6 +76,12 @@ class Settings(BaseSettings):
         default=60, ge=5, le=300, description="OpenRouter request timeout",
     )
 
+    # Captions-first YouTube beta. Kill switch: YOUTUBE_HIGHLIGHTS_ENABLED=false.
+    youtube_highlights_enabled: bool = True
+    youtube_highlights_max_minutes: int = Field(default=60, ge=2, le=60)
+    youtube_highlights_max_mb: int = Field(default=96, ge=8, le=256)
+    youtube_highlights_timeout_seconds: int = Field(default=900, ge=120, le=1800)
+
     # === Whisper STT ===
     whisper_model: str = Field(
         default="small",

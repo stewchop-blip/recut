@@ -2,8 +2,7 @@
 
 Verifies:
 - _fmt_time uses MM:SS not HH:MM:SS
-- _build_user_payload truncates to MAX_TRANSCRIPT_CHARS at segment boundary
-- _build_user_payload keeps LAST segments when truncated
+- Every transcript segment reaches a bounded analysis chunk
 - Short transcripts pass through unchanged
 """
 import pytest
@@ -48,28 +47,17 @@ def test_short_transcript_passes_through_unchanged():
     assert "[truncated" not in payload
 
 
-def test_long_transcript_truncated_at_segment_boundary():
-    """A long transcript is truncated to MAX_TRANSCRIPT_CHARS, keeping
-    the LAST segments, with a '[truncated, last segments only]' marker.
-    """
+def test_long_transcript_is_split_without_losing_segments():
     sel = OpenRouterClipSelector(api_key="k")
-    # Build a 50-segment transcript, each ~100 chars → ~5500 chars total
-    segs = [
-        TranscriptSegment(
-            start=i * 10, end=(i + 1) * 10,
-            text=f"сегмент {i:03d} " + "x" * 80,  # ~95 chars
-        )
-        for i in range(50)
-    ]
-    req = _build_request(segs)
-    payload = sel._build_user_payload(req)
-    # Truncation marker is present
-    assert "[truncated" in payload
-    # The first few segments are GONE; the last ones are present
-    assert "сегмент 000" not in payload
-    assert "сегмент 049" in payload
-    # Length is bounded near MAX_TRANSCRIPT_CHARS (header + marker overhead)
-    assert len(payload) < MAX_TRANSCRIPT_CHARS + 200
+    segs = [TranscriptSegment(start=i*10,end=(i+1)*10,text=f"segment {i} "+"x"*100)
+            for i in range(180)]
+    req = _build_request(segs,total=1800)
+    chunks = sel._chunks(req)
+    assert len(chunks)>1
+    assert [s for chunk in chunks for s in chunk]==segs
+    from dataclasses import replace
+    for chunk in chunks:
+        assert len(sel._build_user_payload(replace(req,segments=chunk)))<MAX_TRANSCRIPT_CHARS+200
 
 
 def test_truncation_aligns_to_segment_start():

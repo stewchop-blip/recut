@@ -32,6 +32,10 @@ class RenderQueueMiddleware(BaseMiddleware):
             return
         self._users.add(user.id)
         token = None
+        highlights = action == 'action:youtube_highlights'
+        if highlights and event.message:
+            from app.bot.handlers.youtube_highlights import _running
+            _running[user.id] = (event.message.message_id, asyncio.current_task())
         try:
             if action == 'url:original':
                 return await handler(event, data)
@@ -41,10 +45,17 @@ class RenderQueueMiddleware(BaseMiddleware):
             token = branding_required.set(enabled)
             if self._semaphore.locked() and event.message:
                 await event.answer('Ролик в очереди…')
-                await event.message.edit_text('⏳ Ролик в очереди. Скоро начнём обработку.')
+                options = {}
+                if highlights:
+                    from app.bot.handlers.youtube_highlights import cancel_menu
+                    options['reply_markup'] = cancel_menu()
+                await event.message.edit_text('⏳ Ролик в очереди. Скоро начнём обработку.', **options)
             async with self._semaphore:
                 return await handler(event, data)
         finally:
+            if highlights:
+                from app.bot.handlers.youtube_highlights import _running
+                _running.pop(user.id, None)
             if token is not None:
                 branding_required.reset(token)
             self._users.discard(user.id)

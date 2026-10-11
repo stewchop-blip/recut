@@ -116,12 +116,15 @@ class FFmpegRunner:
         stdout_task = asyncio.create_task(_pump_stdout())
         try:
             await asyncio.wait_for(self._proc.wait(), timeout_seconds)
-        except asyncio.TimeoutError as e:
+            await asyncio.gather(stderr_task, stdout_task)
+        except BaseException as exc:
             self.cancel()
-            raise FFmpegError("ffmpeg timed out") from e
-        finally:
-            pass
-        await stderr_task
+            await self._proc.wait()
+            await asyncio.gather(stderr_task, stdout_task, return_exceptions=True)
+            self._proc = None
+            if isinstance(exc, asyncio.TimeoutError):
+                raise FFmpegError("ffmpeg timed out") from exc
+            raise
         returncode = self._proc.returncode or 0
         self._proc = None
         ok = (returncode == 0) and not self._cancelled

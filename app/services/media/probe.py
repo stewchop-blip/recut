@@ -5,6 +5,7 @@ file paths are safe — they're passed as argv tokens, never interpolated
 into a command string.
 """
 import asyncio
+from app.services.media.process import communicate
 import json
 import re
 import shutil
@@ -106,7 +107,7 @@ class FFprobeService:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await communicate(proc, 30)
         if proc.returncode != 0:
             err = stderr.decode(errors="ignore")[:500]
             logger.error("ffprobe_failed", file=str(file_path), error=err)

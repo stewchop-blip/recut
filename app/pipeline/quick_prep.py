@@ -82,6 +82,7 @@ class QuickPrepPipeline:
         subtitles_enabled: bool = False,
         subtitle_style: str = "standard",
         subtitle_language: str = "",
+        subtitle_segments=None,
         logo_asset: Path | None = None,
         recut_branding: bool | None = None,
         transformation_preset: str = "custom",  # PART 23: clean / meme / brand / custom
@@ -241,8 +242,10 @@ class QuickPrepPipeline:
         if subtitles_enabled:
             from app.pipeline.appearance_stages import add_subtitles
             try:
+                subtitle_options = {} if subtitle_segments is None else {
+                    "segments": subtitle_segments, "speed": speed}
                 subtitle_path = await add_subtitles(media, current, job_dir,
-                    style=subtitle_style, language=subtitle_language)
+                    style=subtitle_style, language=subtitle_language, **subtitle_options)
                 has_subtitles = subtitle_path != current
                 current = subtitle_path
                 if not has_subtitles:

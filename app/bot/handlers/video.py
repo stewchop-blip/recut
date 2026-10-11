@@ -366,6 +366,12 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
             "❌ Поддерживаются ссылки: TikTok, Instagram, YouTube. Попробуй другую.")
         return
 
+    # Explicit moments mode consumes the link before the normal full download.
+    if get_selected_mode(user_id) == "moments":
+        from app.bot.handlers.youtube_highlights import accept_url
+        await accept_url(message, url)
+        return
+
     async with db_manager.session() as session:
         repo = JobRepository(session)
         if await repo.has_active_job(user_id):
@@ -1013,6 +1019,12 @@ async def on_mode_selected(call: CallbackQuery) -> None:
         await call.answer("Неизвестный режим")
         return
     _mode_state[user_id] = mode
+    if mode == "moments":
+        await call.message.edit_text(
+            "✂️ <b>Найти лучшие моменты</b>\n\nПришли ссылку на публичное YouTube-видео "
+            "от 2 до 60 минут с субтитрами. Подберу до 3 моментов по речи.", parse_mode="HTML")
+        await call.answer()
+        return
     pending = _get_pending(user_id)
     if pending is not None and Path(pending.input_path).is_file():
         await call.message.edit_text(
@@ -1776,3 +1788,7 @@ async def toggle_decoration(call: CallbackQuery) -> None:
         row = await UserSettingsRepository(session).get_or_create(call.from_user.id)
         row.decoration_enabled = not bool(row.decoration_enabled)
     await on_appearance_menu(call)
+
+
+from app.bot.handlers.youtube_highlights import register as _register_youtube
+_register_youtube(router)

@@ -1,6 +1,7 @@
 """Media service for FFmpeg operations (future video support)."""
 
 import asyncio
+from app.services.media.process import communicate
 import shutil
 import subprocess
 from pathlib import Path
@@ -143,7 +144,7 @@ class MediaService:
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        _, stderr = await communicate(proc, timeout)
         if proc.returncode != 0:
             raise RuntimeError(
                 "normalize_square_pixels failed: "
@@ -212,9 +213,7 @@ class MediaService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds,
-            )
+            stdout, stderr = await communicate(proc, timeout_seconds)
         except asyncio.TimeoutError as e:
             raise RuntimeError(f"FFmpeg extract_audio timed out after {timeout_seconds}s") from e
 
@@ -282,9 +281,7 @@ class MediaService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds,
-            )
+            stdout, stderr = await communicate(proc, timeout_seconds)
         except asyncio.TimeoutError as e:
             raise RuntimeError(f"FFmpeg cut timed out after {timeout_seconds}s") from e
 
@@ -617,9 +614,7 @@ class MediaService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds,
-            )
+            stdout, stderr = await communicate(proc, timeout_seconds)
         except asyncio.TimeoutError as e:
             raise RuntimeError(
                 f"FFmpeg make_vertical timed out after {timeout_seconds}s"
@@ -695,9 +690,7 @@ class MediaService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds,
-            )
+            stdout, stderr = await communicate(proc, timeout_seconds)
         except asyncio.TimeoutError as e:
             raise RuntimeError(
                 f"FFmpeg burn_subtitles timed out after {timeout_seconds}s"
@@ -781,9 +774,8 @@ class MediaService:
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+            _, stderr = await communicate(proc, timeout_seconds)
         except asyncio.TimeoutError as e:
-            proc.kill()
             raise RuntimeError("cropdetect timed out") from e
 
         import re
@@ -851,9 +843,8 @@ class MediaService:
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            _, stderr = await communicate(proc, timeout)
         except asyncio.TimeoutError as e:
-            proc.kill()
             raise RuntimeError("crop pass timed out") from e
         if proc.returncode != 0:
             raise RuntimeError(f"crop pass failed: {stderr.decode(errors='ignore')[:300]}")
@@ -1023,9 +1014,7 @@ class MediaService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds,
-            )
+            stdout, stderr = await communicate(proc, timeout_seconds)
         except asyncio.TimeoutError as e:
             raise RuntimeError(
                 f"FFmpeg burn_cta timed out after {timeout_seconds}s"
@@ -1085,9 +1074,7 @@ class MediaService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds,
-            )
+            stdout, stderr = await communicate(proc, timeout_seconds)
         except asyncio.TimeoutError:
             logger.warning("loudnorm_measure_timeout_fallback_copy")
             # Fall back to plain remux-with-metadata-strip.
@@ -1136,9 +1123,7 @@ class MediaService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_seconds,
-            )
+            stdout, stderr = await communicate(proc, timeout_seconds)
         except asyncio.TimeoutError as e:
             raise RuntimeError(
                 f"FFmpeg finalize timed out after {timeout_seconds}s"
@@ -1185,9 +1170,7 @@ class MediaService:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout_seconds,
-        )
+        stdout, stderr = await communicate(proc, timeout_seconds)
         if proc.returncode != 0:
             err = stderr.decode(errors="ignore")[:500]
             raise RuntimeError(f"FFmpeg strip failed: {err}")

@@ -10,7 +10,7 @@ from app.services.generations import AllowanceRejected, current_run, reserve, re
 
 logger = get_logger(__name__)
 RENDER_ACTIONS = {'action:quick_prep', 'action:maximum_transform', 'action:versions',
-                  'action:analyze_long', 'url:recut'}
+                  'action:analyze_long', 'action:youtube_highlights', 'url:recut'}
 
 
 class GenerationMiddleware(BaseMiddleware):

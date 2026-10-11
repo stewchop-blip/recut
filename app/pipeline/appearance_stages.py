@@ -9,16 +9,22 @@ from app.services.appearance import validate_image
 logger = get_logger(__name__)
 
 
-async def add_subtitles(media, video: Path, job_dir: Path, *, style: str, language: str) -> Path:
+async def add_subtitles(media, video: Path, job_dir: Path, *, style: str, language: str, segments=None, speed=1.0) -> Path:
     from app.pipeline.transcriber import Transcriber
     from app.services.subtitles.ass import AssSubtitleBuilder
     from app.services.subtitles.base import SubtitleBuildRequest
-    wav = job_dir / 'speech.wav'
-    await media.extract_audio(video, wav, sample_rate=16000, channels=1)
-    transcript = await Transcriber().transcribe(wav, language=language)
+    if segments is None:
+        wav = job_dir / 'speech.wav'
+        await media.extract_audio(video, wav, sample_rate=16000, channels=1)
+        transcript = await Transcriber().transcribe(wav, language=language)
+        segments = transcript.segments
+    else:
+        from app.services.transcription.base import Segment
+        segments = tuple(Segment(start=s.start/speed, end=s.end/speed, text=s.text)
+                         for s in segments)
     builder = AssSubtitleBuilder()
-    result = builder.build(SubtitleBuildRequest(segments=transcript.segments,
-        clip_start=0, clip_end=transcript.duration_seconds))
+    result = builder.build(SubtitleBuildRequest(segments=segments,
+        clip_start=0, clip_end=max((s.end for s in segments), default=0)))
     try:
         if not result.output_path:
             return video
