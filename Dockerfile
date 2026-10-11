@@ -1,5 +1,10 @@
 # Recut — Python 3.12 slim with FFmpeg (future video features)
+FROM node:22-bookworm-slim AS youtube-js
 FROM python:3.12-slim
+
+# yt-dlp EJS needs an external JS runtime; npm is not needed at runtime.
+COPY --from=youtube-js /usr/local/bin/node /usr/local/bin/node
+RUN node --version
 
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -24,7 +29,7 @@ WORKDIR /app
 # Copy only dependencies first for layer caching
 COPY pyproject.toml .
 RUN pip install --no-cache-dir -e .
-RUN python -c "import yt_dlp, curl_cffi"
+RUN python -c "import yt_dlp, yt_dlp_ejs, curl_cffi"
 
 # Copy source
 COPY app/ ./app/

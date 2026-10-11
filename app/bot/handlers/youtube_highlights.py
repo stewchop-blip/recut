@@ -120,6 +120,12 @@ async def render_options(bot, user_id, directory):
 
 
 ERRORS = {
+    'YOUTUBE_AUTH_REQUIRED': 'YouTube отклонил запрос сервера и требует проверку входа. Обработка по этой ссылке сейчас недоступна.',
+    'YOUTUBE_RATE_LIMITED': 'YouTube временно ограничил запросы. Попробуй позже.',
+    'YOUTUBE_JS_FAILED': 'Не удалось пройти техническую проверку YouTube. Попробуй позже.',
+    'YOUTUBE_VIDEO_UNAVAILABLE': 'YouTube сообщает, что видео недоступно. Проверь ссылку и доступ к видео.',
+    'YOUTUBE_NETWORK_FAILED': 'Не удалось соединиться с YouTube. Попробуй позже.',
+    'YOUTUBE_UNAVAILABLE': 'Не удалось получить данные видео с YouTube. Попробуй позже.',
     'PARTIAL_UNSUPPORTED': 'Для этого видео YouTube не отдал поток для загрузки фрагментов. Попробуй другое видео.',
     'CAPTIONS_UNAVAILABLE': 'Не удалось получить субтитры. Для поиска моментов пришли YouTube-видео с доступными субтитрами.',
     'SOURCE_UNSUPPORTED': 'Нужно публичное завершённое YouTube-видео от 2 до 60 минут.',

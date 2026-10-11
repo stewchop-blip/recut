@@ -23,6 +23,40 @@ URL='https://www.youtube.com/watch?v=aqz-KE-bpKQ'
 MEDIA='https://test.googlevideo.com/'
 
 
+@pytest.mark.parametrize('message,code', [
+    ("Sign in to confirm you’re not a bot", 'YOUTUBE_AUTH_REQUIRED'),
+    ('HTTP Error 429: Too Many Requests', 'YOUTUBE_RATE_LIMITED'),
+    ('No supported JavaScript runtime could be found', 'YOUTUBE_JS_FAILED'),
+    ('Private video', 'YOUTUBE_VIDEO_UNAVAILABLE'),
+    ('Unable to download webpage: connection refused', 'YOUTUBE_NETWORK_FAILED'),
+    ('Requested format is not available', 'PARTIAL_UNSUPPORTED'),
+    ('unknown signed-url=secret', 'YOUTUBE_UNAVAILABLE'),
+])
+def test_metadata_error_classification(message, code):
+    assert h.metadata_error(message.encode()) == code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', [False, True])
+async def test_metadata_subprocess_drains_stderr_and_uses_runtime(monkeypatch, failure):
+    import sys
+    spawn = asyncio.create_subprocess_exec
+    async def fake_spawn(*args, **kwargs):
+        assert args[:3] == (sys.executable, '-m', 'yt_dlp')
+        assert args[args.index('--js-runtimes')+1] == 'node'
+        assert '--skip-download' in args
+        script = ("import sys,json; sys.stderr.write('x'*200000); "
+                  + ("sys.stderr.write('Sign in to confirm you are not a bot'); sys.exit(1)"
+                     if failure else "print(json.dumps({'id':'aqz-KE-bpKQ'}))"))
+        return await spawn(sys.executable, '-c', script, **kwargs)
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake_spawn)
+    if failure:
+        with pytest.raises(h.HighlightsError, match='YOUTUBE_AUTH_REQUIRED'):
+            await asyncio.wait_for(h.metadata(URL), 5)
+    else:
+        assert (await asyncio.wait_for(h.metadata(URL), 5))['id'] == 'aqz-KE-bpKQ'
+
+
 def manifest(duration=600):
     return '#EXTM3U\n'+''.join(f'#EXTINF:10,\n{i}.ts\n' for i in range(duration//10))+'#EXT-X-ENDLIST\n'
 

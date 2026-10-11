@@ -1,5 +1,15 @@
 # YouTube highlights beta
 
+Metadata follow-up: the server image includes Node 22 and bundled yt-dlp EJS;
+the metadata subprocess explicitly enables Node. See the upstream setup guide:
+https://github.com/yt-dlp/yt-dlp/wiki/EJS . Bounded stderr is drained concurrently
+and classified into fixed error codes (authentication, rate limit, runtime,
+unavailable video, network, unsupported format). Raw stderr is never logged.
+The uploaded production log for job 427 contained only `YOUTUBE_UNAVAILABLE`
+and zero downloaded bytes; it cannot prove which upstream failure occurred.
+The missing runtime is fixed, but that alone does not prove the source will
+be accessible from Railway. A fresh request is needed to establish that.
+
 Open `/start` → «✂️ Найти лучшие моменты» → send a YouTube link → confirm.
 Old Telegram messages retain their old keyboards; `/start` creates the new menu.
 The explicit mode intercepts links before the ordinary full-video downloader.

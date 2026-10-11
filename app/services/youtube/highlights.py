@@ -9,7 +9,7 @@ import ipaddress
 import json
 import math
 import re
-import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlsplit
@@ -158,15 +158,40 @@ def captions_json3(body: bytes, duration: float, language: str) -> TranscribedJo
         raise HighlightsError('CAPTIONS_UNAVAILABLE') from None
 
 
+def metadata_error(stderr: bytes) -> str:
+    """Classify diagnostics without logging signed URLs, cookies or remote text."""
+    text = stderr.decode('utf-8', errors='replace').lower()
+    if any(s in text for s in ("confirm you’re not a bot", "confirm you're not a bot", 'sign in to confirm')):
+        return 'YOUTUBE_AUTH_REQUIRED'
+    if '429' in text or 'too many requests' in text:
+        return 'YOUTUBE_RATE_LIMITED'
+    if any(s in text for s in ('no supported javascript runtime', 'challenge solving failed', 'n challenge')):
+        return 'YOUTUBE_JS_FAILED'
+    if any(s in text for s in ('private video', 'video unavailable', 'video has been removed', 'not available in your country')):
+        return 'YOUTUBE_VIDEO_UNAVAILABLE'
+    if 'requested format is not available' in text:
+        return 'PARTIAL_UNSUPPORTED'
+    if any(s in text for s in ('timed out', 'unable to download', 'name resolution', 'connection refused', 'certificate verify failed')):
+        return 'YOUTUBE_NETWORK_FAILED'
+    return 'YOUTUBE_UNAVAILABLE'
+
+
 async def metadata(url: str) -> dict:
     """Metadata only, bounded pipe readers and process lifetime."""
     canonical = youtube_url(url)
     proc = await asyncio.create_subprocess_exec(
-        shutil.which('yt-dlp') or 'yt-dlp', '--ignore-config', '--no-plugin-dirs',
-        '--no-playlist', '--skip-download', '--no-warnings', '--socket-timeout', '15',
+        sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-plugin-dirs',
+        '--js-runtimes', 'node', '--no-playlist', '--skip-download', '--socket-timeout', '15',
         '--retries', '1', '--dump-single-json', '--', canonical,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         start_new_session=True)
+    async def diagnostics():
+        tail = bytearray()
+        while chunk := await proc.stderr.read(16384):
+            tail.extend(chunk)
+            del tail[:-65536]
+        return bytes(tail)
+    stderr_task = asyncio.create_task(diagnostics())
     async def read():
         output = bytearray()
         while chunk := await proc.stdout.read(65536):
@@ -174,8 +199,11 @@ async def metadata(url: str) -> dict:
                 raise HighlightsError('METADATA_TOO_LARGE')
             output.extend(chunk)
         await proc.wait()
+        stderr = await stderr_task
         if proc.returncode:
-            raise HighlightsError('YOUTUBE_UNAVAILABLE')
+            code = metadata_error(stderr)
+            logger.warning('youtube_metadata_failed', error_code=code, exit_code=proc.returncode)
+            raise HighlightsError(code)
         try:
             info = json.loads(output)
             if not isinstance(info, dict) or info.get('id') != canonical.rsplit('=',1)[1]:
@@ -194,6 +222,7 @@ async def metadata(url: str) -> dict:
             except ProcessLookupError:
                 pass
             await proc.wait()
+        await asyncio.gather(stderr_task, return_exceptions=True)
 
 
 class YouTubeSource:
