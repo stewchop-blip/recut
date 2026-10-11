@@ -181,10 +181,11 @@ async def run(call):
                 cutter = ClipCutter(min_duration_seconds=20,max_duration_seconds=60)
                 ranges = [cutter._adjust_boundaries(c,transcript.segments,source.duration)
                           for c in analysed.clips[:3]]
-                selected = [select_parts(source.parts,a,b,source.duration) for a,b in ranges]
-                union = {p for group in selected for p in group}
-                if len(union) >= len(source.parts):
-                    raise HighlightsError('PARTIAL_UNSUPPORTED')
+                if not getattr(source,'range_tracks',None):
+                    selected = [select_parts(source.parts,a,b,source.duration) for a,b in ranges]
+                    union = {p for group in selected for p in group}
+                    if len(union) >= len(source.parts):
+                        raise HighlightsError('PARTIAL_UNSUPPORTED')
                 options = await render_options(call.bot,user_id,directory)
                 for index,(start,end) in enumerate(ranges,1):
                     clip_dir = directory/f'clip_{index}'

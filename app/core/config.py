@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -81,6 +81,19 @@ class Settings(BaseSettings):
     youtube_highlights_max_minutes: int = Field(default=60, ge=2, le=60)
     youtube_highlights_max_mb: int = Field(default=96, ge=8, le=256)
     youtube_highlights_timeout_seconds: int = Field(default=900, ge=120, le=1800)
+    # Optional operator-owned egress. Never accepts a proxy from a user message.
+    youtube_proxy_url: SecretStr = SecretStr('')
+
+    @field_validator('youtube_proxy_url')
+    @classmethod
+    def validate_youtube_proxy(cls, value):
+        from urllib.parse import urlsplit
+        text = value.get_secret_value()
+        if text:
+            p = urlsplit(text)
+            if p.scheme not in {'http','https'} or not p.hostname or p.fragment or p.query or p.path not in {'','/'}:
+                raise ValueError('YouTube proxy must be an HTTP(S) proxy origin')
+        return value
 
     # === Whisper STT ===
     whisper_model: str = Field(

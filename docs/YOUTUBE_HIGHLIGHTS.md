@@ -10,6 +10,44 @@ and zero downloaded bytes; it cannot prove which upstream failure occurred.
 The missing runtime is fixed, but that alone does not prove the source will
 be accessible from Railway. A fresh request is needed to establish that.
 
+## Indexed MP4 follow-up
+
+When muxed HLS is absent, HTTP(S) AVC MP4 at up to 720p is supported through a
+local range bridge. Separate AAC audio is supported; original-language audio
+and captions are preferred over dubbed tracks. The MP4 header is checked before
+handing the opaque loopback URL to FFmpeg. Remote URLs never reach FFmpeg.
+
+FFmpeg seeks using the container index. Upstream reads use explicit ranges of
+at most 64 KiB through the existing body counter. HTTP 200 instead of 206, wrong
+Content-Range, changed total size or malformed data fails closed. Initial index
+reads and bounded read-ahead are included; the method does not fetch exclusively
+the exact compressed samples of the selected seconds. Unique byte coverage is
+limited to 60% per source track across the whole job, in addition to the 96 MiB
+received-body budget. Complete-resource fallback is impossible in this path.
+512 range reads are allowed per clip. The bridge binds loopback only, uses an
+unguessable token, disables access logs and stops handlers on disconnect.
+
+Real local HTTP + FFmpeg tests on a 120-second MP4 produced a 10-second clip:
+1,114,112 / 7,799,004 bytes for muxed media and 1,572,864 / 7,779,562 bytes for
+separate tracks (14.3% / 20.2%). Byte totals vary with read-ahead scheduling.
+These tests validate range seeking and accounting, not live YouTube access.
+After this change the full suite passed: **516 tests**, with 9 existing warnings.
+
+The concrete source `WTizYlHNJhQ` returned metadata locally: 1,220 seconds,
+original Russian captions/audio, ordinary HTTPS MP4 renditions, no HLS.
+The additional `web_embedded` client is explicitly enabled. A successful
+metadata request here does not establish access from Railway. The supplied
+Railway log for job 432 conclusively classified its request as
+`YOUTUBE_AUTH_REQUIRED`; runtime installation did not fix that upstream gate.
+
+Optional `YOUTUBE_PROXY_URL` accepts an operator-owned HTTP(S) proxy origin.
+It is applied consistently to yt-dlp metadata, captions and all media ranges;
+credentials are held as SecretStr and never printed. It defaults to empty.
+No proxy was purchased or configured by this change. If anonymous clients remain
+blocked from Railway, a working network exit must be supplied and tested before
+claiming successful end-to-end YouTube processing. Do not set a random public
+proxy or transfer signed media URLs between different exits.
+
 Open `/start` → «✂️ Найти лучшие моменты» → send a YouTube link → confirm.
 Old Telegram messages retain their old keyboards; `/start` creates the new menu.
 The explicit mode intercepts links before the ordinary full-video downloader.
@@ -18,7 +56,7 @@ Ordinary short-video handling remains available through «✨ Сделать р�
 ## Scope and reuse
 
 Public, completed videos from 2 to 60 minutes, with readable manual or automatic
-JSON3 captions and a muxed AVC/AAC MPEG-TS HLS VOD rendition at up to 720p.
+JSON3 captions and AVC/AAC MPEG-TS HLS or indexed MP4 media at up to 720p.
 Manual captions are tried first. Automatic translated tracks are excluded.
 No audio transcription fallback is enabled in this beta. Selection is based on
 speech, not visual action. Videos without an eligible source fail gracefully.
@@ -30,9 +68,10 @@ Existing Analyser, boundary adjustment, QuickPrep appearance, subtitles,
 branding, TelegramSender, render queue and generation accounting are reused.
 Saved subtitles use the supplied captions instead of running Whisper again.
 
-Only HLS segments intersecting validated clip ranges are fetched. FFmpeg gets
-local files only. Encryption, live/discontinuous playlists, byte ranges,
-separate audio and full HTTP-resource fallbacks are deliberately unsupported.
+HLS fetches only segments intersecting validated clip ranges. The MP4 bridge
+fetches indices and selected ranges with bounded read-ahead. FFmpeg gets local
+files or an opaque loopback URL. Encryption and live/discontinuous playlists
+are unsupported. Whole HTTP-resource fallback is deliberately unsupported.
 Canonical YouTube intake, HTTPS host allowlists, public DNS answers and disabled
 redirects protect the new media fetch path. yt-dlp is used for metadata only.
 

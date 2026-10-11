@@ -1,8 +1,8 @@
-"""Bounded YouTube VOD captions and selective HLS media transfer.
+"""Bounded YouTube VOD captions and selective HLS / indexed MP4 transfer.
 
-Only unencrypted, muxed MPEG-TS VOD playlists are supported. Select segment
-URLs before doing any media I/O; never hand a remote URL to FFmpeg. Byte
-counters include every received body chunk, including failed transfers.
+HLS uses selected unencrypted MPEG-TS segments. Indexed MP4 uses a bounded
+loopback range bridge. Never hand a remote URL to FFmpeg. Byte counters include
+every received body chunk, including failed transfers.
 """
 import asyncio
 import ipaddress
@@ -179,10 +179,14 @@ def metadata_error(stderr: bytes) -> str:
 async def metadata(url: str) -> dict:
     """Metadata only, bounded pipe readers and process lifetime."""
     canonical = youtube_url(url)
+    from app.core.config import get_settings
+    proxy = get_settings().youtube_proxy_url.get_secret_value()
+    proxy_args = ['--proxy',proxy] if proxy else []
     proc = await asyncio.create_subprocess_exec(
         sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-plugin-dirs',
+        '--extractor-args', 'youtube:player_client=default,web_embedded;skip=translated_subs',
         '--js-runtimes', 'node', '--no-playlist', '--skip-download', '--socket-timeout', '15',
-        '--retries', '1', '--dump-single-json', '--', canonical,
+        '--retries', '1', '--dump-single-json', *proxy_args, '--', canonical,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         start_new_session=True)
     async def diagnostics():
@@ -233,7 +237,10 @@ class YouTubeSource:
         self.media_bytes = 0
         self.duration = 0.0
         self.parts = ()
+        self.range_tracks = []
         self.session = None
+        from app.core.config import get_settings
+        self.proxy = get_settings().youtube_proxy_url.get_secret_value() or None
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession(
@@ -248,14 +255,22 @@ class YouTubeSource:
         logger.info('youtube_highlights_transfer', received_bytes=self.received_bytes,
                     media_bytes=self.media_bytes)
 
-    async def fetch(self, url, limit, *, captions=False, media=False):
+    async def fetch(self, url, limit, *, captions=False, media=False, byte_range=None):
         if not allowed_url(url, captions=captions):
             raise HighlightsError('UNSAFE_URL')
         if self.received_bytes >= self.max_bytes:
             raise HighlightsError('TRANSFER_LIMIT')
-        async with self.session.get(url, allow_redirects=False) as response:
-            if response.status != 200 or response.headers.get('Content-Encoding', 'identity') != 'identity':
+        headers = {'Range':f'bytes={byte_range[0]}-{byte_range[1]}'} if byte_range else {}
+        async with self.session.get(url, allow_redirects=False, headers=headers, proxy=self.proxy) as response:
+            if response.status != (206 if byte_range else 200) or response.headers.get('Content-Encoding', 'identity') != 'identity':
                 raise HighlightsError('YOUTUBE_UNAVAILABLE')
+            total = None
+            if byte_range:
+                m = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)', response.headers.get('Content-Range',''))
+                if (not m or (int(m[1]), int(m[2])) != byte_range
+                        or not byte_range[1] < int(m[3]) <= 4*1024**3):
+                    raise HighlightsError('PARTIAL_UNSUPPORTED')
+                total = int(m[3])
             if response.content_length and response.content_length > min(limit, self.max_bytes-self.received_bytes):
                 raise HighlightsError('TRANSFER_LIMIT')
             body = bytearray()
@@ -268,7 +283,52 @@ class YouTubeSource:
                 body.extend(chunk)
             if not body:
                 raise HighlightsError('YOUTUBE_UNAVAILABLE')
+            if byte_range:
+                if len(body) != byte_range[1]-byte_range[0]+1:
+                    raise HighlightsError('INVALID_MEDIA')
+                return bytes(body), total
             return bytes(body)
+
+    async def fetch_range(self, url, start, end):
+        if not 0 <= start <= end or end-start+1 > 256*1024:
+            raise HighlightsError('INVALID_TIMESTAMPS')
+        return await self.fetch(url, end-start+1, media=True, byte_range=(start,end))
+
+    async def prepare_ranges(self, info):
+        from .range_media import RangeTrack
+        formats = [f for f in info.get('formats', [])
+            if f.get('protocol') in {'http','https'} and f.get('ext')=='mp4'
+            and str(f.get('vcodec','')).startswith(('avc1','h264'))
+            and 0 < (f.get('height') or 0) <= 720
+            and not f.get('has_drm') and allowed_url(f.get('url',''))]
+        # Avoid selecting a muxed dubbed track when the original audio exists.
+        formats.sort(key=lambda f: (abs((f.get('height') or 0)-480), -(f.get('language_preference') or 0)))
+        audios = [f for f in info.get('formats', [])
+            if f.get('protocol') in {'http','https'}
+            and str(f.get('acodec','')).startswith(('mp4a','aac'))
+            and f.get('vcodec')=='none' and not f.get('has_drm')
+            and allowed_url(f.get('url',''))]
+        audios.sort(key=lambda f: (-(f.get('language_preference') or 0),abs((f.get('abr') or 128)-128),bool(f.get('is_drc'))))
+        for video in formats[:2]:
+            candidates = [video]
+            if video.get('acodec') in {None,'none'}:
+                if not audios:
+                    continue
+                candidates.append(audios[0])
+            try:
+                tracks=[]
+                for f in candidates:
+                    header, total = await self.fetch_range(f['url'], 0, 31)
+                    if header[4:8] != b'ftyp':
+                        raise HighlightsError('PARTIAL_UNSUPPORTED')
+                    tracks.append(RangeTrack(f['url'], total, [(0,32)]))
+                self.range_tracks = tracks
+                logger.info('youtube_partial_source', method='http_range', tracks=len(tracks))
+                return
+            except HighlightsError as exc:
+                if str(exc)=='TRANSFER_LIMIT':
+                    raise
+        raise HighlightsError('PARTIAL_UNSUPPORTED')
 
     async def prepare(self, url):
         info = await metadata(url)
@@ -281,16 +341,14 @@ class YouTubeSource:
                 raise ValueError
         except (ValueError, TypeError):
             raise HighlightsError('SOURCE_UNSUPPORTED') from None
-        # Prefer muxed AVC/AAC VOD at <=720p. No separate audio rendition,
-        # master playlist resolution or full HTTP resource fallback.
+        # Prefer muxed HLS when available; otherwise indexed MP4 with bounded
+        # range reads, including separate original-language AAC audio.
         formats = [f for f in info.get('formats', [])
                    if f.get('protocol') in {'m3u8','m3u8_native'}
                    and str(f.get('vcodec','')).startswith(('avc1','h264'))
                    and str(f.get('acodec','')).startswith(('mp4a','aac'))
                    and 0 < (f.get('height') or 0) <= 720 and not f.get('has_drm')
                    and allowed_url(f.get('url',''))]
-        if not formats:
-            raise HighlightsError('PARTIAL_UNSUPPORTED')
         formats.sort(key=lambda f: abs((f.get('height') or 0)-480))
         for f in formats[:3]:
             try:
@@ -300,12 +358,13 @@ class YouTubeSource:
             except (HighlightsError, UnicodeError):
                 continue
         if not self.parts:
-            raise HighlightsError('PARTIAL_UNSUPPORTED')
+            await self.prepare_ranges(info)
         language = info.get('language') or ''
         for name in ('subtitles', 'automatic_captions'):
             tracks = info.get(name) or {}
             # Manual first; original language then ru/en then other originals.
-            keys = sorted(tracks, key=lambda k:(k!=language, k not in {'ru','en'},k))
+            keys = sorted(tracks, key=lambda k:(k.removesuffix('-orig')!=language,
+                k.removesuffix('-orig') not in {'ru','en'},not k.endswith('-orig'),k))
             attempts = 0
             for lang in keys:
                 for track in tracks[lang]:
@@ -327,6 +386,12 @@ class YouTubeSource:
         raise HighlightsError('CAPTIONS_UNAVAILABLE')
 
     async def download_clip(self, start, end, directory: Path) -> Path:
+        if self.range_tracks:
+            if (not all(math.isfinite(v) for v in (start,end))
+                    or not 0 <= start < end <= self.duration or not 5 <= end-start <= 62):
+                raise HighlightsError('INVALID_TIMESTAMPS')
+            from .range_media import render_ranges
+            return await render_ranges(self,start,end,directory)
         selected = select_parts(self.parts, start, end, self.duration)
         directory.mkdir(parents=True, exist_ok=True)
         raw = directory/'selected.ts'
