@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 20177)
-Total output lines: 1876
-
 """Video intake + Quick Prep + Settings handlers.
 
 New UX flow:
@@ -936,7 +933,28 @@ async def on_analyze_long(call: CallbackQuery) -> None:
         return
     pending = _pop_pending(user_id)
     if pending is None:
-        await call.…177 tokens truncated…out Recut processing."""
+        await call.answer("⚠️ Сначала отправь видео.", show_alert=True)
+        return
+    await call.answer("🔍 Анализирую…")
+
+    # Run the long pipeline (legacy handler) in-place.
+    # We import the inner function to avoid a circular import.
+    from app.bot.handlers.video_legacy import run_long_pipeline
+    try:
+        await run_long_pipeline(
+            call.message,
+            call.bot,
+            pending,
+            user_id,
+        )
+    finally:
+        # The legacy runner cleans up its own workspace.
+        pass
+
+
+@router.callback_query(F.data == "url:original")
+async def on_url_original(call: CallbackQuery) -> None:
+    """Send the downloaded URL video as-is, without Recut processing."""
     user_id = call.from_user.id if call.from_user else 0
     pending = _get_pending(user_id)
     if pending is None or not Path(pending.input_path).is_file():
