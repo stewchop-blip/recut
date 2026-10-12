@@ -137,6 +137,11 @@ ERRORS = {
 
 async def run(call):
     user_id = call.from_user.id
+    from app.bot.handlers.video import _subscription_gate_blocked
+    if call.message and await _subscription_gate_blocked(
+            call.bot, user_id, call.message.answer):
+        await call.answer()
+        return
     pending = _pending.get(user_id)
     if (pending is None or pending.status_id != call.message.message_id
             or pending.chat_id != call.message.chat.id or time.monotonic()-pending.created>1800):
@@ -226,6 +231,9 @@ async def run(call):
                         await repo.mark_failed(job_id,'YOUTUBE_HIGHLIGHTS_FAILED','')
             except Exception:
                 logger.warning('youtube_highlights_status_failed',job_id=job_id)
+        if sent:
+            from app.bot.handlers.video import _offer_subscription_after_first_result
+            await _offer_subscription_after_first_result(call.bot, user_id, call.message)
         shutil.rmtree(directory,ignore_errors=True)
         _running.pop(user_id,None)
         from app.bot.handlers.video import _mode_state

@@ -956,6 +956,10 @@ async def on_analyze_long(call: CallbackQuery) -> None:
 async def on_url_original(call: CallbackQuery) -> None:
     """Send the downloaded URL video as-is, without Recut processing."""
     user_id = call.from_user.id if call.from_user else 0
+    if call.message and await _subscription_gate_blocked(bot=call.bot, user_id=user_id,
+                                                          reply=call.message.answer):
+        await call.answer()
+        return
     pending = _get_pending(user_id)
     if pending is None or not Path(pending.input_path).is_file():
         from app.services.current_media import resolve_current_media
