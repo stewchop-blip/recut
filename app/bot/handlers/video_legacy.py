@@ -206,6 +206,8 @@ async def run_long_pipeline(
                 await JobRepository(session).mark_completed(
                     pending.job_id, clips_generated=len(send_result.sent),
                 )
+            from app.bot.handlers.video import _offer_subscription_after_first_result
+            await _offer_subscription_after_first_result(bot, user_id, message)
         else:
             await edit_status("❌ Не удалось отправить клипы.")
 

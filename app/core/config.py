@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     unlimited_telegram_ids: str = ""
     beta_testers_unlimited: bool = True
 
+    # Require membership in the ReCut channel after a user's first successful
+    # processed video. The first result remains free; no DB schema changes.
+    subscription_gate_enabled: bool = True
+    subscription_channel: str = "@recutcontent"
+
     # === OpenRouter (used only for transcript analysis / clip selection) ===
     openrouter_api_key: str = Field(..., description="OpenRouter API key")
     clip_analysis_model: str = Field(

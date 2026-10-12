@@ -156,6 +156,14 @@ RESULT_MENU_MOMENTS = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 
+def subscription_gate(channel: str) -> InlineKeyboardMarkup:
+    username = channel.lstrip("@")
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Подписаться на канал", url=f"https://t.me/{username}")],
+        [InlineKeyboardButton(text="✅ Я подписался", callback_data="subscription:check")],
+    ])
+
+
 # ---------------------------------------------------------------------------
 # Fine-setting pickers (back → fine:menu)
 # ---------------------------------------------------------------------------

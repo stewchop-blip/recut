@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 20177)
+Total output lines: 1876
+
 """Video intake + Quick Prep + Settings handlers.
 
 New UX flow:
@@ -50,6 +53,7 @@ from app.bot.keyboards.inline import (
     mode_input_menu,
     audio_menu,
     preview_keyboard,
+    subscription_gate,
     style_pick_menu,
     title_menu,
 )
@@ -72,6 +76,69 @@ from app.utils.temp import get_temp_manager
 
 router = Router()
 logger = get_logger(__name__)
+
+
+async def _subscription_gate_blocked(bot, user_id: int, reply) -> bool:
+    """Send the channel prompt when this user has already received a result."""
+    from app.services.subscription import subscription_required
+    settings = get_settings()
+    try:
+        required = await subscription_required(bot, user_id)
+    except Exception:
+        await reply(
+            "⚠️ Сейчас не получается проверить подписку. Попробуй чуть позже; "
+            "если ошибка повторится, напиши в поддержку @stewchop."
+        )
+        return True
+    if required:
+        await reply(
+            "✅ Первый ролик уже готов. Чтобы продолжить, подпишись на канал ReCut "
+            "и нажми «Я подписался».",
+            reply_markup=subscription_gate(settings.subscription_channel),
+        )
+        return True
+    return False
+
+
+async def _offer_subscription_after_first_result(bot, user_id: int, message) -> None:
+    """Show the channel invitation immediately after the first delivered edit."""
+    settings = get_settings()
+    if not settings.subscription_gate_enabled:
+        return
+    from app.services.subscription import successful_processed_video_count
+    try:
+        if await successful_processed_video_count(user_id) != 1:
+            return
+        await _subscription_gate_blocked(bot, user_id, message.answer)
+    except Exception as exc:
+        logger.warning("subscription_offer_skipped", user_id=user_id,
+                       error=type(exc).__name__)
+
+
+@router.callback_query(F.data == "subscription:check")
+async def check_subscription(call: CallbackQuery) -> None:
+    user_id = call.from_user.id if call.from_user else 0
+    from app.services.subscription import has_successful_processed_video
+    settings = get_settings()
+    try:
+        if not await has_successful_processed_video(user_id):
+            await call.answer("Проверка не требуется — отправь видео в бот.", show_alert=True)
+            return
+        member = await call.bot.get_chat_member(settings.subscription_channel, user_id)
+    except Exception as exc:
+        logger.error("subscription_recheck_failed", user_id=user_id,
+                     channel=settings.subscription_channel, error=type(exc).__name__)
+        await call.answer("Не удалось проверить подписку. Попробуй позже.", show_alert=True)
+        return
+    is_member = member.status in {"creator", "administrator", "member"} or (
+        member.status == "restricted" and getattr(member, "is_member", False)
+    )
+    if is_member:
+        await call.answer("✅ Подписка подтверждена")
+        if call.message:
+            await call.message.answer("Отлично! Теперь отправь следующее видео.")
+    else:
+        await call.answer("Подписка пока не найдена. Подпишись и нажми ещё раз.", show_alert=True)
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +220,8 @@ async def on_video_message(message: types.Message, bot: Bot) -> None:
     # Detect attachment
     attachment = _pick_attachment(message)
     if attachment is None:
+        return
+    if await _subscription_gate_blocked(bot, user_id, message.answer):
         return
 
     declared_size = int(getattr(attachment, "file_size", 0) or 0)
@@ -352,6 +421,8 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
         return
     url = normalize_url(url)
     platform = get_platform_name(url)
+    if await _subscription_gate_blocked(bot, user_id, message.answer):
+        return
     from app.services.downloader.jobs import get_job_queue
     queue = get_job_queue()
     if queue.is_busy(user_id):
@@ -570,6 +641,10 @@ def _pop_pending(user_id: int) -> _PendingJob | None:
 @router.callback_query(F.data.in_({"action:quick_prep", "action:maximum_transform"}))
 async def on_quick_prep(call: CallbackQuery) -> None:
     user_id = call.from_user.id if call.from_user else 0
+    if call.message and await _subscription_gate_blocked(bot=call.bot, user_id=user_id,
+                                                          reply=call.message.answer):
+        await call.answer()
+        return
     pending = _get_pending(user_id)
     if pending is None or not Path(pending.input_path).is_file():
         pending = None
@@ -725,6 +800,7 @@ async def on_quick_prep(call: CallbackQuery) -> None:
             async with db_manager.session() as session:
                 repo = JobRepository(session)
                 await repo.mark_completed(pending.job_id, clips_generated=1)
+            await _offer_subscription_after_first_result(call.bot, user_id, call.message)
             _pop_pending(user_id)
         else:
             await _fail_job(pending.job_id, "SEND_FAILED")
@@ -750,6 +826,10 @@ async def on_quick_prep(call: CallbackQuery) -> None:
 async def on_action_versions(call: CallbackQuery) -> None:
     """STEP 5: ✨ Сделать 3 версии — three real edit decisions."""
     user_id = call.from_user.id if call.from_user else 0
+    if call.message and await _subscription_gate_blocked(bot=call.bot, user_id=user_id,
+                                                          reply=call.message.answer):
+        await call.answer()
+        return
     pending = _get_pending(user_id)
     if pending is None:
         await call.answer("⚠️ Сначала отправь видео.", show_alert=True)
@@ -824,6 +904,7 @@ async def on_action_versions(call: CallbackQuery) -> None:
             async with db_manager.session() as session:
                 repo = JobRepository(session)
                 await repo.mark_completed(pending.job_id, clips_generated=3)
+            await _offer_subscription_after_first_result(call.bot, user_id, call.message)
             _pop_pending(user_id)
         else:
             await _fail_job(pending.job_id, "SEND_FAILED")
@@ -849,30 +930,13 @@ async def on_analyze_long(call: CallbackQuery) -> None:
     runner we already have.
     """
     user_id = call.from_user.id if call.from_user else 0
+    if call.message and await _subscription_gate_blocked(bot=call.bot, user_id=user_id,
+                                                          reply=call.message.answer):
+        await call.answer()
+        return
     pending = _pop_pending(user_id)
     if pending is None:
-        await call.answer("⚠️ Сначала отправь видео.", show_alert=True)
-        return
-    await call.answer("🔍 Анализирую…")
-
-    # Run the long pipeline (legacy handler) in-place.
-    # We import the inner function to avoid a circular import.
-    from app.bot.handlers.video_legacy import run_long_pipeline
-    try:
-        await run_long_pipeline(
-            call.message,
-            call.bot,
-            pending,
-            user_id,
-        )
-    finally:
-        # The legacy runner cleans up its own workspace.
-        pass
-
-
-@router.callback_query(F.data == "url:original")
-async def on_url_original(call: CallbackQuery) -> None:
-    """Send the downloaded URL video as-is, without Recut processing."""
+        await call.…177 tokens truncated…out Recut processing."""
     user_id = call.from_user.id if call.from_user else 0
     pending = _get_pending(user_id)
     if pending is None or not Path(pending.input_path).is_file():

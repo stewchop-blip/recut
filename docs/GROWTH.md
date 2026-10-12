@@ -37,6 +37,15 @@
 | DAILY_FREE_GENERATIONS | 10 | Free successful render actions per UTC day |
 | UNLIMITED_TELEGRAM_IDS | empty | Comma-separated admin/tester IDs exempt from quotas |
 | BETA_TESTERS_UNLIMITED | true | Existing access allowlist also exempts beta testers |
+| SUBSCRIPTION_GATE_ENABLED | true | Require channel membership after the first successful processed video |
+| SUBSCRIPTION_CHANNEL | @recutcontent | Public Telegram channel checked with `getChatMember` |
+
+The first successfully processed video is delivered before any subscription prompt.
+Before the user sends the next video or starts another processing action, the bot
+checks membership in `SUBSCRIPTION_CHANNEL`. Failed renders and original downloads
+do not count. Add `@contentcutbot` as an administrator of the public channel so
+Telegram can reliably return membership status. The user can join with the prompt
+button and confirm using «Я подписался»; the bot rechecks Telegram on that button.
 
 The UTC day resets at 03:00 Minsk. One render action costs one generation, including
 three-version batches and long-video batches. At least one delivered clip constitutes
