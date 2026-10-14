@@ -4,6 +4,63 @@ import pytest
 from app.services.script_video import VideoPlanSchema, from_schema, CostTracker, ScriptPlanner
 
 
+class _PlannerClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def chat_completion(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.responses.pop(0)
+
+
+def _planner_response(content, finish_reason="stop"):
+    return {"choices": [{"finish_reason": finish_reason, "message": {"content": content}}]}
+
+
+def _valid_planner_json():
+    return (
+        '{"title":"Короткий тестовый ролик","language":"ru","target_duration":30,'
+        '"narration":"Краткий текст озвучки.","visual_style":"Современный стиль, мягкий свет",'
+        '"scenes":['
+        '{"id":"s1","narration":"Начало.","visual_prompt":"Тихий город на рассвете",'
+        '"duration_hint":10,"importance":3,"motion_type":"zoom_in","transition":"fade"},'
+        '{"id":"s2","narration":"Продолжение.","visual_prompt":"Человек идёт по улице",'
+        '"duration_hint":10,"importance":3,"motion_type":"pan_right","transition":"fade"},'
+        '{"id":"s3","narration":"Финал.","visual_prompt":"Солнечный горизонт",'
+        '"duration_hint":10,"importance":3,"motion_type":"static","transition":"cut"}'
+        ']}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_planner_retries_truncated_json_once():
+    client = _PlannerClient([
+        _planner_response('{ title: truncated', finish_reason="length"),
+        _planner_response(_valid_planner_json()),
+    ])
+    plan = await ScriptPlanner(client=client).plan("Почему люди откладывают дела")
+    assert plan.title == "Короткий тестовый ролик"
+    assert len(client.calls) == 2
+    assert client.calls[0]["max_tokens"] >= 4000
+
+
+@pytest.mark.asyncio
+async def test_planner_fails_cleanly_after_second_invalid_response():
+    client = _PlannerClient([
+        _planner_response("{ broken", finish_reason="length"),
+        _planner_response("not json"),
+    ])
+    with pytest.raises(RuntimeError, match="valid video plan"):
+        await ScriptPlanner(client=client).plan("Тестовая тема")
+
+
 def test_video_plan_schema_valid():
     import json
     raw = '{"title":"Test","language":"ru","target_duration":35,"narration":"Hello","visual_style":"Modern flat","scenes":[{"id":"s1","narration":"Hello","visual_prompt":"Office","duration_hint":5,"importance":3,"motion_type":"zoom_in","transition":"fade"},{"id":"s2","narration":"Two","visual_prompt":"People","duration_hint":8,"importance":3,"motion_type":"pan_right","transition":"fade"},{"id":"s3","narration":"Done","visual_prompt":"Done","duration_hint":5,"importance":3,"motion_type":"static","transition":"fade"}]}'

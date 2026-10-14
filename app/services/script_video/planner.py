@@ -1,8 +1,9 @@
 """ScriptPlanner — generates VideoPlan via OpenRouter structured output."""
 from __future__ import annotations
 
-import json
 from typing import Optional
+
+from pydantic import ValidationError
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -11,17 +12,18 @@ from app.services.script_video.openrouter_client import OpenRouterClient
 
 logger = get_logger(__name__)
 
-SYSTEM_PROMPT = """You are ReCut ScriptPlanner. Create a 30-60 second vertical video script.
+SYSTEM_PROMPT = """You are ReCut ScriptPlanner. Create a vertical short-video plan.
 
-OUTPUT FORMAT: strict JSON matching VideoPlan schema.
+OUTPUT FORMAT: one strict JSON object matching VideoPlan schema. No markdown, comments, or text outside JSON.
 Fields: title, language, target_duration, narration, visual_style, scenes[].
 
 SCENE rules:
-- 6-10 scenes for 30-60s video.
+- Use 4-6 scenes. Keep the response compact so it remains valid JSON.
 - Each scene must have: id (s1, s2...), narration (spoken text), visual_prompt (descriptive image prompt), duration_hint (seconds), importance (1-5), motion_type (zoom_in/zoom_out/pan_left/pan_right/static), transition (fade/slide_left/slide_right/cut), reference_scene_id (optional, reuse character/object).
 - Visual style must describe: main character, setting, lighting, camera, colors, mood.
 - Use simple modern language, no jargon, no filler.
-- Keep narration concise — about 2-4 sentences per scene for 30-60s total.
+- Keep each scene narration to one or two short sentences; visual_prompt to one concise sentence.
+- The top-level narration must contain the complete voiceover and be concise enough for the requested duration.
 """
 
 
@@ -49,24 +51,70 @@ class ScriptPlanner:
                     f"User idea: {user_idea}\n"
                     f"Target duration: {target_duration} seconds\n"
                     f"Language: {language}\n"
-                    "Generate VideoPlan JSON. Do not include any extra text."
+                    "Generate a compact, complete VideoPlan JSON object. Use 4-6 scenes. "
+                    "Do not include any extra text."
                 ),
             },
         ]
         async with self.client as c:
-            data = await c.chat_completion(
-                model=self.model,
-                messages=messages,
-                temperature=0.2,
-                max_tokens=2500,
-                response_format={"type": "json_object"},
-            )
-        content_text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        if not content_text:
-            logger.error("script_planner_empty_response", model=self.model)
-            raise RuntimeError("Planner returned empty response")
-        # Validate
-        schema = VideoPlanSchema.model_validate_json(content_text)
+            schema = None
+            for attempt in range(2):
+                request_messages = messages if attempt == 0 else [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Create a new video plan for this idea: {user_idea}\n"
+                            f"Duration: {target_duration} seconds. Language: {language}.\n"
+                            "The previous output was truncated or invalid. Return exactly one valid JSON object, "
+                            "with only 4 scenes, short narration, short visual prompts, and all required fields. "
+                            "Do not include markdown or any text outside the JSON object."
+                        ),
+                    },
+                ]
+                try:
+                    data = await c.chat_completion(
+                        model=self.model,
+                        messages=request_messages,
+                        temperature=0.1,
+                        max_tokens=4000,
+                        response_format={"type": "json_object"},
+                    )
+                    choice = (data.get("choices") or [{}])[0]
+                    content = choice.get("message", {}).get("content", "")
+                    if not isinstance(content, str) or not content.strip():
+                        raise ValueError("Planner returned empty response")
+                    if choice.get("finish_reason") == "length":
+                        raise ValueError("Planner response was truncated")
+                    content = content.strip()
+                    if content.startswith("```json"):
+                        content = content[7:]
+                    elif content.startswith("```"):
+                        content = content[3:]
+                    if content.endswith("```"):
+                        content = content[:-3]
+                    # Some providers wrap JSON in a short preamble despite JSON mode.
+                    start, end = content.find("{"), content.rfind("}")
+                    if start < 0 or end < start:
+                        raise ValueError("Planner returned no JSON object")
+                    schema = VideoPlanSchema.model_validate_json(content[start:end + 1])
+                    break
+                except (ValidationError, ValueError, TypeError) as exc:
+                    if attempt == 0:
+                        logger.warning(
+                            "script_planner_invalid_response_retrying",
+                            model=self.model,
+                            error_type=type(exc).__name__,
+                        )
+                    else:
+                        logger.error(
+                            "script_planner_invalid_response",
+                            model=self.model,
+                            error_type=type(exc).__name__,
+                        )
+                        raise RuntimeError("Planner could not return a valid video plan") from exc
+            if schema is None:
+                raise RuntimeError("Planner could not return a valid video plan")
         plan = from_schema(schema)
         logger.info(
             "script_plan_ready",
