@@ -5,8 +5,6 @@ app/services/analysis/openrouter.py.
 """
 from __future__ import annotations
 
-import json
-import time
 from typing import Any, Optional
 
 import httpx
@@ -128,7 +126,8 @@ class OpenRouterClient:
                 if url:
                     results.append(url)
                 elif b64:
-                    results.append(f"data:image/png;base64,{b64}")
+                    media_type = item.get("media_type") or "image/png"
+                    results.append(f"data:{media_type};base64,{b64}")
             logger.info("openrouter_image", model=model, count=len(results), prompt_preview=prompt[:80])
             return results
         except httpx.HTTPStatusError as e:

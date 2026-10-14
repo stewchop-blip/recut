@@ -391,12 +391,6 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
     if user_id in active_render_users:
         await message.answer("Подожди завершения обработки, затем отправь следующее видео.")
         return
-    # Script video generation takes priority for idea descriptions
-    text_lower = (message.text or "").lower()
-    script_triggers = ("сделай", "создай", "ролик", "видео", "на тему", "о ", "про ")
-    if any(t in text_lower for t in script_triggers) and len(text_lower) >= 10:
-        return  # Let script_video handler process
-
     # 1. Active input states take priority
     if user_id in _awaiting_title:
         _awaiting_title.discard(user_id)
@@ -415,6 +409,11 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
             "📎 Жду файл баннера: PNG, JPG, WebP, GIF или короткий MP4.",
             reply_markup=BANNER_CANCEL_MENU,
         )
+        return
+    # This router handles text before script_video.router, so dispatch the
+    # explicitly started idea flow here instead of swallowing the message.
+    from app.bot.handlers.script_video import handle_idea
+    if await handle_idea(message, bot):
         return
     text = (message.text or "").strip()
     # HOTFIX items 9/10/11: extract → normalize → ONE validator → queue.
@@ -1165,6 +1164,8 @@ async def reset_media_selection(user_id: int) -> None:
     _mode_state.pop(user_id, None)
     _awaiting_banner.discard(user_id)
     _awaiting_title.discard(user_id)
+    from app.bot.handlers.script_video import reset_state
+    reset_state(user_id)
 
 
 @router.callback_query(F.data == "replace_media")

@@ -42,6 +42,7 @@ class ImageGenerator:
         prompts: list[str],
         size: str = "1024x1024",
         n_per_prompt: int = 1,
+        max_images: Optional[int] = None,
     ) -> list[str]:
         """Generate images for multiple prompts concurrently.
 
@@ -50,8 +51,8 @@ class ImageGenerator:
         """
         # Enforce image limits based on user tier (free/pro)
         s = get_settings()
-        max_images = s.script_video_max_images_free if s.script_video_enable_limit else s.script_video_max_images_pro
-        prompts = prompts[:max_images]
+        image_limit = max_images or s.script_video_max_images_pro
+        prompts = prompts[:image_limit]
         sem = asyncio.Semaphore(self.concurrency)
         results: list[Optional[list[str]]] = [None] * len(prompts)
 

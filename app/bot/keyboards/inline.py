@@ -17,6 +17,7 @@ from app.services.overlays.templates import BACKGROUNDS, TITLES
 # ---------------------------------------------------------------------------
 
 HOME_MENU = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="📝 Создать ролик", callback_data="script_video:start")],
     [InlineKeyboardButton(text="✨ Сделать ролик", callback_data="mode:prepare")],
     [InlineKeyboardButton(text="⚙️ Оформление", callback_data="appearance:menu")],
     [InlineKeyboardButton(text="✂️ Найти лучшие моменты", callback_data="mode:moments")],

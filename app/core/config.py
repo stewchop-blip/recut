@@ -242,14 +242,14 @@ class Settings(BaseSettings):
         description="Fallback image model",
     )
     script_video_tts_model: str = Field(
-        default="openai/gpt-audio-mini",
+        default="openai/gpt-4o-mini-tts-2025-12-15",
         description="OpenRouter TTS model",
     )
     script_video_max_images_free: int = Field(default=5, ge=1, le=20)
     script_video_max_images_pro: int = Field(default=8, ge=1, le=30)
     script_video_image_concurrency: int = Field(default=2, ge=1, le=5)
     script_video_free_weekly_limit: int = Field(default=3, ge=0, le=100)
-    script_video_enable_limit: bool = Field(default=False)
+    script_video_enable_limit: bool = Field(default=True)
     script_video_target_duration_seconds: int = Field(default=40, ge=15, le=120)
 
     # === User roles ===
