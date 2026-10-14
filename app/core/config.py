@@ -228,6 +228,34 @@ class Settings(BaseSettings):
             return f"/{v}"
         return v
 
+    # === Script video generation ===
+    script_video_planner_model: str = Field(
+        default="anthropic/claude-haiku-5.5",
+        description="OpenRouter model for script/planning",
+    )
+    script_video_image_model: str = Field(
+        default="google/gemini-nano-banana-2.1",
+        description="OpenRouter image generation model",
+    )
+    script_video_image_fallback_model: str = Field(
+        default="openrouter/auto",
+        description="Fallback image model",
+    )
+    script_video_tts_model: str = Field(
+        default="openai/gpt-audio-mini",
+        description="OpenRouter TTS model",
+    )
+    script_video_max_images_free: int = Field(default=5, ge=1, le=20)
+    script_video_max_images_pro: int = Field(default=8, ge=1, le=30)
+    script_video_image_concurrency: int = Field(default=2, ge=1, le=5)
+    script_video_free_weekly_limit: int = Field(default=3, ge=0, le=100)
+    script_video_enable_limit: bool = Field(default=False)
+    script_video_target_duration_seconds: int = Field(default=40, ge=15, le=120)
+
+    # === User roles ===
+    admin_telegram_ids: str = Field(default="", description="Comma-separated admin Telegram IDs")
+    tester_telegram_ids: str = Field(default="", description="Comma-separated tester Telegram IDs")
+
     @field_validator("clip_min_seconds", "clip_max_seconds")
     @classmethod
     def validate_positive(cls, v: float) -> float:

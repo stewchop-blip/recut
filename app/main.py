@@ -11,7 +11,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 
-from app.bot.handlers import start, video, payments, referrals, admin, appearance
+from app.bot.handlers import start, video, payments, script_video, referrals, admin, appearance
 from app.bot.middlewares.access import AccessMiddleware
 from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
@@ -39,6 +39,7 @@ def _build_dispatcher() -> Dispatcher:
     dp.include_router(referrals.router)
     dp.include_router(appearance.router)
     dp.include_router(video.router)
+    dp.include_router(script_video.router)
     return dp
 
 
