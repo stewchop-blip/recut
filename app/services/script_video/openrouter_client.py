@@ -73,10 +73,13 @@ class OpenRouterClient:
             )
             resp.raise_for_status()
             data = resp.json()
+            usage_info = data.get("usage", {})
+            actual_cost = usage_info.get("cost") if isinstance(usage_info.get("cost"), (int, float)) else None
             logger.info(
                 "openrouter_request",
                 model=model,
-                usage=data.get("usage"),
+                usage=usage_info,
+                actual_cost_usd=actual_cost,
             )
             return data
         except httpx.HTTPStatusError as e:
@@ -112,7 +115,7 @@ class OpenRouterClient:
         }
         try:
             resp = await self._client.post(
-                f"{self.base_url}/images/generations",
+                f"{self.base_url}/images",
                 json=payload,
             )
             resp.raise_for_status()

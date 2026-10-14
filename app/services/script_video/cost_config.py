@@ -50,6 +50,9 @@ class CostTracker:
         # TTS
         tts_prices = PRICE_MAP.get(self.tts_model, {})
         total += tts_prices.get("audio_per_minute", 0) * (self.audio_duration_seconds / 60.0)
+        # Actual usage cost override (from OpenRouter usage.cost) when available
+        if getattr(self, 'actual_usage_cost', 0) > 0:
+            total = self.actual_usage_cost
         return total
 
 

@@ -391,6 +391,12 @@ async def on_url_message(message: types.Message, bot: Bot) -> None:
     if user_id in active_render_users:
         await message.answer("Подожди завершения обработки, затем отправь следующее видео.")
         return
+    # Script video generation takes priority for idea descriptions
+    text_lower = (message.text or "").lower()
+    script_triggers = ("сделай", "создай", "ролик", "видео", "на тему", "о ", "про ")
+    if any(t in text_lower for t in script_triggers) and len(text_lower) >= 10:
+        return  # Let script_video handler process
+
     # 1. Active input states take priority
     if user_id in _awaiting_title:
         _awaiting_title.discard(user_id)

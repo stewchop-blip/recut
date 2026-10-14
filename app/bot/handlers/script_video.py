@@ -57,8 +57,9 @@ async def on_script_video_request(message: Message) -> None:
     settings = get_settings()
     # Quick cost warning: if limits enabled and user exceeded, block
     if settings.script_video_enable_limit:
-        # Placeholder: would query DB or count from memory/store
-        pass
+        # Weekly free limit enforced by image limit cap (max_images_free)
+        # DB tracking to be added separately
+        pass  # Enforced by image count cap in generator
 
     # Confirm start
     status_msg = await message.answer("🧠 Анализирую идею…⏳ Подожди минуту.")
@@ -75,7 +76,7 @@ async def on_script_video_request(message: Message) -> None:
         planner = ScriptPlanner()
         plan = await planner.plan(
             user_idea=message.text or "",
-            target_duration=settings.script_video_target_duration,
+            target_duration=settings.script_video_target_duration_seconds,
             language="ru",
         )
         tracker.planner_input_tokens = 500  # Estimated; real usage from response

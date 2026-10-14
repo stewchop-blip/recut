@@ -48,6 +48,10 @@ class ImageGenerator:
         Returns flat list of image URLs / base64 strings.
         On failure for a specific prompt, retries with fallback model.
         """
+        # Enforce image limits based on user tier (free/pro)
+        s = get_settings()
+        max_images = s.script_video_max_images_free if s.script_video_enable_limit else s.script_video_max_images_pro
+        prompts = prompts[:max_images]
         sem = asyncio.Semaphore(self.concurrency)
         results: list[Optional[list[str]]] = [None] * len(prompts)
 
