@@ -199,7 +199,9 @@ class DownloaderService:
             # Step 1: quick metadata probe without downloading.
             # Use configured Instagram authentication immediately. Other platforms
             # retain the anonymous-first path and one authenticated retry.
-            logger.info("url_metadata_start", url=f"{platform}://.../" + (url[-20:] if len(url) > 30 else url[-10:]), platform=platform,
+            # User URLs can contain signed query parameters. Do not log any part
+            # of the URL (even a truncated tail).
+            logger.info("url_metadata_start", platform=platform,
                         cookie_configured=cookie_file is not None)
             info = None
             try:
@@ -213,7 +215,7 @@ class DownloaderService:
             except URLDownloadError as e:
                 code = getattr(e, "code", None) or classify_ytdlp_error(getattr(e, "detail", str(e)), platform)
                 logger.warning("yt_dlp_metadata_failed", platform=platform,
-                               error_code=code, stderr=str(e)[:300])
+                               error_code=code)
                 if cookie_file is not None and not use_cookies and ("AUTH" in code or "RESTRICTED" in code
                         or code in {"INSTAGRAM_ACCESS_FAILED", "INSTAGRAM_RATE_LIMITED", "INSTAGRAM_EXTRACTOR_FAILED"}):
                     logger.info("ytdlp_cookie_retry", platform=platform,
@@ -226,8 +228,9 @@ class DownloaderService:
                         )
                         use_cookies = True
                     except URLDownloadError as retry_error:
-                        detail = getattr(retry_error, "detail", str(retry_error))
-                        raise StructuredDownloadError(getattr(retry_error, "code", None) or classify_ytdlp_error(detail, platform), detail) from retry_error
+                        retry_code = getattr(retry_error, "code", None) or classify_ytdlp_error(
+                            getattr(retry_error, "detail", ""), platform)
+                        raise StructuredDownloadError(retry_code, retry_code) from retry_error
                 elif platform == "instagram" and not use_cookies and code in {
                     "INSTAGRAM_AUTH_REQUIRED", "INSTAGRAM_ACCESS_FAILED", "INSTAGRAM_EXTRACTOR_FAILED",
                 }:
@@ -252,11 +255,10 @@ class DownloaderService:
                             from app.pipeline.instagram_external import extract_external_video
                             external = await extract_external_video(url)
                             if external is None:
-                                raise StructuredDownloadError(code, getattr(e, "detail", str(e))) from e
+                                raise StructuredDownloadError(code, code) from e
                             info = [external]
                 else:
-                    raise StructuredDownloadError(
-                        code, getattr(e, "detail", str(e))) from e
+                    raise StructuredDownloadError(code, code) from e
             if not info:
                 raise URLDownloadError("Cannot read metadata for this URL")
             meta = info[0] if isinstance(info, list) and info else info
@@ -267,7 +269,8 @@ class DownloaderService:
                 or 0
             )
             title = str(meta.get("title") or "recat_video")[:120]
-            logger.info("url_metadata_ok", url=url, duration=duration, filesize_approx=filesize_approx, title=title)
+            logger.info("url_metadata_ok", platform=platform, duration=duration,
+                        filesize_approx=filesize_approx)
 
             if max_size_mb and filesize_approx > max_size_mb * 1024 * 1024:
                 raise DownloadTooLargeError(
@@ -281,7 +284,7 @@ class DownloaderService:
 
             # Step 2: download to output_dir (cookie retry once on auth errors).
             out_template = str(output_dir / "download.%(ext)s")
-            logger.info("url_download_start", url=f"{platform}://.../" + (url[-20:] if len(url) > 30 else url[-10:]), out_template=out_template,
+            logger.info("url_download_start", platform=platform, out_template=out_template,
                         cookie_configured=cookie_file is not None)
             # Instagram extraction already returned signed media URLs. Reuse that
             # result rather than querying the post a second time in a fresh session.
@@ -312,7 +315,7 @@ class DownloaderService:
             except URLDownloadError as e:
                 code = getattr(e, "code", None) or classify_ytdlp_error(str(e), platform)
                 logger.warning("yt_dlp_download_failed", platform=platform,
-                               error_code=code, stderr=str(e)[:300],
+                               error_code=code,
                                cookie_retry=False)
                 if cookie_file is not None and not use_cookies and ("AUTH" in code or "RESTRICTED" in code):
                     logger.info("ytdlp_cookie_retry", platform=platform,
@@ -323,10 +326,11 @@ class DownloaderService:
                             timeout=timeout_s,
                         )
                     except URLDownloadError as retry_error:
-                        detail = getattr(retry_error, "detail", str(retry_error))
-                        raise StructuredDownloadError(getattr(retry_error, "code", None) or classify_ytdlp_error(detail, platform), detail) from retry_error
+                        retry_code = getattr(retry_error, "code", None) or classify_ytdlp_error(
+                            getattr(retry_error, "detail", ""), platform)
+                        raise StructuredDownloadError(retry_code, retry_code) from retry_error
                 else:
-                    raise StructuredDownloadError(code, str(e)) from e
+                    raise StructuredDownloadError(code, code) from e
 
             files = sorted(
                 (p for p in output_dir.glob("download.*") if p.is_file()
@@ -386,9 +390,35 @@ class DownloaderService:
                 "yt-dlp is not installed on the server"
             ) from exc
 
+        async def read_stdout() -> tuple[bytes, bool]:
+            assert proc.stdout is not None
+            chunks: list[bytes] = []
+            size = 0
+            overflow = False
+            while chunk := await proc.stdout.read(64 * 1024):
+                if size + len(chunk) > 8 * 1024 * 1024:
+                    overflow = True
+                    # Continue draining the pipe, but retain no more data.
+                    size = 8 * 1024 * 1024
+                    continue
+                size += len(chunk)
+                chunks.append(chunk)
+            return b"".join(chunks), overflow
+
+        async def read_stderr() -> bytes:
+            assert proc.stderr is not None
+            tail = bytearray()
+            while chunk := await proc.stderr.read(64 * 1024):
+                tail.extend(chunk)
+                if len(tail) > 64 * 1024:
+                    del tail[:-64 * 1024]
+            return bytes(tail)
+
+        stdout_task = asyncio.create_task(read_stdout())
+        stderr_task = asyncio.create_task(read_stderr())
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
+            (stdout, overflow), stderr = await asyncio.wait_for(
+                asyncio.gather(stdout_task, stderr_task), timeout=timeout
             )
         except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
             if proc.returncode is None:
@@ -396,28 +426,25 @@ class DownloaderService:
                     proc.kill()
                 except ProcessLookupError:
                     pass
-            await proc.communicate()
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
             if isinstance(exc, asyncio.CancelledError):
                 raise
             raise URLDownloadError("Download timed out") from exc
 
+        if overflow:
+            raise URLDownloadError("yt-dlp output exceeded the size limit")
+
         if proc.returncode != 0:
             stderr_text = stderr.decode(errors="ignore")
-            msg = stderr_text[:500]
-            if ("--load-info-json" in argv or any(
-                    re.match(r"https://(?:www\.)?(?:instagram\.com|instagr\.am)/", arg)
-                    for arg in argv)):
-                # Media-transfer stderr can contain signed CDN URLs. Keep only
-                # a fixed classification, also in exceptions consumed by job logs.
-                code = classify_ytdlp_error(stderr_text, "instagram")
-                logger.warning("yt_dlp_failed", rc=proc.returncode, error_code=code)
-                raise StructuredDownloadError(code, "Instagram request failed")
-            logger.warning(
-                "yt_dlp_failed",
-                rc=proc.returncode,
-                error=msg,
-            )
-            raise URLDownloadError(f"Download failed: {msg}")
+            is_instagram = "--load-info-json" in argv or any(
+                re.match(r"https://(?:www\.)?(?:instagram\.com|instagr\.am)/", arg)
+                for arg in argv)
+            platform = "instagram" if is_instagram else next(
+                (self._parse_source(arg) for arg in argv if arg.startswith("https://")),
+                "link")
+            code = classify_ytdlp_error(stderr_text, platform)
+            logger.warning("yt_dlp_failed", rc=proc.returncode, error_code=code)
+            raise StructuredDownloadError(code, code)
 
         out = stdout.decode(errors="ignore").strip()
         if not out:

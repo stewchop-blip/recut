@@ -54,6 +54,33 @@ Dispatcher import and registered payment update types checked; payments disabled
 by default. An old cancellation test was updated to the existing `(count, ids)` API.
 No end-to-end payment, live PostgreSQL concurrency, or deployed load test was run.
 
+## 2026-10-13 follow-up: URL downloader diagnostics
+
+Scope: static review of the current checkout, including the Telegram subscription
+gate, URL intake/downloader, YouTube highlights transfer, configuration, and
+tracked secret-like files. No live bot, production environment, or database was
+accessed.
+
+- Fixed URL disclosure in downloader diagnostics: logs no longer include full,
+  partial, or signed source URLs, metadata titles, or raw yt-dlp stderr. Failures
+  are represented by fixed error codes, which are also the only details persisted
+  for structured downloader errors.
+- Bounded yt-dlp captured output to 8 MiB stdout and a 64 KiB stderr tail; output
+  beyond the stdout cap is drained but not retained.
+- Added a regression test that feeds yt-dlp stderr containing a signed URL and
+  asserts the resulting structured error does not expose it.
+- Reviewed subscription checks: before another video is accepted, membership is
+  looked up from Telegram; processing is blocked if the user has left or if the
+  lookup fails. The “Я подписался” callback rechecks Telegram membership and
+  does not itself grant access.
+- The known SSRF limitation remains: the general yt-dlp path validates the
+  initial hostname but does not enforce public IPs across DNS resolution,
+  redirects, and extractor media requests. Enforce outbound private-address
+  blocking in the deployed network/container before treating this as complete.
+- Local syntax compilation and `git diff --check` passed. Pytest could not run
+  in this environment because `pytest` and `pydantic_settings` are unavailable;
+  no dependency vulnerability scan or deployed runtime verification was done.
+
 
 ## 2026-10-01 follow-up: referrals and generation allowance
 
