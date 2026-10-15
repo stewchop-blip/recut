@@ -36,6 +36,7 @@ class ScriptPlanner:
         s = get_settings()
         self.model = model or s.script_video_planner_model
         self.client = client or OpenRouterClient()
+        self.actual_cost_usd = 0.0
 
     async def plan(
         self,
@@ -80,6 +81,10 @@ class ScriptPlanner:
                         max_tokens=4000,
                         response_format={"type": "json_object"},
                     )
+                    usage = data.get("usage") or {}
+                    cost = usage.get("cost") if isinstance(usage, dict) else None
+                    if isinstance(cost, (int, float)) and cost >= 0:
+                        self.actual_cost_usd += float(cost)
                     choice = (data.get("choices") or [{}])[0]
                     content = choice.get("message", {}).get("content", "")
                     if not isinstance(content, str) or not content.strip():

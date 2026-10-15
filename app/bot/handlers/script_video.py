@@ -111,17 +111,17 @@ async def handle_idea(message: Message, bot=None) -> bool:
 
         with tempfile.TemporaryDirectory(prefix=f"recut-script-{user_id}-") as temp:
             workdir = Path(temp)
-            plan = await ScriptPlanner().plan(
+            planner = ScriptPlanner()
+            plan = await planner.plan(
                 user_idea=idea,
                 target_duration=settings.script_video_target_duration_seconds,
                 language="ru",
             )
-            tracker.planner_input_tokens = 500  # fallback estimate until provider cost API is persisted
-            tracker.planner_output_tokens = 1200
+            tracker.add_actual_cost("planner", planner.actual_cost_usd)
 
             prompts = [scene.visual_prompt for scene in plan.scenes]
             image_cap = settings.script_video_max_images_pro if is_premium else settings.script_video_max_images_free
-            image_results = await ImageGenerator().generate(
+            image_results = await ImageGenerator(cost_tracker=tracker).generate(
                 prompts, size="1024x1024", max_images=image_cap,
             )
             if not image_results:
@@ -146,12 +146,15 @@ async def handle_idea(message: Message, bot=None) -> bool:
                     image_paths.append(path)
 
             tracker.images_generated = len(image_paths)
-            subtitles = SceneSubtitleBuilder().build_from_plan(plan)
-            subtitle_path = Path(subtitles.output_path) if subtitles.output_path else None
             audio_path = workdir / "narration.mp3"
             narration = plan.narration or " ".join(scene.narration for scene in plan.scenes)
             await ScriptTTSAdapter().synthesize_narration(narration, audio_path)
-            tracker.audio_duration_seconds = float(plan.target_duration)
+            audio_duration = await ScriptVideoAssembler.audio_duration(audio_path)
+            tracker.audio_duration_seconds = audio_duration
+            subtitles = SceneSubtitleBuilder().build_from_plan(
+                plan, total_duration=audio_duration,
+            )
+            subtitle_path = Path(subtitles.output_path) if subtitles.output_path else None
             output = workdir / "recut-video.mp4"
             await ScriptVideoAssembler().assemble(
                 plan=plan,
@@ -170,9 +173,10 @@ async def handle_idea(message: Message, bot=None) -> bool:
 
         async with db_manager.session() as session:
             await JobRepository(session).mark_completed(job_id, clips_generated=1)
-        cost = tracker.estimated_cost_usd()
+        cost = tracker.actual_cost_usd
         logger.info("script_video_completed", user_id=user_id, job_id=job_id,
-                    images=tracker.images_generated, estimated_cost_usd=cost)
+                    images=tracker.images_generated, actual_cost_usd=cost,
+                    actual_cost_breakdown=tracker.actual_costs)
         await status.delete()
         if bot is not None:
             from app.bot.handlers.video import _offer_subscription_after_first_result

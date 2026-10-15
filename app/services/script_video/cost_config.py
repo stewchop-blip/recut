@@ -7,19 +7,9 @@ from typing import Optional
 from app.core.config import get_settings
 
 
-# Model prices (per-token or per-request estimates) fetched from OpenRouter catalog on 2026-10-14.
-# Updated manually when changing default models.
-PRICE_MAP = {
-    # Planner / text
-    "anthropic/claude-haiku-5.5": {"input": 1e-7, "output": 5e-7},
-    "google/gemini-2.5-flash": {"input": 2e-6, "output": 1e-5},
-    # Image (per image output, estimated)
-    "google/gemini-nano-banana-2.1": {"image_output": 3e-5},
-    "openrouter/auto": {"image_output": 1e-4},
-    # TTS (per minute estimated)
-    "openai/gpt-audio-mini": {"audio_per_minute": 0.003},
-    "google/gemini-3.1-flash-tts-preview": {"audio_per_minute": 0.002},
-}
+# Kept as a compatibility export for older imports. OpenRouter prices vary by
+# model and output shape, so estimates here must not be used as actual spend.
+PRICE_MAP: dict[str, dict[str, float]] = {}
 
 
 @dataclass(frozen=False)
@@ -36,24 +26,21 @@ class CostTracker:
     planner_output_tokens: int = 0
     image_requests: int = 0
     audio_duration_seconds: float = 0.0
+    actual_costs: dict[str, float] = field(default_factory=dict)
     start_time: float = field(default_factory=lambda: __import__("time").time())
 
+    def add_actual_cost(self, component: str, cost_usd: float | None) -> None:
+        if cost_usd is None or cost_usd < 0:
+            return
+        self.actual_costs[component] = self.actual_costs.get(component, 0.0) + float(cost_usd)
+
+    @property
+    def actual_cost_usd(self) -> float:
+        return sum(self.actual_costs.values())
+
     def estimated_cost_usd(self) -> float:
-        total = 0.0
-        # Planner
-        planner_prices = PRICE_MAP.get(self.planner_model, {})
-        total += planner_prices.get("input", 0) * self.planner_input_tokens
-        total += planner_prices.get("output", 0) * self.planner_output_tokens
-        # Images
-        image_prices = PRICE_MAP.get(self.image_model, {})
-        total += image_prices.get("image_output", 0) * self.images_generated
-        # TTS
-        tts_prices = PRICE_MAP.get(self.tts_model, {})
-        total += tts_prices.get("audio_per_minute", 0) * (self.audio_duration_seconds / 60.0)
-        # Actual usage cost override (from OpenRouter usage.cost) when available
-        if getattr(self, 'actual_usage_cost', 0) > 0:
-            total = self.actual_usage_cost
-        return total
+        """Legacy method name; returns only provider-reported actual spend."""
+        return self.actual_cost_usd
 
 
 def get_cost_tracker(

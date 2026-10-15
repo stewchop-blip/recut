@@ -1,9 +1,15 @@
 """Tests for script video generation pipeline."""
 import pytest
 from types import SimpleNamespace
+import json
+import shutil
+import subprocess
 
 from app.services.script_video import VideoPlanSchema, from_schema, CostTracker, ScriptPlanner
 from app.services.script_video.image_generator import ImageGenerator, ImageCreditsExhaustedError
+from app.services.script_video.assembly import ScriptVideoAssembler
+from app.services.script_video.models import Scene, VideoPlan
+from app.services.script_video.timeline import TimelineCompiler
 
 
 class _PlannerClient:
@@ -95,9 +101,10 @@ def test_cost_tracker_estimate():
         images_generated=5,
         audio_duration_seconds=40,
     )
-    cost = tracker.estimated_cost_usd()
-    assert cost > 0
-    assert cost < 0.01
+    assert tracker.estimated_cost_usd() == 0
+    tracker.add_actual_cost("planner", 0.00012)
+    tracker.add_actual_cost("image", 0.0004)
+    assert abs(tracker.actual_cost_usd - 0.00052) < 1e-10
 
 
 def test_script_planner_init():
@@ -131,6 +138,107 @@ async def test_image_generator_stops_on_insufficient_credits_without_fallback():
         max_retries=2,
         client=client,
     )
+    assert generator.fallback_model == ""
     with pytest.raises(ImageCreditsExhaustedError):
         await generator.generate(["scene one", "scene two"])
     assert client.models == ["valid/image-model"]
+
+
+@pytest.mark.asyncio
+async def test_image_generator_reuses_successful_asset_after_partial_credit_failure():
+    class _PartiallyFundedClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def generate_image(self, *, model, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return ["https://example.test/first.png"]
+            error = RuntimeError("payment required")
+            error.response = SimpleNamespace(status_code=402)
+            raise error
+
+    client = _PartiallyFundedClient()
+    generator = ImageGenerator(
+        model="valid/image-model", concurrency=1, client=client,
+    )
+    results = await generator.generate(["scene one", "scene two", "scene three"])
+    assert results == [
+        "https://example.test/first.png",
+        "https://example.test/first.png",
+        "https://example.test/first.png",
+    ]
+    assert client.calls == 2
+
+
+def _sample_plan():
+    scenes = tuple(
+        Scene(
+            id=f"s{i}", narration=f"Фраза {i}.", visual_prompt="fixture",
+            duration_hint=8, importance=3,
+            motion_type="zoom_in" if i % 2 else "pan_right",
+            transition="fade", reference_scene_id=None,
+        )
+        for i in range(1, 6)
+    )
+    return VideoPlan(
+        title="Тестовый ролик", language="ru", target_duration=40,
+        narration="Тестовая озвучка.", visual_style="Тестовый стиль",
+        scenes=scenes,
+    )
+
+
+def test_timeline_creates_short_moving_beats_and_respects_scene_assets():
+    plan = _sample_plan()
+    beats = TimelineCompiler().compile(plan, image_count=2, audio_duration=40)
+    assert 12 <= len(beats) <= 20
+    assert max(beat.duration for beat in beats) <= 3.1
+    assert {beat.image_index for beat in beats} == {0, 1}
+    assert len({beat.motion for beat in beats}) > 1
+
+
+@pytest.mark.asyncio
+async def test_assembler_renders_vertical_mp4_with_audio_and_valid_probe(tmp_path):
+    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        pytest.skip("FFmpeg and ffprobe are required for the integration test")
+
+    image_paths = []
+    for index, color in enumerate(("red", "blue", "green")):
+        image_path = tmp_path / f"scene-{index}.png"
+        subprocess.run(
+            [ffmpeg, "-v", "error", "-f", "lavfi", "-i",
+             f"color=c={color}:s=360x640", "-frames:v", "1", str(image_path)],
+            check=True, timeout=30,
+        )
+        image_paths.append(str(image_path))
+
+    audio_path = tmp_path / "voice.wav"
+    subprocess.run(
+        [ffmpeg, "-v", "error", "-f", "lavfi", "-i",
+         "sine=frequency=440:duration=2", "-c:a", "pcm_s16le", str(audio_path)],
+        check=True, timeout=30,
+    )
+    output_path = tmp_path / "result.mp4"
+    result = await ScriptVideoAssembler().assemble(
+        plan=_sample_plan(), images=image_paths, audio_path=audio_path,
+        output_path=output_path,
+    )
+    probe = subprocess.run(
+        [ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(result)],
+        check=True, capture_output=True, text=True, timeout=30,
+    )
+    metadata = json.loads(probe.stdout)
+    video = next(stream for stream in metadata["streams"] if stream["codec_type"] == "video")
+    audio = next(stream for stream in metadata["streams"] if stream["codec_type"] == "audio")
+    assert (video["width"], video["height"]) == (1080, 1920)
+    assert video["codec_name"] == "h264"
+    assert video["pix_fmt"] == "yuv420p"
+    assert audio["codec_name"] == "aac"
+    assert abs(float(metadata["format"]["duration"]) - 2.0) < 0.5

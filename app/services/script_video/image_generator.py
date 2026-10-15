@@ -1,7 +1,6 @@
-"""ImageGenerator — parallel image generation with retry + fallback.
+"""ImageGenerator — parallel image generation with bounded retry + fallback.
 
 Uses OpenRouter /images/generations endpoint.
-Target cost: ~$0.00003 per image (gemini-nano-banana-2.1).
 Concurrency capped by settings (default 2) to avoid rate limits.
 """
 from __future__ import annotations
@@ -12,7 +11,6 @@ from typing import Optional
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.services.script_video.openrouter_client import OpenRouterClient
-from app.services.script_video.cost_config import PRICE_MAP
 
 logger = get_logger(__name__)
 
@@ -33,13 +31,25 @@ class ImageGenerator:
         concurrency: Optional[int] = None,
         max_retries: int = 2,
         client: Optional[OpenRouterClient] = None,
+        cost_tracker: Optional[object] = None,
     ) -> None:
         s = get_settings()
         self.model = model or s.script_video_image_model
-        self.fallback_model = fallback_model or s.script_video_image_fallback_model
+        configured_fallback = fallback_model or s.script_video_image_fallback_model
+        self.fallback_model = (
+            configured_fallback
+            if configured_fallback and configured_fallback != "openrouter/auto"
+            else ""
+        )
         self.concurrency = concurrency or s.script_video_image_concurrency
         self.max_retries = max_retries
         self.client = client or OpenRouterClient()
+        self.cost_tracker = cost_tracker
+
+    def _record_actual_cost(self, component: str, cost: float) -> None:
+        add_cost = getattr(self.cost_tracker, "add_actual_cost", None)
+        if callable(add_cost) and isinstance(cost, (int, float)):
+            add_cost(component, float(cost))
 
     async def generate(
         self,
@@ -73,29 +83,31 @@ class ImageGenerator:
                     if credits_exhausted.is_set():
                         return
                     try:
-                        async with self.client as c:
-                            model_to_use = self.model
-                            urls = await c.generate_image(
-                                model=model_to_use,
-                                prompt=prompt,
-                                size=size,
-                                n=n_per_prompt,
-                            )
-                            results[idx] = urls
-                            logger.info(
-                                "image_generated",
-                                prompt_preview=prompt[:60],
-                                model=model_to_use,
-                                count=len(urls),
-                            )
-                            return
+                        model_to_use = self.model
+                        urls = await client.generate_image(
+                            model=model_to_use,
+                            prompt=prompt,
+                            size=size,
+                            n=n_per_prompt,
+                            on_actual_cost=lambda cost: self._record_actual_cost("image", cost),
+                        )
+                        results[idx] = urls
+                        logger.info(
+                            "image_generated",
+                            prompt_preview=prompt[:60],
+                            model=model_to_use,
+                            count=len(urls),
+                        )
+                        return
                     except Exception as exc:
                         if _is_insufficient_credits(exc):
                             credits_exhausted.set()
                             logger.error("image_generation_credits_exhausted", model=self.model)
-                            raise ImageCreditsExhaustedError(
-                                "OpenRouter image generation credits are exhausted"
-                            ) from exc
+                            results[idx] = []
+                            return
+                        if credits_exhausted.is_set():
+                            results[idx] = []
+                            return
                         logger.warning(
                             "image_retry",
                             prompt_preview=prompt[:60],
@@ -105,26 +117,26 @@ class ImageGenerator:
                         # On last retry, try fallback model
                         if attempt == self.max_retries - 1 and self.fallback_model:
                             try:
-                                async with self.client as c:
-                                    urls = await c.generate_image(
-                                        model=self.fallback_model,
-                                        prompt=prompt,
-                                        size=size,
-                                        n=n_per_prompt,
-                                    )
-                                    results[idx] = urls
-                                    logger.info(
-                                        "image_fallback",
-                                        prompt_preview=prompt[:60],
-                                        model=self.fallback_model,
-                                    )
-                                    return
+                                urls = await client.generate_image(
+                                    model=self.fallback_model,
+                                    prompt=prompt,
+                                    size=size,
+                                    n=n_per_prompt,
+                                    on_actual_cost=lambda cost: self._record_actual_cost("image_fallback", cost),
+                                )
+                                results[idx] = urls
+                                logger.info(
+                                    "image_fallback",
+                                    prompt_preview=prompt[:60],
+                                    model=self.fallback_model,
+                                )
+                                return
                             except Exception as fallback_exc:
                                 if _is_insufficient_credits(fallback_exc):
                                     credits_exhausted.set()
-                                    raise ImageCreditsExhaustedError(
-                                        "OpenRouter image generation credits are exhausted"
-                                    ) from fallback_exc
+                                    logger.error("image_generation_credits_exhausted", model=self.fallback_model)
+                                    results[idx] = []
+                                    return
                                 logger.error(
                                     "image_failed",
                                     prompt_preview=prompt[:60],
@@ -133,10 +145,28 @@ class ImageGenerator:
                                 results[idx] = []
                                 return
 
-        await asyncio.gather(
-            *[_generate_single(i, p) for i, p in enumerate(prompts)]
-        )
-        # Flatten
+        async with self.client as client:
+            await asyncio.gather(
+                *[_generate_single(i, p) for i, p in enumerate(prompts)]
+            )
+        successful = [index for index, result in enumerate(results) if result]
+        if not successful and credits_exhausted.is_set():
+            raise ImageCreditsExhaustedError(
+                "OpenRouter image generation credits are exhausted"
+            )
+        # Reuse the nearest successful asset when one scene's provider call fails.
+        if successful:
+            for index, result in enumerate(results):
+                if result:
+                    continue
+                nearest = min(successful, key=lambda candidate: abs(candidate - index))
+                results[index] = results[nearest]
+                logger.info(
+                    "image_asset_reused",
+                    failed_scene_index=index,
+                    source_scene_index=nearest,
+                )
+
         flat: list[str] = []
         for r in results:
             if r:

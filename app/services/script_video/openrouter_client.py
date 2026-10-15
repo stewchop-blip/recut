@@ -5,7 +5,7 @@ app/services/analysis/openrouter.py.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 
@@ -28,6 +28,7 @@ class OpenRouterClient:
         self.base_url = "https://openrouter.ai/api/v1"
         self.timeout = timeout_seconds
         self._client: Optional[httpx.AsyncClient] = None
+        self.last_actual_cost_usd: float | None = None
 
     async def __aenter__(self) -> OpenRouterClient:
         self._client = httpx.AsyncClient(
@@ -56,6 +57,7 @@ class OpenRouterClient:
     ) -> dict[str, Any]:
         if not self._client:
             raise RuntimeError("Client not entered; use async with")
+        self.last_actual_cost_usd = None
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -73,6 +75,7 @@ class OpenRouterClient:
             data = resp.json()
             usage_info = data.get("usage", {})
             actual_cost = usage_info.get("cost") if isinstance(usage_info.get("cost"), (int, float)) else None
+            self.last_actual_cost_usd = float(actual_cost) if actual_cost is not None else None
             logger.info(
                 "openrouter_request",
                 model=model,
@@ -99,12 +102,14 @@ class OpenRouterClient:
         *,
         size: str = "1024x1024",
         n: int = 1,
+        on_actual_cost: Optional[Callable[[float], None]] = None,
     ) -> list[str]:
         """Return list of image URLs (or base64 data if model supports)."""
         # OpenRouter image generation endpoint: /v1/images/generations
         # For models like google/gemini-nano-banana-2.1.
         if not self._client:
             raise RuntimeError("Client not entered; use async with")
+        self.last_actual_cost_usd = None
         payload: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
@@ -118,6 +123,11 @@ class OpenRouterClient:
             )
             resp.raise_for_status()
             data = resp.json()
+            usage_info = data.get("usage") or {}
+            actual_cost = usage_info.get("cost") if isinstance(usage_info, dict) else None
+            self.last_actual_cost_usd = float(actual_cost) if isinstance(actual_cost, (int, float)) else None
+            if self.last_actual_cost_usd is not None and on_actual_cost:
+                on_actual_cost(self.last_actual_cost_usd)
             # OpenRouter returns image URLs or base64 data
             results: list[str] = []
             for item in data.get("data", []):
@@ -128,7 +138,8 @@ class OpenRouterClient:
                 elif b64:
                     media_type = item.get("media_type") or "image/png"
                     results.append(f"data:{media_type};base64,{b64}")
-            logger.info("openrouter_image", model=model, count=len(results), prompt_preview=prompt[:80])
+            logger.info("openrouter_image", model=model, count=len(results),
+                        actual_cost_usd=self.last_actual_cost_usd)
             return results
         except httpx.HTTPStatusError as e:
             logger.error(

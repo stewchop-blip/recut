@@ -26,15 +26,19 @@ class SceneSubtitleBuilder(SubtitleBuilder):
         self,
         plan: VideoPlan,
         start_offset: float = 0.0,
+        total_duration: Optional[float] = None,
     ) -> SubtitleBuildResult:
         """Generate subtitles from scene narration distributed over timeline."""
         settings = get_settings()
         max_words = max(1, settings.subtitle_max_words_per_line)
         phrases: list[Phrase] = []
         current_time = start_offset
+        weights = [max(0.1, float(scene.duration_hint)) for scene in plan.scenes]
+        weight_total = sum(weights) or 1.0
+        timeline_duration = total_duration or sum(weights)
 
-        for scene in plan.scenes:
-            scene_duration = max(0.5, scene.duration_hint)
+        for scene, weight in zip(plan.scenes, weights):
+            scene_duration = max(0.1, timeline_duration * weight / weight_total)
             text = scene.narration.strip()
             if not text:
                 current_time += scene_duration
@@ -43,14 +47,14 @@ class SceneSubtitleBuilder(SubtitleBuilder):
             if not words:
                 current_time += scene_duration
                 continue
-            words_per_chunk = max(1, min(len(words), max_words))
-            # If too many words for duration, compress; if few, spread evenly
             chunk_size = max(1, max_words)
-            chunk_duration = scene_duration / max(1, (len(words) // chunk_size + (1 if len(words) % chunk_size else 0)))
+            chunk_count = max(1, (len(words) + chunk_size - 1) // chunk_size)
+            chunk_duration = scene_duration / chunk_count
 
             for i in range(0, len(words), chunk_size):
                 chunk_words = words[i:i + chunk_size]
-                chunk_start = current_time + (i / max(1, len(words))) * scene_duration
+                chunk_index = i // chunk_size
+                chunk_start = current_time + chunk_index * chunk_duration
                 chunk_end = min(chunk_start + chunk_duration, current_time + scene_duration)
                 if chunk_end <= chunk_start:
                     chunk_end = chunk_start + 0.5
@@ -95,7 +99,7 @@ class SceneSubtitleBuilder(SubtitleBuilder):
         margin_l = settings.subtitle_safe_left_px
         margin_r = settings.subtitle_safe_right_px
         style_line = (
-            f"Style: Default,Arial,56,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,"
+            f"Style: Default,Arial,56,&H00FFFFFF,&H0000D7FF,&H00000000,&H80000000,"
             f"1,0,0,0,100,100,0,0,1,4,1,2,{margin_l},{margin_r},{margin_v},1"
         )
         header = (
@@ -110,8 +114,17 @@ class SceneSubtitleBuilder(SubtitleBuilder):
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
         ]
         for p in phrases:
+            words = p.text.split()
+            if not words:
+                continue
+            total_centiseconds = max(1, int(round((p.end - p.start) * 100)))
+            base, remainder = divmod(total_centiseconds, len(words))
+            karaoke_text = "".join(
+                f"{{\\k{base + (1 if index < remainder else 0)}}}{_escape(word)} "
+                for index, word in enumerate(words)
+            ).rstrip()
             events_lines.append(
-                f"Dialogue: 0,{_fmt_ts(p.start)},{_fmt_ts(p.end)},Default,,0,0,0,,{_escape(p.text)}"
+                f"Dialogue: 0,{_fmt_ts(p.start)},{_fmt_ts(p.end)},Default,,0,0,0,,{karaoke_text}"
             )
         style_section = (
             "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
