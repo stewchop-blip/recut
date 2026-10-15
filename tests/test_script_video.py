@@ -1,7 +1,9 @@
 """Tests for script video generation pipeline."""
 import pytest
+from types import SimpleNamespace
 
 from app.services.script_video import VideoPlanSchema, from_schema, CostTracker, ScriptPlanner
+from app.services.script_video.image_generator import ImageGenerator, ImageCreditsExhaustedError
 
 
 class _PlannerClient:
@@ -101,3 +103,34 @@ def test_cost_tracker_estimate():
 def test_script_planner_init():
     planner = ScriptPlanner()
     assert planner.model.startswith("anthropic/") or planner.model.startswith("google/")
+
+
+@pytest.mark.asyncio
+async def test_image_generator_stops_on_insufficient_credits_without_fallback():
+    class _NoCreditsClient:
+        def __init__(self):
+            self.models = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def generate_image(self, *, model, **kwargs):
+            self.models.append(model)
+            error = RuntimeError("payment required")
+            error.response = SimpleNamespace(status_code=402)
+            raise error
+
+    client = _NoCreditsClient()
+    generator = ImageGenerator(
+        model="valid/image-model",
+        fallback_model="openrouter/auto",
+        concurrency=1,
+        max_retries=2,
+        client=client,
+    )
+    with pytest.raises(ImageCreditsExhaustedError):
+        await generator.generate(["scene one", "scene two"])
+    assert client.models == ["valid/image-model"]
