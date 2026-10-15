@@ -238,7 +238,7 @@ class Settings(BaseSettings):
         description="OpenRouter image generation model",
     )
     script_video_image_fallback_model: str = Field(
-        default="openrouter/auto",
+        default="",
         description="Fallback image model",
     )
     script_video_tts_model: str = Field(
