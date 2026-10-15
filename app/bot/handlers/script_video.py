@@ -17,6 +17,7 @@ from app.database.models import Job, JobStatus
 from app.database.repositories import JobRepository, UserSettingsRepository
 from app.database.session import db_manager
 from app.services.script_video import ImageGenerator, ScriptPlanner, ScriptVideoAssembler, get_cost_tracker
+from app.services.script_video.image_generator import ImageCreditsExhaustedError
 from app.services.script_video.tts_adapter import ScriptTTSAdapter
 from app.services.subtitles.scene_adapter import SceneSubtitleBuilder
 
@@ -185,7 +186,13 @@ async def handle_idea(message: Message, bot=None) -> bool:
                     await JobRepository(session).mark_failed(job_id, "SCRIPT_VIDEO_FAILED", type(exc).__name__)
             except Exception:
                 logger.exception("script_video_job_failure_record_failed", job_id=job_id)
-        await status.edit_text("❌ Не удалось создать ролик. Попробуй ещё раз чуть позже.")
+        if isinstance(exc, ImageCreditsExhaustedError):
+            await status.edit_text(
+                "❌ Не удалось создать ролик: закончился баланс OpenRouter для генерации изображений. "
+                "Попробуй позже или сообщи администратору бота."
+            )
+        else:
+            await status.edit_text("❌ Не удалось создать ролик. Попробуй ещё раз чуть позже.")
     finally:
         if subtitle_path:
             subtitle_path.unlink(missing_ok=True)
