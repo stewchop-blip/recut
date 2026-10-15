@@ -21,6 +21,10 @@ class ImageGenerationError(RuntimeError):
     pass
 
 
+class ImageCreditsExhaustedError(ImageGenerationError):
+    """OpenRouter refused image generation because the account has no credits."""
+
+
 class ImageGenerator:
     def __init__(
         self,
@@ -54,11 +58,20 @@ class ImageGenerator:
         image_limit = max_images or s.script_video_max_images_pro
         prompts = prompts[:image_limit]
         sem = asyncio.Semaphore(self.concurrency)
+        credits_exhausted = asyncio.Event()
         results: list[Optional[list[str]]] = [None] * len(prompts)
+
+        def _is_insufficient_credits(exc: Exception) -> bool:
+            response = getattr(exc, "response", None)
+            return getattr(response, "status_code", None) == 402
 
         async def _generate_single(idx: int, prompt: str) -> None:
             async with sem:
+                if credits_exhausted.is_set():
+                    return
                 for attempt in range(self.max_retries):
+                    if credits_exhausted.is_set():
+                        return
                     try:
                         async with self.client as c:
                             model_to_use = self.model
@@ -77,6 +90,12 @@ class ImageGenerator:
                             )
                             return
                     except Exception as exc:
+                        if _is_insufficient_credits(exc):
+                            credits_exhausted.set()
+                            logger.error("image_generation_credits_exhausted", model=self.model)
+                            raise ImageCreditsExhaustedError(
+                                "OpenRouter image generation credits are exhausted"
+                            ) from exc
                         logger.warning(
                             "image_retry",
                             prompt_preview=prompt[:60],
@@ -84,7 +103,7 @@ class ImageGenerator:
                             exc=str(exc)[:200],
                         )
                         # On last retry, try fallback model
-                        if attempt == self.max_retries - 1:
+                        if attempt == self.max_retries - 1 and self.fallback_model:
                             try:
                                 async with self.client as c:
                                     urls = await c.generate_image(
@@ -101,6 +120,11 @@ class ImageGenerator:
                                     )
                                     return
                             except Exception as fallback_exc:
+                                if _is_insufficient_credits(fallback_exc):
+                                    credits_exhausted.set()
+                                    raise ImageCreditsExhaustedError(
+                                        "OpenRouter image generation credits are exhausted"
+                                    ) from fallback_exc
                                 logger.error(
                                     "image_failed",
                                     prompt_preview=prompt[:60],
