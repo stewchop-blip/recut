@@ -1,14 +1,15 @@
 """Tests for script video generation pipeline."""
-import pytest
-from types import SimpleNamespace
 import json
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 
-from app.services.script_video import VideoPlanSchema, from_schema, CostTracker, ScriptPlanner
-from app.services.script_video.image_generator import ImageGenerator, ImageCreditsExhaustedError
+import pytest
+
+from app.services.script_video import CostTracker, ScriptPlanner, VideoPlanSchema, from_schema
 from app.services.script_video.assembly import ScriptVideoAssembler
+from app.services.script_video.image_generator import ImageCreditsExhaustedError, ImageGenerator
 from app.services.script_video.models import Scene, VideoPlan
 from app.services.script_video.timeline import TimelineCompiler
 from app.services.script_video.tts_adapter import ScriptTTSAdapter
@@ -54,10 +55,13 @@ def _valid_planner_json():
             "id": f"s{index}",
             "narration": narration,
             "visual_prompt": f"Vertical cinematic everyday productivity shot number {index}, realistic lighting, clean composition",
+            "stock_query": "productivity desk",
+            "prefer_stock": True,
             "duration_hint": 3,
             "importance": 3,
             "motion_type": motions[(index - 1) % len(motions)],
             "transition": "cut",
+            "reference_scene_id": "",
         })
     return json.dumps({
         "title": "Короткий тестовый ролик",
@@ -78,23 +82,34 @@ async def test_planner_retries_truncated_json_once():
     plan = await ScriptPlanner(client=client).plan("Почему люди откладывают дела")
     assert plan.title == "Короткий тестовый ролик"
     assert len(client.calls) == 2
-    assert client.calls[0]["max_tokens"] >= 4000
+    assert client.calls[0]["max_tokens"] >= 3000
+    assert client.calls[0]["response_format"]["type"] == "json_schema"
+    assert client.calls[0]["provider"]["require_parameters"] is True
     assert len(plan.scenes) >= 8
     assert plan.narration.startswith("Сначала кажется")
 
 
 @pytest.mark.asyncio
-async def test_planner_fails_cleanly_after_second_invalid_response():
+async def test_planner_fails_cleanly_after_second_invalid_transport_response():
     client = _PlannerClient([
         _planner_response("{ broken", finish_reason="length"),
         _planner_response("not json"),
     ])
-    with pytest.raises(RuntimeError, match="valid video plan"):
+    with pytest.raises(RuntimeError, match="valid JSON"):
         await ScriptPlanner(client=client).plan("Тестовая тема")
 
 
+@pytest.mark.asyncio
+async def test_planner_does_not_pay_retry_for_semantic_schema_error():
+    broken = json.loads(_valid_planner_json())
+    broken["scenes"] = broken["scenes"][:2]
+    client = _PlannerClient([_planner_response(json.dumps(broken, ensure_ascii=False))])
+    with pytest.raises(RuntimeError, match="structured plan"):
+        await ScriptPlanner(client=client).plan("Тестовая тема")
+    assert len(client.calls) == 1
+
+
 def test_video_plan_schema_valid():
-    import json
     raw = '{"title":"Test","language":"ru","target_duration":35,"narration":"Hello","visual_style":"Modern flat","scenes":[{"id":"s1","narration":"Hello","visual_prompt":"Office","duration_hint":5,"importance":3,"motion_type":"zoom_in","transition":"fade"},{"id":"s2","narration":"Two","visual_prompt":"People","duration_hint":8,"importance":3,"motion_type":"pan_right","transition":"fade"},{"id":"s3","narration":"Done","visual_prompt":"Done","duration_hint":5,"importance":3,"motion_type":"static","transition":"fade"}]}'
     schema = VideoPlanSchema.model_validate_json(raw)
     assert schema.title == "Test"
@@ -102,17 +117,33 @@ def test_video_plan_schema_valid():
 
 
 def test_video_plan_invalid_too_short_scenes():
-    import json
     raw = '{"title":"T","language":"ru","target_duration":20,"narration":"x","visual_style":"x","scenes":[{"id":"s1","narration":"a","visual_prompt":"b","duration_hint":5,"importance":3,"motion_type":"zoom_in","transition":"fade"}]}'
     with pytest.raises(Exception):
         VideoPlanSchema.model_validate_json(raw)
 
 
-def test_video_plan_invalid_motion_type():
-    import json
-    raw = '{"title":"T","language":"ru","target_duration":20,"narration":"x","visual_style":"x","scenes":[{"id":"s1","narration":"a","visual_prompt":"b","duration_hint":5,"importance":3,"motion_type":"invalid","transition":"fade"},{"id":"s2","narration":"b","visual_prompt":"c","duration_hint":5,"importance":3,"motion_type":"zoom_in","transition":"fade"},{"id":"s3","narration":"c","visual_prompt":"d","duration_hint":5,"importance":3,"motion_type":"static","transition":"fade"}]}'
-    with pytest.raises(Exception):
-        VideoPlanSchema.model_validate_json(raw)
+def test_video_plan_normalizes_free_form_motion_and_numeric_ids():
+    raw = '{"title":"Test","language":"ru","target_duration":20,"narration":"x","visual_style":"Long enough style","scenes":[{"id":1,"narration":"a","visual_prompt":"b","duration_hint":5,"importance":3,"motion_type":"slide","transition":"hard cut","reference_scene_id":null},{"id":2,"narration":"b","visual_prompt":"c","duration_hint":5,"importance":3,"motion_type":"slow push in","transition":"fade","reference_scene_id":1},{"id":3,"narration":"c","visual_prompt":"d","duration_hint":5,"importance":3,"motion_type":"static hold","transition":"fade","reference_scene_id":null}]}'
+    schema = VideoPlanSchema.model_validate_json(raw)
+    assert schema.scenes[0].id == "1"
+    assert schema.scenes[0].motion_type == "pan_right"
+    assert schema.scenes[0].transition == "cut"
+    assert schema.scenes[1].motion_type == "zoom_in"
+    assert schema.scenes[1].reference_scene_id == "1"
+    assert schema.scenes[2].motion_type == "static"
+
+
+def test_video_plan_clamps_noncritical_planner_fields():
+    raw = '{"title":"x","language":"ru-RU","target_duration":999,"narration":"x","visual_style":"x","scenes":[{"id":1,"narration":"a","visual_prompt":"b","stock_query":"query","duration_hint":0,"importance":99,"motion_type":"zoom_in","transition":"cut"},{"id":2,"narration":"b","visual_prompt":"c","stock_query":"query","duration_hint":99,"importance":0,"motion_type":"zoom_in","transition":"cut"},{"id":3,"narration":"c","visual_prompt":"d","stock_query":"query","duration_hint":5,"importance":3,"motion_type":"static","transition":"cut"}]}'
+    schema = VideoPlanSchema.model_validate_json(raw)
+    assert schema.title == "ReCut video"
+    assert schema.language == "ru"
+    assert schema.target_duration == 120
+    assert schema.visual_style == "Realistic vertical short-form video"
+    assert schema.scenes[0].duration_hint == 1.0
+    assert schema.scenes[0].importance == 5
+    assert schema.scenes[1].duration_hint == 30.0
+    assert schema.scenes[1].importance == 1
 
 
 def test_cost_tracker_estimate():
@@ -157,7 +188,7 @@ async def test_image_generator_stops_on_insufficient_credits_without_fallback():
     client = _NoCreditsClient()
     generator = ImageGenerator(
         model="valid/image-model",
-        fallback_model="openrouter/auto",
+        fallback_model="",
         concurrency=1,
         max_retries=2,
         client=client,
@@ -190,7 +221,7 @@ async def test_image_generator_reuses_successful_asset_after_partial_credit_fail
 
     client = _PartiallyFundedClient()
     generator = ImageGenerator(
-        model="valid/image-model", concurrency=1, client=client,
+        model="valid/image-model", fallback_model="", concurrency=1, client=client,
     )
     results = await generator.generate(["scene one", "scene two", "scene three"])
     assert results == [
@@ -234,7 +265,9 @@ async def test_tts_falls_back_to_edge_when_openrouter_rejects_request(tmp_path, 
     monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: _FailedClient())
     monkeypatch.setitem(sys.modules, "edge_tts", SimpleNamespace(Communicate=_FakeCommunicate))
 
-    output = await ScriptTTSAdapter().synthesize_narration("Тест озвучки", tmp_path / "voice.mp3")
+    output = await ScriptTTSAdapter(fallback_model="").synthesize_narration(
+        "Тест озвучки", tmp_path / "voice.mp3"
+    )
     assert output.read_bytes() == b"fixture-audio"
 
 
@@ -264,14 +297,21 @@ def test_timeline_creates_short_moving_beats_and_respects_scene_assets():
     assert len({beat.motion for beat in beats}) > 1
 
 
+def test_timeline_duration_matches_audio_after_real_transition_overlap():
+    plan = _sample_plan()
+    compiler = TimelineCompiler()
+    beats = compiler.compile(plan, image_count=5, audio_duration=8.0)
+    overlaps = sum(1 for beat in beats[1:] if beat.transition != "cut")
+    rendered = sum(beat.duration for beat in beats) - overlaps * compiler.transition_seconds
+    assert abs(rendered - 8.0) < 0.05
+
+
 @pytest.mark.asyncio
 async def test_assembler_renders_vertical_mp4_with_audio_and_valid_probe(tmp_path, monkeypatch):
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
         pytest.skip("FFmpeg and ffprobe are required for the integration test")
 
-    # Force a longer chained xfade graph in a short fixture so CFR normalization
-    # is exercised without rendering a full-length paid generation.
     monkeypatch.setattr(TimelineCompiler, "beat_target_seconds", 0.5)
 
     image_paths = []

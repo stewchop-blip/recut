@@ -28,6 +28,28 @@ class ScriptVideoAssembler:
     video_suffixes = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
     @staticmethod
+    async def _communicate(
+        proc: asyncio.subprocess.Process,
+        *,
+        timeout: float,
+        timeout_message: str,
+    ) -> tuple[bytes, bytes]:
+        """Wait for a child process and never leave it alive after cancellation."""
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return stdout or b"", stderr or b""
+        except asyncio.CancelledError:
+            if proc.returncode is None:
+                proc.kill()
+            await proc.communicate()
+            raise
+        except asyncio.TimeoutError as exc:
+            if proc.returncode is None:
+                proc.kill()
+            await proc.communicate()
+            raise ScriptVideoAssemblyError(timeout_message) from exc
+
+    @staticmethod
     async def audio_duration(audio_path: Path) -> float:
         ffmpeg = Path(_find_ffmpeg_bin())
         ffprobe = shutil.which("ffprobe") or str(ffmpeg.with_name("ffprobe"))
@@ -36,12 +58,11 @@ class ScriptVideoAssembler:
             "-of", "default=noprint_wrappers=1:nokey=1", str(audio_path),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        except asyncio.TimeoutError as exc:
-            proc.kill()
-            await proc.communicate()
-            raise ScriptVideoAssemblyError("ffprobe timed out reading narration") from exc
+        stdout, stderr = await ScriptVideoAssembler._communicate(
+            proc,
+            timeout=30,
+            timeout_message="ffprobe timed out reading narration",
+        )
         if proc.returncode:
             raise ScriptVideoAssemblyError(
                 f"ffprobe could not read narration: {stderr.decode(errors='replace')[-300:]}"
@@ -90,8 +111,6 @@ class ScriptVideoAssembler:
 
     @classmethod
     def _video_filter(cls, duration: float) -> str:
-        # Keep the full source visible even when a stock clip is landscape. A
-        # blurred fill is less destructive than an aggressive center crop.
         return (
             f"[0:v]split=2[bg][fg];"
             f"[bg]scale={cls.width}:{cls.height}:force_original_aspect_ratio=increase,"
@@ -146,17 +165,16 @@ class ScriptVideoAssembler:
         proc = await asyncio.create_subprocess_exec(
             *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
         )
-        try:
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=90)
-        except asyncio.TimeoutError as exc:
-            proc.kill()
-            await proc.communicate()
-            raise ScriptVideoAssemblyError("FFmpeg timed out rendering a visual beat") from exc
+        _, stderr = await self._communicate(
+            proc,
+            timeout=90,
+            timeout_message="FFmpeg timed out rendering a visual beat",
+        )
         if proc.returncode or not output_path.is_file() or output_path.stat().st_size == 0:
             logger.error(
                 "script_video_beat_render_failed",
                 exit_code=proc.returncode,
-                stderr=(stderr or b"").decode(errors="replace")[-500:],
+                stderr=stderr.decode(errors="replace")[-500:],
             )
             raise ScriptVideoAssemblyError("FFmpeg failed to render a visual beat")
 
@@ -191,8 +209,6 @@ class ScriptVideoAssembler:
     ) -> None:
         graph_path = output_path.with_suffix(".filter.txt")
         graph_path.write_text(self._video_filter(duration), encoding="utf-8")
-        # Offset repeated uses slightly so a duplicated source does not restart at
-        # the exact same frame. stream_loop keeps short stock clips long enough.
         seek_seconds = (beat_index % 3) * 0.35
         command = [
             _find_ffmpeg_bin(), "-y", "-v", "error", "-stream_loop", "-1",
@@ -228,8 +244,6 @@ class ScriptVideoAssembler:
         audio_path: Optional[Path] = None,
         output_path: Optional[Path] = None,
     ) -> Path:
-        # Keep the public parameter name `images` for backwards compatibility;
-        # Quality V3 accepts either image paths or video paths in this list.
         if not images:
             raise ScriptVideoAssemblyError("No visual assets provided for assembly")
         asset_paths = [Path(p).resolve() for p in images]
@@ -266,11 +280,7 @@ class ScriptVideoAssembler:
                     .replace(":", "\\:")
                     .replace("'", "\\'")
                 )
-                subtitle_filter = (
-                    f"subtitles='{escaped}':force_style='FontName=Arial,FontSize=56,"
-                    "PrimaryColour=&H00FFFFFF,SecondaryColour=&H0000D7FF,"
-                    "OutlineColour=&H000000,BorderStyle=1,Outline=4,MarginV=60'"
-                )
+                subtitle_filter = f"subtitles='{escaped}'"
                 filter_graph += f";[vout]{subtitle_filter}[vfinal]"
             graph_path.write_text(filter_graph, encoding="utf-8")
             command = [_find_ffmpeg_bin(), "-y", "-v", "error"]
@@ -287,14 +297,13 @@ class ScriptVideoAssembler:
             proc = await asyncio.create_subprocess_exec(
                 *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
             )
-            try:
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
-                raise ScriptVideoAssemblyError("FFmpeg timed out")
+            _, stderr = await self._communicate(
+                proc,
+                timeout=300,
+                timeout_message="FFmpeg timed out",
+            )
             if proc.returncode:
-                stderr_text = (stderr or b"").decode(errors="replace")
+                stderr_text = stderr.decode(errors="replace")
                 if "xfade" in stderr_text and "frame rate" in stderr_text.lower():
                     logger.warning("script_video_transition_fallback", reason="invalid_xfade_framerate")
                     cut_beats = [
@@ -316,19 +325,18 @@ class ScriptVideoAssembler:
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    try:
-                        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-                    except asyncio.TimeoutError as exc:
-                        proc.kill()
-                        await proc.communicate()
-                        raise ScriptVideoAssemblyError("FFmpeg timed out on cut-transition fallback") from exc
+                    _, stderr = await self._communicate(
+                        proc,
+                        timeout=300,
+                        timeout_message="FFmpeg timed out on cut-transition fallback",
+                    )
                     if proc.returncode == 0:
                         logger.info("script_video_cut_transition_fallback_completed")
                 if proc.returncode:
                     logger.error(
                         "script_video_ffmpeg_failed",
                         exit_code=proc.returncode,
-                        stderr=(stderr or b"").decode(errors="replace")[-1000:],
+                        stderr=stderr.decode(errors="replace")[-1000:],
                     )
                     raise ScriptVideoAssemblyError("FFmpeg failed to assemble video")
             if not output_path.is_file() or output_path.stat().st_size == 0:

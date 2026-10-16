@@ -1,6 +1,7 @@
 """OpenRouter text-to-speech adapter for generated video narration."""
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 
@@ -23,17 +24,21 @@ class ScriptTTSAdapter:
         settings = get_settings()
         self.model = model or settings.script_video_tts_model
         self.voice = voice or getattr(settings, "script_video_tts_voice", "george")
-        self.fallback_model = fallback_model or getattr(
-            settings,
-            "script_video_tts_fallback_model",
-            "openai/gpt-4o-mini-tts-2025-12-15",
-        )
+        if fallback_model is None:
+            self.fallback_model = getattr(
+                settings,
+                "script_video_tts_fallback_model",
+                "openai/gpt-4o-mini-tts-2025-12-15",
+            )
+        else:
+            self.fallback_model = fallback_model
         self.fallback_voice = fallback_voice or getattr(
             settings,
             "script_video_tts_fallback_voice",
             "nova",
         )
         self.api_key = settings.openrouter_api_key
+        self.actual_cost_usd = 0.0
 
     @staticmethod
     def _clean_text(text: str) -> str:
@@ -47,6 +52,53 @@ class ScriptTTSAdapter:
         if model.startswith("elevenlabs/eleven-v4"):
             return f"[confident] {cleaned}"
         return cleaned
+
+    @staticmethod
+    def _response_cost(response: httpx.Response) -> float | None:
+        for name in ("x-openrouter-cost", "x-usage-cost", "x-request-cost"):
+            raw = response.headers.get(name)
+            if raw is None:
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if value >= 0:
+                return value
+        return None
+
+    async def _generation_cost(
+        self,
+        client: httpx.AsyncClient,
+        generation_id: str,
+    ) -> float | None:
+        """Resolve exact TTS dollar spend from OpenRouter generation metadata."""
+        if not generation_id:
+            return None
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        for attempt in range(2):
+            if attempt:
+                await asyncio.sleep(0.25)
+            try:
+                response = await client.get(
+                    "https://openrouter.ai/api/v1/generation",
+                    headers=headers,
+                    params={"id": generation_id},
+                    timeout=10,
+                )
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+                data = (response.json() or {}).get("data") or {}
+                # `usage` can represent token/unit consumption and must never be
+                # interpreted as USD. Only explicit cost fields are accepted.
+                for key in ("total_cost", "upstream_inference_cost"):
+                    value = data.get(key)
+                    if isinstance(value, (int, float)) and value >= 0:
+                        return float(value)
+            except Exception:
+                break
+        return None
 
     async def _synthesize_openrouter(
         self,
@@ -78,12 +130,21 @@ class ScriptTTSAdapter:
         if not audio or not content_type.startswith("audio/"):
             raise RuntimeError("TTS provider returned no audio")
         output_path.write_bytes(audio)
+
+        actual_cost = self._response_cost(response)
+        generation_id = response.headers.get("x-generation-id", "")
+        if actual_cost is None and generation_id:
+            actual_cost = await self._generation_cost(client, generation_id)
+        if actual_cost is not None:
+            self.actual_cost_usd += actual_cost
         logger.info(
             "script_tts_completed",
             model=model,
             provider="openrouter",
             voice=voice,
             bytes=len(audio),
+            generation_id=generation_id or None,
+            actual_cost_usd=actual_cost,
         )
         return output_path
 
@@ -146,6 +207,7 @@ class ScriptTTSAdapter:
                 model="edge-tts/ru-RU-DmitryNeural",
                 provider="edge_tts",
                 bytes=len(audio),
+                actual_cost_usd=0.0,
             )
             return output_path
         except Exception as exc:

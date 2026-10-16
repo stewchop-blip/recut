@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,7 @@ from app.services.script_video.stock_video import (
     StockVideoAsset,
     WikimediaCommonsStockVideoProvider,
 )
+from app.services.subtitles.scene_adapter import SceneSubtitleBuilder
 
 
 def test_scene_schema_accepts_hybrid_media_hints():
@@ -62,23 +64,21 @@ def test_wikimedia_only_accepts_cc0_or_public_domain():
     assert safe("") is False
 
 
-def test_hybrid_ai_budget_allows_at_most_one_reused_scene():
+def test_hybrid_ai_budget_is_a_hard_cap():
     resolver = object.__new__(HybridMediaResolver)
-    resolver.stock_enabled = True
     resolver.max_ai_images = 4
-    resolver.max_reused_scenes = 1
+    assert resolver._ai_budget(0) == 0
     assert resolver._ai_budget(2) == 2
     assert resolver._ai_budget(4) == 4
-    assert resolver._ai_budget(7) == 6
-    assert resolver._ai_budget(10) == 9
+    assert resolver._ai_budget(7) == 4
+    assert resolver._ai_budget(10) == 4
 
 
-def test_hybrid_ai_budget_keeps_v2_quality_when_stock_disabled():
+def test_hybrid_ai_budget_does_not_expand_when_stock_is_disabled():
     resolver = object.__new__(HybridMediaResolver)
     resolver.stock_enabled = False
     resolver.max_ai_images = 4
-    resolver.max_reused_scenes = 1
-    assert resolver._ai_budget(8) == 8
+    assert resolver._ai_budget(8) == 4
 
 
 def test_hybrid_media_attribution_is_deduplicated(tmp_path):
@@ -117,6 +117,57 @@ def test_hybrid_media_attribution_is_deduplicated(tmp_path):
     )
     assert result.attribution_text.count("Coverr") == 1
     assert result.attribution_text.count("Wikimedia Commons") == 1
+
+
+@pytest.mark.asyncio
+async def test_stock_probe_rejects_non_video(tmp_path):
+    broken = tmp_path / "broken.mp4"
+    broken.write_text("not a video", encoding="utf-8")
+    assert await HybridMediaResolver._validate_stock_video(broken) is False
+
+
+@pytest.mark.asyncio
+async def test_stock_probe_accepts_real_video(tmp_path):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("FFmpeg is required")
+    stock = tmp_path / "stock.mp4"
+    subprocess.run(
+        [
+            ffmpeg, "-y", "-v", "error", "-f", "lavfi", "-i",
+            "testsrc2=size=360x640:rate=30:duration=1", "-c:v", "libx264",
+            "-pix_fmt", "yuv420p", str(stock),
+        ],
+        check=True,
+        timeout=30,
+    )
+    assert await HybridMediaResolver._validate_stock_video(stock) is True
+
+
+def test_word_aligned_subtitles_use_real_timestamps_and_safe_margin(tmp_path, monkeypatch):
+    import app.services.subtitles.scene_adapter as module
+
+    settings = SimpleNamespace(
+        subtitle_max_words_per_line=4,
+        output_width=1080,
+        output_height=1920,
+        subtitle_safe_bottom_px=520,
+        subtitle_safe_left_px=80,
+        subtitle_safe_right_px=80,
+    )
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
+    words = [
+        SimpleNamespace(start=0.25, end=0.55, text="Это"),
+        SimpleNamespace(start=0.60, end=0.95, text="точный"),
+        SimpleNamespace(start=1.02, end=1.40, text="тайминг."),
+    ]
+    result = SceneSubtitleBuilder().build_from_words(words)
+    assert result.line_count == 1
+    assert abs(result.phrases[0].start - 0.25) < 0.01
+    assert abs(result.phrases[0].end - 1.40) < 0.01
+    text = open(result.output_path, encoding="utf-8").read()
+    assert ",80,80,520,1" in text
+    assert "{\\k" in text
 
 
 @pytest.mark.asyncio

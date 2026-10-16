@@ -1,8 +1,11 @@
 """Resolve one visual asset per planned scene using stock video + AI keyframes."""
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +13,7 @@ import httpx
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.services.media.ffmpeg import _find_ffmpeg_bin
 from app.services.script_video.image_generator import ImageGenerator
 from app.services.script_video.models import VideoPlan
 from app.services.script_video.stock_video import (
@@ -55,12 +59,12 @@ class HybridMediaResult:
 
 
 class HybridMediaResolver:
-    """Use free real B-roll for generic scenes and AI for specific keyframes.
+    """Use free B-roll first, then a strictly bounded number of AI keyframes.
 
-    Wikimedia Commons gives the pipeline a zero-key, zero-API-cost stock source.
-    Optional Pexels/Coverr providers can add coverage. A quality floor limits
-    repeated visuals: when stock misses, ReCut buys another AI keyframe rather
-    than turning the result into a visibly repetitive slideshow.
+    The paid image budget is a hard ceiling. A weak stock search must never
+    silently turn a 4-image plan into 8-10 paid generations. Missing scenes are
+    filled from the nearest already-resolved asset and the editor varies the
+    crop/motion later. This keeps spend deterministic.
     """
 
     def __init__(
@@ -70,16 +74,14 @@ class HybridMediaResolver:
         fallback_image_model: str,
         cost_tracker: object | None = None,
         max_ai_images: int = 4,
-        max_stock_download_mb: int = 80,
-        max_reused_scenes: int = 1,
+        max_stock_download_mb: int = 25,
     ) -> None:
         settings = get_settings()
         self.image_model = image_model
         self.fallback_image_model = fallback_image_model
         self.cost_tracker = cost_tracker
-        self.max_ai_images = max(1, max_ai_images)
-        self.max_reused_scenes = max(0, min(2, max_reused_scenes))
-        max_bytes = max(10, max_stock_download_mb) * 1024 * 1024
+        self.max_ai_images = max(0, min(12, max_ai_images))
+        max_bytes = max(8, max_stock_download_mb) * 1024 * 1024
         coverr_key = os.getenv("COVERR_API_KEY", "").strip()
         pexels_key = os.getenv("PEXELS_API_KEY", "").strip()
         allow_coverr = (
@@ -113,13 +115,10 @@ class HybridMediaResolver:
         )
 
     def _ai_budget(self, unresolved_count: int) -> int:
-        """Keep cost low without allowing obvious repeated-scene degradation."""
+        """Return the paid-image count without ever exceeding the configured cap."""
         if unresolved_count <= 0:
             return 0
-        if not self.stock_enabled:
-            return unresolved_count
-        quality_floor = max(0, unresolved_count - self.max_reused_scenes)
-        return min(unresolved_count, max(self.max_ai_images, quality_floor))
+        return min(unresolved_count, self.max_ai_images)
 
     @staticmethod
     async def _save_generated_image(item: str, path_stem: Path) -> Path:
@@ -149,6 +148,44 @@ class HybridMediaResolver:
             return None
         nearest = min(candidates, key=lambda candidate: abs(candidate - index))
         return paths[nearest]
+
+    @staticmethod
+    async def _validate_stock_video(path: Path) -> bool:
+        """Reject broken/non-video stock before AI/TTS money is spent downstream."""
+        ffmpeg = Path(_find_ffmpeg_bin())
+        ffprobe = shutil.which("ffprobe") or str(ffmpeg.with_name("ffprobe"))
+        proc = await asyncio.create_subprocess_exec(
+            ffprobe,
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height:format=duration",
+            "-of", "json",
+            str(path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+        except asyncio.CancelledError:
+            proc.kill()
+            await proc.communicate()
+            raise
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return False
+        if proc.returncode:
+            return False
+        try:
+            data = json.loads(stdout.decode() or "{}")
+            streams = data.get("streams") or []
+            fmt = data.get("format") or {}
+            duration = float(fmt.get("duration") or 0.0)
+            width = int((streams[0] if streams else {}).get("width") or 0)
+            height = int((streams[0] if streams else {}).get("height") or 0)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return False
+        return duration > 0.15 and width > 0 and height > 0
 
     async def resolve(self, plan: VideoPlan, workdir: Path) -> HybridMediaResult:
         scene_count = len(plan.scenes)
@@ -180,6 +217,14 @@ class HybridMediaResolver:
                     )
                     asset.path.unlink(missing_ok=True)
                     continue
+                if not await self._validate_stock_video(asset.path):
+                    logger.warning(
+                        "script_stock_video_rejected_probe",
+                        provider=asset.provider,
+                        asset_id=asset.asset_id,
+                    )
+                    asset.path.unlink(missing_ok=True)
+                    continue
                 paths[index] = asset.path
                 stock_assets.append(asset)
                 used_stock_ids.add(asset.unique_id)
@@ -208,6 +253,7 @@ class HybridMediaResolver:
                 model=self.image_model,
                 fallback_model=self.fallback_image_model,
                 concurrency=self.image_concurrency,
+                max_retries=1,
                 cost_tracker=self.cost_tracker,
             ).generate(
                 prompts,
@@ -233,14 +279,12 @@ class HybridMediaResolver:
                 raise RuntimeError("hybrid media resolver produced no fallback asset")
             paths[index] = nearest
             reused += 1
-            logger.info(
-                "script_media_reused",
+            logger.warning(
+                "script_media_reused_cost_guard",
                 scene_index=index,
                 source=nearest.name,
+                max_ai_images=self.max_ai_images,
             )
-
-        if reused > self.max_reused_scenes:
-            raise RuntimeError("hybrid media quality floor was not satisfied")
 
         resolved = tuple(path for path in paths if path is not None)
         if len(resolved) != scene_count:
@@ -252,6 +296,7 @@ class HybridMediaResolver:
             ai_images=len(ai_indices),
             reused_scenes=reused,
             stock_enabled=self.stock_enabled,
+            hard_ai_cap=self.max_ai_images,
         )
         return HybridMediaResult(
             paths=resolved,

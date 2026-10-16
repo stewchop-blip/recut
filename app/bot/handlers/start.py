@@ -94,7 +94,9 @@ async def cmd_start(message: types.Message) -> None:
             profile, _ = await ensure_profile(session, user_id, payload)
             first_visit = not profile.onboarding_seen
         from app.bot.handlers.video import reset_media_selection
+        from app.bot.handlers.script_video import reset_state as reset_script_video_state
         await reset_media_selection(user_id)
+        reset_script_video_state(user_id)
         if first_visit:
             await message.answer(WELCOME, parse_mode="HTML", reply_markup=START_MENU)
             async with db_manager.session() as session:
@@ -127,14 +129,15 @@ async def help_callback(call: types.CallbackQuery) -> None:
 
 @router.message(Command("cancel"))
 async def cmd_cancel(message: types.Message) -> None:
-    """Cancel any in-flight Job for this user.
-
-    Marks active jobs as CANCELLED so has_active_job() stops blocking
-    new videos. Also deletes the corresponding /tmp/recut/* workdir.
-    """
+    """Cancel any in-flight job and the active Script Video coroutine."""
     user_id = message.from_user.id if message.from_user else 0
     if not user_id:
         return
+
+    # Stop the live coroutine first. Its TemporaryDirectory cleanup then removes
+    # Script Video assets, while the DB cancellation below makes the state durable.
+    from app.bot.handlers.script_video import cancel_script_video
+    script_cancelled = cancel_script_video(user_id)
 
     try:
         async with db_manager.session() as session:
@@ -147,8 +150,7 @@ async def cmd_cancel(message: types.Message) -> None:
         await message.answer("❌ Не удалось отменить задачу. Попробуй ещё раз.")
         return
 
-    # Phase 6 fix: only clean directories for this user's cancelled jobs,
-    # never delete other users' workspace.
+    # Only clean directories for this user's cancelled standard-video jobs.
     import shutil
     from app.core.config import get_settings
     base = Path(get_settings().temp_dir)
@@ -156,17 +158,16 @@ async def cmd_cancel(message: types.Message) -> None:
         for entry in base.iterdir():
             try:
                 if entry.is_dir() and entry.name.startswith("job_"):
-                    # Only delete if directory references one of our cancelled job IDs
                     if any(entry.name == f"job_{job_id}" or entry.name.startswith(f"job_{job_id}_")
                            for job_id in cancelled_ids):
                         shutil.rmtree(entry, ignore_errors=True)
             except Exception:
                 pass
 
-    if n:
+    if n or script_cancelled:
         await message.answer(
-            f"✅ Отменил {n} задач(у).\n"
-            "Можешь отправлять новое видео."
+            "✅ Задача отменена.\n"
+            "Можешь отправлять новое видео или создать новый ролик."
         )
     else:
         await message.answer(

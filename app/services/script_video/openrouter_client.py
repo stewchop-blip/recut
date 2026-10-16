@@ -55,6 +55,7 @@ class OpenRouterClient:
         max_tokens: int = 2000,
         response_format: Optional[dict[str, Any]] = None,
         reasoning: Optional[dict[str, Any]] = None,
+        provider: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         if not self._client:
             raise RuntimeError("Client not entered; use async with")
@@ -69,6 +70,8 @@ class OpenRouterClient:
             payload["response_format"] = response_format
         if reasoning is not None:
             payload["reasoning"] = reasoning
+        if provider is not None:
+            payload["provider"] = provider
         try:
             resp = await self._client.post(
                 f"{self.base_url}/chat/completions",
@@ -77,7 +80,12 @@ class OpenRouterClient:
             resp.raise_for_status()
             data = resp.json()
             usage_info = data.get("usage", {})
-            actual_cost = usage_info.get("cost") if isinstance(usage_info.get("cost"), (int, float)) else None
+            actual_cost = (
+                usage_info.get("cost")
+                if isinstance(usage_info, dict)
+                and isinstance(usage_info.get("cost"), (int, float))
+                else None
+            )
             self.last_actual_cost_usd = float(actual_cost) if actual_cost is not None else None
             logger.info(
                 "openrouter_request",
