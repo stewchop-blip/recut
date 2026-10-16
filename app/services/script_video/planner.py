@@ -1,4 +1,4 @@
-"""ScriptPlanner - generates VideoPlan via OpenRouter structured output."""
+"""ScriptPlanner - generates VideoPlan via OpenRouter with local validation."""
 from __future__ import annotations
 
 import json
@@ -15,7 +15,14 @@ logger = get_logger(__name__)
 
 SYSTEM_PROMPT = """You are ReCut Short-Form Director. Create a production-ready plan for a vertical TikTok/Reels/Shorts video.
 
-The API enforces the output JSON schema. Fill every field exactly as requested.
+Return ONLY one compact JSON object, with no Markdown or commentary.
+OpenRouter may enforce the JSON schema when the selected endpoint supports it; ReCut also validates the response locally.
+
+OUTPUT CONTRACT:
+- Top-level fields: title, language, target_duration, narration, visual_style, scenes.
+- Every scene must contain: id, narration, visual_prompt, stock_query, prefer_stock, duration_hint, importance, motion_type, transition, reference_scene_id.
+- motion_type must be one of: zoom_in, zoom_out, pan_left, pan_right, static.
+- transition must be one of: fade, slide_left, slide_right, cut.
 
 TOKEN BUDGET IS IMPORTANT:
 - Keep the whole JSON compact.
@@ -182,9 +189,12 @@ class ScriptPlanner:
         }
 
         async with self.client as c:
-            # One normal paid request. A second request is allowed only when the
-            # provider actually truncates/returns malformed JSON, never for a
-            # cosmetic enum/type mismatch.
+            # Do not require provider-level support for every optional parameter.
+            # OpenRouter treats response_format as a preference without
+            # require_parameters and can still route through a compatible regional
+            # endpoint. ReCut validates the returned JSON locally either way.
+            # A second paid request is allowed only for genuinely truncated or
+            # malformed transport output, never for semantic schema mismatches.
             for attempt in range(2):
                 try:
                     data = await c.chat_completion(
@@ -194,7 +204,6 @@ class ScriptPlanner:
                         max_tokens=3200,
                         response_format=response_format,
                         reasoning={"enabled": False},
-                        provider={"require_parameters": True},
                     )
                     usage = data.get("usage") or {}
                     cost = usage.get("cost") if isinstance(usage, dict) else None
