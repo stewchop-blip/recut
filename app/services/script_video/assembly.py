@@ -79,8 +79,8 @@ class ScriptVideoAssembler:
             f"force_original_aspect_ratio=increase,crop={ScriptVideoAssembler.width}:{ScriptVideoAssembler.height},"
             f"zoompan=z='{zoom}':x='{x}':y='{y}':d=1:s={ScriptVideoAssembler.width}x"
             f"{ScriptVideoAssembler.height}:fps={ScriptVideoAssembler.fps},"
-            f"trim=duration={duration:.4f},fps={ScriptVideoAssembler.fps},settb=AVTB,"
-            f"setpts=PTS-STARTPTS,setsar=1,format=yuv420p[v{index}]"
+            f"trim=duration={duration:.4f},fps={ScriptVideoAssembler.fps},"
+            f"settb=1/{ScriptVideoAssembler.fps},setpts=N,setsar=1,format=yuv420p[v{index}]"
         )
 
     def _filter_graph(self, beats: list[VisualBeat], durations: list[float]) -> str:
