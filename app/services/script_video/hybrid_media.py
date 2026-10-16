@@ -22,6 +22,8 @@ from app.services.script_video.stock_video import (
 
 logger = get_logger(__name__)
 
+SUPPORTED_STOCK_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
+
 
 @dataclass(frozen=True, slots=True)
 class HybridMediaResult:
@@ -87,7 +89,6 @@ class HybridMediaResolver:
         providers = []
         if pexels_key:
             providers.append(PexelsStockVideoProvider(pexels_key, max_download_bytes=max_bytes))
-        # Always available and restricted to CC0/Public Domain files internally.
         providers.append(WikimediaCommonsStockVideoProvider(max_download_bytes=max_bytes))
         if coverr_key and allow_coverr:
             providers.append(CoverrStockVideoProvider(coverr_key, max_download_bytes=max_bytes))
@@ -171,6 +172,14 @@ class HybridMediaResolver:
                 )
                 if asset is None:
                     continue
+                if asset.path.suffix.lower() not in SUPPORTED_STOCK_SUFFIXES:
+                    logger.info(
+                        "script_stock_video_skipped_container",
+                        provider=asset.provider,
+                        suffix=asset.path.suffix.lower(),
+                    )
+                    asset.path.unlink(missing_ok=True)
+                    continue
                 paths[index] = asset.path
                 stock_assets.append(asset)
                 used_stock_ids.add(asset.unique_id)
@@ -208,8 +217,6 @@ class HybridMediaResolver:
             if not generated:
                 raise RuntimeError("image generation returned no images")
 
-            # One image per prompt is requested. ImageGenerator already fills
-            # isolated provider failures with the nearest successful result.
             for position, scene_index in enumerate(ai_indices):
                 source = generated[min(position, len(generated) - 1)]
                 paths[scene_index] = await self._save_generated_image(
