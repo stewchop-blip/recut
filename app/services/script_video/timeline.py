@@ -19,12 +19,16 @@ class VisualBeat:
 class TimelineCompiler:
     """Compile planned scenes into visual beats without needless visual reuse.
 
-    Quality V3 keeps most planned scenes as one beat. Stock clips provide their
-    own motion, while long AI still scenes can split into a second subtle
-    crop/motion beat at no provider cost.
+    Quality V3 keeps provider spend bounded, so the editor must squeeze more
+    perceived shots out of each paid keyframe. Long still-image scenes are split
+    into short editorial beats with alternating crop/motion while stock clips
+    keep their native movement. This raises pacing without another API call.
     """
 
-    beat_target_seconds = 4.2
+    # Around 3 seconds is a better ceiling for Shorts/Reels than the old 4.2s.
+    # A ~4.4s planned scene will now become two distinct editorial beats rather
+    # than one long hold, while very short scenes remain a single beat.
+    beat_target_seconds = 3.0
     transition_seconds = 0.22
 
     @staticmethod
