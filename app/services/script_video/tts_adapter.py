@@ -1,6 +1,7 @@
 """OpenRouter text-to-speech adapter for generated video narration."""
 from __future__ import annotations
 
+import asyncio
 import re
 from pathlib import Path
 
@@ -23,10 +24,6 @@ class ScriptTTSAdapter:
         settings = get_settings()
         self.model = model or settings.script_video_tts_model
         self.voice = voice or getattr(settings, "script_video_tts_voice", "george")
-        # ``None`` means use configured fallback. An explicit empty string means
-        # "no second paid provider" so the handler can jump straight to free
-        # Edge TTS instead of silently burning more credits after a provider
-        # error.
         if fallback_model is None:
             self.fallback_model = getattr(
                 settings,
@@ -58,12 +55,7 @@ class ScriptTTSAdapter:
 
     @staticmethod
     def _response_cost(response: httpx.Response) -> float | None:
-        """Read provider-reported cost headers when OpenRouter exposes them."""
-        for name in (
-            "x-openrouter-cost",
-            "x-usage-cost",
-            "x-request-cost",
-        ):
+        for name in ("x-openrouter-cost", "x-usage-cost", "x-request-cost"):
             raw = response.headers.get(name)
             if raw is None:
                 continue
@@ -73,6 +65,37 @@ class ScriptTTSAdapter:
                 continue
             if value >= 0:
                 return value
+        return None
+
+    async def _generation_cost(
+        self,
+        client: httpx.AsyncClient,
+        generation_id: str,
+    ) -> float | None:
+        """Resolve exact TTS spend from OpenRouter's generation metadata."""
+        if not generation_id:
+            return None
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        for attempt in range(2):
+            if attempt:
+                await asyncio.sleep(0.25)
+            try:
+                response = await client.get(
+                    "https://openrouter.ai/api/v1/generation",
+                    headers=headers,
+                    params={"id": generation_id},
+                    timeout=10,
+                )
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+                data = (response.json() or {}).get("data") or {}
+                for key in ("total_cost", "usage", "upstream_inference_cost"):
+                    value = data.get(key)
+                    if isinstance(value, (int, float)) and value >= 0:
+                        return float(value)
+            except Exception:
+                break
         return None
 
     async def _synthesize_openrouter(
@@ -105,7 +128,11 @@ class ScriptTTSAdapter:
         if not audio or not content_type.startswith("audio/"):
             raise RuntimeError("TTS provider returned no audio")
         output_path.write_bytes(audio)
+
         actual_cost = self._response_cost(response)
+        generation_id = response.headers.get("x-generation-id", "")
+        if actual_cost is None and generation_id:
+            actual_cost = await self._generation_cost(client, generation_id)
         if actual_cost is not None:
             self.actual_cost_usd += actual_cost
         logger.info(
@@ -114,6 +141,7 @@ class ScriptTTSAdapter:
             provider="openrouter",
             voice=voice,
             bytes=len(audio),
+            generation_id=generation_id or None,
             actual_cost_usd=actual_cost,
         )
         return output_path
