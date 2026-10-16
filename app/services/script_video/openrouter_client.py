@@ -71,12 +71,50 @@ class OpenRouterClient:
         if reasoning is not None:
             payload["reasoning"] = reasoning
         if provider is not None:
-            payload["provider"] = provider
+            # ReCut must not make the entire request unroutable just because a
+            # regional endpoint cannot advertise every optional parameter.
+            # Keep the caller's provider preferences, but never hard-require
+            # parameter support at the router layer; local validation is the
+            # source of truth for Script Video.
+            provider_payload = dict(provider)
+            if provider_payload.get("require_parameters") is True:
+                provider_payload["require_parameters"] = False
+            payload["provider"] = provider_payload
         try:
             resp = await self._client.post(
                 f"{self.base_url}/chat/completions",
                 json=payload,
             )
+
+            # Some OpenRouter regions/providers can temporarily have no endpoint
+            # accepting advanced request parameters such as response_format or
+            # reasoning. That routing failure happens before inference and costs
+            # nothing. Retry once with the portable core request instead of
+            # failing the whole video generation.
+            if (
+                resp.status_code == 404
+                and "No endpoints found that can handle the requested parameters" in resp.text
+                and any(key in payload for key in ("response_format", "reasoning", "provider"))
+            ):
+                logger.warning(
+                    "openrouter_parameter_routing_fallback",
+                    model=model,
+                    dropped=[
+                        key for key in ("response_format", "reasoning", "provider")
+                        if key in payload
+                    ],
+                )
+                portable_payload = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                }
+                resp = await self._client.post(
+                    f"{self.base_url}/chat/completions",
+                    json=portable_payload,
+                )
+
             resp.raise_for_status()
             data = resp.json()
             usage_info = data.get("usage", {})
