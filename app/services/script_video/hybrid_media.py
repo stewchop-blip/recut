@@ -166,6 +166,10 @@ class HybridMediaResolver:
         )
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+        except asyncio.CancelledError:
+            proc.kill()
+            await proc.communicate()
+            raise
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
@@ -249,6 +253,7 @@ class HybridMediaResolver:
                 model=self.image_model,
                 fallback_model=self.fallback_image_model,
                 concurrency=self.image_concurrency,
+                max_retries=1,
                 cost_tracker=self.cost_tracker,
             ).generate(
                 prompts,
