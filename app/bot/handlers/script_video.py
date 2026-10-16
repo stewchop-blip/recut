@@ -30,8 +30,8 @@ _awaiting_idea: set[int] = set()
 _script_requests: set[int] = set()
 _script_tasks: dict[int, asyncio.Task] = {}
 _script_render_semaphore = asyncio.Semaphore(1)
+_alignment_service = None
 
-# Quality V3: real B-roll + a hard-capped paid AI keyframe budget.
 QUALITY_IMAGE_MODEL = "recraft/recraft-v4.1-flash"
 QUALITY_TTS_MODEL = "elevenlabs/eleven-v4-turbo"
 QUALITY_TTS_VOICE = "george"
@@ -89,6 +89,13 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _cost_capped_ai_budget(current_actual_cost: float) -> tuple[int, dict[str, float]]:
     configured = _env_int("SCRIPT_VIDEO_MAX_AI_IMAGES", QUALITY_AI_KEYFRAMES, 0, 8)
     guard = _env_float("SCRIPT_VIDEO_COST_GUARD_USD", DEFAULT_COST_GUARD_USD, 0.01, 1.0)
@@ -107,6 +114,66 @@ def _cost_capped_ai_budget(current_actual_cost: float) -> tuple[int, dict[str, f
         "tts_reserve": tts_reserve,
         "available_for_images": available,
     }
+
+
+async def _build_synced_subtitles(plan, audio_path: Path, audio_duration: float):
+    """Use free local word timestamps when possible, with safe plan fallback."""
+    builder = SceneSubtitleBuilder()
+    fallback_delay = _env_float(
+        "SCRIPT_VIDEO_SUBTITLE_DELAY_SECONDS", SUBTITLE_DELAY_SECONDS, 0.0, 0.5
+    )
+    if _env_bool("SCRIPT_VIDEO_WORD_ALIGNMENT_ENABLED", True):
+        try:
+            from app.services.transcription.base import TranscriptionRequest
+            from app.services.transcription.faster_whisper import WhisperTranscriptionService
+
+            global _alignment_service
+            alignment_model = os.getenv("SCRIPT_VIDEO_ALIGNMENT_MODEL", "tiny").strip() or "tiny"
+            if (
+                _alignment_service is None
+                or getattr(_alignment_service, "model_id", None) != alignment_model
+            ):
+                settings = get_settings()
+                _alignment_service = WhisperTranscriptionService(
+                    model=alignment_model,
+                    device=settings.whisper_device,
+                    compute_type=settings.whisper_compute_type,
+                )
+            result = await _alignment_service.transcribe(
+                TranscriptionRequest(
+                    audio_path=str(audio_path),
+                    language=plan.language,
+                    beam_size=1,
+                    word_timestamps=True,
+                )
+            )
+            words = tuple(word for segment in result.segments for word in segment.words)
+            expected_words = len((plan.narration or "").split())
+            if len(words) >= max(3, int(expected_words * 0.55)):
+                subtitles = builder.build_from_words(words)
+                logger.info(
+                    "script_subtitles_word_aligned",
+                    words=len(words),
+                    model=result.model,
+                    duration_seconds=result.duration_seconds,
+                )
+                return subtitles
+            logger.warning(
+                "script_subtitle_alignment_too_sparse",
+                aligned_words=len(words),
+                expected_words=expected_words,
+            )
+        except Exception as exc:
+            logger.warning(
+                "script_subtitle_alignment_fallback",
+                error_type=type(exc).__name__,
+            )
+
+    return builder.build_from_plan(
+        plan,
+        start_offset=fallback_delay,
+        total_duration=max(0.5, audio_duration - fallback_delay),
+    )
 
 
 async def _send_result_video_with_retry(
@@ -235,7 +302,6 @@ async def handle_idea(message: Message, bot=None) -> bool:
                         language="ru",
                     )
                 finally:
-                    # Record paid planner spend even when planning itself fails.
                     tracker.add_actual_cost("planner", planner.actual_cost_usd)
 
                 ai_budget, budget_meta = _cost_capped_ai_budget(tracker.actual_cost_usd)
@@ -273,17 +339,7 @@ async def handle_idea(message: Message, bot=None) -> bool:
                 audio_duration = await ScriptVideoAssembler.audio_duration(audio_path)
                 tracker.audio_duration_seconds = audio_duration
 
-                subtitle_delay = _env_float(
-                    "SCRIPT_VIDEO_SUBTITLE_DELAY_SECONDS",
-                    SUBTITLE_DELAY_SECONDS,
-                    0.0,
-                    0.5,
-                )
-                subtitles = SceneSubtitleBuilder().build_from_plan(
-                    plan,
-                    start_offset=subtitle_delay,
-                    total_duration=max(0.5, audio_duration - subtitle_delay),
-                )
+                subtitles = await _build_synced_subtitles(plan, audio_path, audio_duration)
                 subtitle_path = Path(subtitles.output_path) if subtitles.output_path else None
                 output = workdir / "recut-video.mp4"
                 if job_id is not None:
