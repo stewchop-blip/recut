@@ -27,7 +27,6 @@ class SceneSchema(BaseModel):
     @field_validator("id", mode="before")
     @classmethod
     def normalize_id(cls, value: Any) -> str:
-        """LLMs sometimes emit numeric ids although the schema wants strings."""
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             if isinstance(value, float) and not value.is_integer():
                 return str(value)
@@ -45,15 +44,33 @@ class SceneSchema(BaseModel):
             return str(int(value))
         return str(value).strip() or None
 
+    @field_validator("stock_query", mode="before")
+    @classmethod
+    def normalize_stock_query(cls, value: Any) -> str:
+        return " ".join(str(value or "").split())[:100]
+
+    @field_validator("duration_hint", mode="before")
+    @classmethod
+    def normalize_duration_hint(cls, value: Any) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            parsed = 5.0
+        return max(1.0, min(30.0, parsed))
+
+    @field_validator("importance", mode="before")
+    @classmethod
+    def normalize_importance(cls, value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = 3
+        return max(1, min(5, parsed))
+
     @field_validator("motion_type", mode="before")
     @classmethod
     def normalize_motion(cls, value: Any) -> str:
-        """Map free-form camera language onto the small renderer motion enum.
-
-        A harmless wording difference must never trigger a second paid planner
-        request. Unknown but valid-looking camera directions are deliberately
-        degraded to a safe supported motion instead of rejecting the whole plan.
-        """
+        """Map free-form camera language onto the renderer motion enum."""
         raw = str(value or "").strip().lower().replace("-", "_")
         compact = " ".join(raw.replace("_", " ").split())
         aliases = {
@@ -95,8 +112,6 @@ class SceneSchema(BaseModel):
         }
         if compact in aliases:
             return aliases[compact]
-
-        # Tolerate wording variants without spending money on a planner retry.
         if "left" in compact and any(word in compact for word in ("pan", "slide", "truck", "move")):
             return "pan_left"
         if "right" in compact and any(word in compact for word in ("pan", "slide", "truck", "move")):
@@ -166,6 +181,34 @@ class VideoPlanSchema(BaseModel):
     narration: str = Field(..., description="Full narration script")
     visual_style: str = Field(..., min_length=10, max_length=500)
     scenes: Sequence[SceneSchema] = Field(..., min_length=3, max_length=15)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def normalize_title(cls, value: Any) -> str:
+        title = " ".join(str(value or "").split())[:120]
+        return title if len(title) >= 3 else "ReCut video"
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def normalize_language(cls, value: Any) -> str:
+        raw = str(value or "ru").strip().lower().replace("_", "-")
+        short = raw.split("-", 1)[0]
+        return short if short in {"ru", "en", "de", "fr", "es", "it"} else "ru"
+
+    @field_validator("target_duration", mode="before")
+    @classmethod
+    def normalize_target_duration(cls, value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = 40
+        return max(15, min(120, parsed))
+
+    @field_validator("visual_style", mode="before")
+    @classmethod
+    def normalize_visual_style(cls, value: Any) -> str:
+        style = " ".join(str(value or "").split())[:500]
+        return style if len(style) >= 10 else "Realistic vertical short-form video"
 
     @field_validator("language")
     @classmethod
