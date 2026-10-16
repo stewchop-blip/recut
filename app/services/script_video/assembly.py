@@ -84,7 +84,13 @@ class ScriptVideoAssembler:
         )
 
     def _filter_graph(self, beats: list[VisualBeat], durations: list[float]) -> str:
-        graph = [self._motion_filter(beat, i, durations[i]) for i, beat in enumerate(beats)]
+        # Transition only between already encoded CFR clips. Passing zoompan outputs
+        # directly into xfade is not reliable across FFmpeg builds: some report 1/0.
+        graph = [
+            f"[{i}:v]fps={self.fps},settb=AVTB,setpts=PTS-STARTPTS,"
+            f"setsar=1,format=yuv420p[v{i}]"
+            for i in range(len(beats))
+        ]
         groups: list[list[int]] = [[0]]
         for index in range(1, len(beats)):
             if beats[index].transition == "cut":
@@ -117,6 +123,34 @@ class ScriptVideoAssembler:
             graph.append(f"[{group_outputs[0]}]format=yuv420p[vout]")
         return ";".join(graph)
 
+    async def _render_beat(self, beat: VisualBeat, image_path: Path, duration: float,
+                           output_path: Path) -> None:
+        graph_path = output_path.with_suffix(".filter.txt")
+        graph_path.write_text(self._motion_filter(beat, 0, duration), encoding="utf-8")
+        command = [
+            _find_ffmpeg_bin(), "-y", "-v", "error", "-loop", "1", "-framerate",
+            str(self.fps), "-t", f"{duration:.4f}", "-i", str(image_path),
+            "-filter_complex_script", str(graph_path), "-map", "[v0]", "-an",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-r",
+            str(self.fps), "-pix_fmt", "yuv420p", "-t", f"{duration:.4f}",
+            "-movflags", "+faststart", str(output_path),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=90)
+        except asyncio.TimeoutError as exc:
+            proc.kill()
+            await proc.communicate()
+            raise ScriptVideoAssemblyError("FFmpeg timed out rendering a visual beat") from exc
+        finally:
+            graph_path.unlink(missing_ok=True)
+        if proc.returncode or not output_path.is_file() or output_path.stat().st_size == 0:
+            logger.error("script_video_beat_render_failed", exit_code=proc.returncode,
+                         stderr=(stderr or b"").decode(errors="replace")[-500:])
+            raise ScriptVideoAssemblyError("FFmpeg failed to render a visual beat")
+
     async def assemble(
         self,
         plan: VideoPlan,
@@ -140,6 +174,13 @@ class ScriptVideoAssembler:
             audio_duration = await self.audio_duration(Path(audio_path))
             beats = TimelineCompiler().compile(plan, len(image_paths), audio_duration)
             beat_durations = [beat.duration for beat in beats]
+            clip_paths: list[Path] = []
+            for index, beat in enumerate(beats):
+                clip_path = temp_dir / f"beat-{index:03d}.mp4"
+                await self._render_beat(
+                    beat, image_paths[beat.image_index], beat_durations[index], clip_path,
+                )
+                clip_paths.append(clip_path)
             filter_graph = self._filter_graph(beats, beat_durations)
             graph_path = temp_dir / "filter_complex.txt"
             subtitle_filter = ""
@@ -153,11 +194,8 @@ class ScriptVideoAssembler:
                 filter_graph += f";[vout]{subtitle_filter}[vfinal]"
             graph_path.write_text(filter_graph, encoding="utf-8")
             command = [_find_ffmpeg_bin(), "-y", "-v", "error"]
-            for beat in beats:
-                command.extend([
-                    "-loop", "1", "-framerate", str(self.fps), "-t", f"{beat.duration:.4f}",
-                    "-i", str(image_paths[beat.image_index]),
-                ])
+            for clip_path in clip_paths:
+                command.extend(["-i", str(clip_path)])
             command.extend(["-i", str(Path(audio_path).resolve())])
             video_label = "vfinal" if subtitle_filter else "vout"
             command.extend([
@@ -176,9 +214,32 @@ class ScriptVideoAssembler:
                 await proc.communicate()
                 raise ScriptVideoAssemblyError("FFmpeg timed out")
             if proc.returncode:
-                logger.error("script_video_ffmpeg_failed", exit_code=proc.returncode,
-                             stderr=(stderr or b"").decode(errors="replace")[-1000:])
-                raise ScriptVideoAssemblyError("FFmpeg failed to assemble video")
+                stderr_text = (stderr or b"").decode(errors="replace")
+                if "xfade" in stderr_text and "frame rate" in stderr_text.lower():
+                    logger.warning("script_video_transition_fallback", reason="invalid_xfade_framerate")
+                    cut_beats = [VisualBeat(
+                        scene_id=beat.scene_id, image_index=beat.image_index,
+                        duration=beat.duration, motion=beat.motion, transition="cut",
+                    ) for beat in beats]
+                    graph_path.write_text(
+                        self._filter_graph(cut_beats, beat_durations), encoding="utf-8",
+                    )
+                    proc = await asyncio.create_subprocess_exec(
+                        *command, stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    try:
+                        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+                    except asyncio.TimeoutError as exc:
+                        proc.kill()
+                        await proc.communicate()
+                        raise ScriptVideoAssemblyError("FFmpeg timed out on cut-transition fallback") from exc
+                    if proc.returncode == 0:
+                        logger.info("script_video_cut_transition_fallback_completed")
+                if proc.returncode:
+                    logger.error("script_video_ffmpeg_failed", exit_code=proc.returncode,
+                                 stderr=(stderr or b"").decode(errors="replace")[-1000:])
+                    raise ScriptVideoAssemblyError("FFmpeg failed to assemble video")
             if not output_path.is_file() or output_path.stat().st_size == 0:
                 raise ScriptVideoAssemblyError("FFmpeg produced an empty video")
             logger.info("script_video_assembly_complete", image_count=len(image_paths),
