@@ -23,17 +23,25 @@ class ScriptTTSAdapter:
         settings = get_settings()
         self.model = model or settings.script_video_tts_model
         self.voice = voice or getattr(settings, "script_video_tts_voice", "george")
-        self.fallback_model = fallback_model or getattr(
-            settings,
-            "script_video_tts_fallback_model",
-            "openai/gpt-4o-mini-tts-2025-12-15",
-        )
+        # ``None`` means use configured fallback. An explicit empty string means
+        # "no second paid provider" so the handler can jump straight to free
+        # Edge TTS instead of silently burning more credits after a provider
+        # error.
+        if fallback_model is None:
+            self.fallback_model = getattr(
+                settings,
+                "script_video_tts_fallback_model",
+                "openai/gpt-4o-mini-tts-2025-12-15",
+            )
+        else:
+            self.fallback_model = fallback_model
         self.fallback_voice = fallback_voice or getattr(
             settings,
             "script_video_tts_fallback_voice",
             "nova",
         )
         self.api_key = settings.openrouter_api_key
+        self.actual_cost_usd = 0.0
 
     @staticmethod
     def _clean_text(text: str) -> str:
@@ -47,6 +55,25 @@ class ScriptTTSAdapter:
         if model.startswith("elevenlabs/eleven-v4"):
             return f"[confident] {cleaned}"
         return cleaned
+
+    @staticmethod
+    def _response_cost(response: httpx.Response) -> float | None:
+        """Read provider-reported cost headers when OpenRouter exposes them."""
+        for name in (
+            "x-openrouter-cost",
+            "x-usage-cost",
+            "x-request-cost",
+        ):
+            raw = response.headers.get(name)
+            if raw is None:
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if value >= 0:
+                return value
+        return None
 
     async def _synthesize_openrouter(
         self,
@@ -78,12 +105,16 @@ class ScriptTTSAdapter:
         if not audio or not content_type.startswith("audio/"):
             raise RuntimeError("TTS provider returned no audio")
         output_path.write_bytes(audio)
+        actual_cost = self._response_cost(response)
+        if actual_cost is not None:
+            self.actual_cost_usd += actual_cost
         logger.info(
             "script_tts_completed",
             model=model,
             provider="openrouter",
             voice=voice,
             bytes=len(audio),
+            actual_cost_usd=actual_cost,
         )
         return output_path
 
@@ -146,6 +177,7 @@ class ScriptTTSAdapter:
                 model="edge-tts/ru-RU-DmitryNeural",
                 provider="edge_tts",
                 bytes=len(audio),
+                actual_cost_usd=0.0,
             )
             return output_path
         except Exception as exc:
