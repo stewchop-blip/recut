@@ -3,16 +3,16 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
 from app.services.script_video.assembly import ScriptVideoAssembler
-from app.services.script_video.hybrid_media import HybridMediaResult
+from app.services.script_video.hybrid_media import HybridMediaResolver, HybridMediaResult
 from app.services.script_video.models import SceneSchema
 from app.services.script_video.stock_video import (
     CoverrStockVideoProvider,
     StockVideoAsset,
+    WikimediaCommonsStockVideoProvider,
 )
 
 
@@ -51,6 +51,36 @@ def test_coverr_rank_prefers_vertical_clip_with_similar_duration():
     )
 
 
+def test_wikimedia_only_accepts_cc0_or_public_domain():
+    safe = WikimediaCommonsStockVideoProvider._license_is_safe
+    assert safe("CC0") is True
+    assert safe("CC0 1.0 Universal") is True
+    assert safe("Public domain") is True
+    assert safe("Public Domain Mark") is True
+    assert safe("CC BY 4.0") is False
+    assert safe("CC BY-SA 4.0") is False
+    assert safe("") is False
+
+
+def test_hybrid_ai_budget_allows_at_most_one_reused_scene():
+    resolver = object.__new__(HybridMediaResolver)
+    resolver.stock_enabled = True
+    resolver.max_ai_images = 4
+    resolver.max_reused_scenes = 1
+    assert resolver._ai_budget(2) == 2
+    assert resolver._ai_budget(4) == 4
+    assert resolver._ai_budget(7) == 6
+    assert resolver._ai_budget(10) == 9
+
+
+def test_hybrid_ai_budget_keeps_v2_quality_when_stock_disabled():
+    resolver = object.__new__(HybridMediaResolver)
+    resolver.stock_enabled = False
+    resolver.max_ai_images = 4
+    resolver.max_reused_scenes = 1
+    assert resolver._ai_budget(8) == 8
+
+
 def test_hybrid_media_attribution_is_deduplicated(tmp_path):
     assets = (
         StockVideoAsset(
@@ -69,15 +99,24 @@ def test_hybrid_media_attribution_is_deduplicated(tmp_path):
             creator_url="https://coverr.co",
             asset_id="2",
         ),
+        StockVideoAsset(
+            path=tmp_path / "three.webm",
+            provider="wikimedia",
+            source_url="https://commons.wikimedia.org/wiki/File:Example.webm",
+            creator_name="Example",
+            creator_url="https://commons.wikimedia.org",
+            asset_id="3",
+        ),
     )
     result = HybridMediaResult(
         paths=tuple(asset.path for asset in assets),
         stock_assets=assets,
         ai_images=0,
-        stock_videos=2,
+        stock_videos=3,
         reused_scenes=0,
     )
     assert result.attribution_text.count("Coverr") == 1
+    assert result.attribution_text.count("Wikimedia Commons") == 1
 
 
 @pytest.mark.asyncio

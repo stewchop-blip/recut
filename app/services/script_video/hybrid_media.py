@@ -17,9 +17,12 @@ from app.services.script_video.stock_video import (
     PexelsStockVideoProvider,
     StockVideoAsset,
     StockVideoProviderChain,
+    WikimediaCommonsStockVideoProvider,
 )
 
 logger = get_logger(__name__)
+
+SUPPORTED_STOCK_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +39,8 @@ class HybridMediaResult:
             return ""
         providers = {asset.provider for asset in self.stock_assets}
         parts: list[str] = []
+        if "wikimedia" in providers:
+            parts.append("Wikimedia Commons (CC0/Public Domain)")
         if "coverr" in providers:
             parts.append("Coverr: https://coverr.co")
         if "pexels" in providers:
@@ -50,10 +55,12 @@ class HybridMediaResult:
 
 
 class HybridMediaResolver:
-    """Use real B-roll for generic scenes and pay for only a few AI keyframes.
+    """Use free real B-roll for generic scenes and AI for specific keyframes.
 
-    If no stock provider key is configured, the resolver deliberately preserves
-    the current all-AI behavior instead of silently degrading visual quality.
+    Wikimedia Commons gives the pipeline a zero-key, zero-API-cost stock source.
+    Optional Pexels/Coverr providers can add coverage. A quality floor limits
+    repeated visuals: when stock misses, ReCut buys another AI keyframe rather
+    than turning the result into a visibly repetitive slideshow.
     """
 
     def __init__(
@@ -64,19 +71,28 @@ class HybridMediaResolver:
         cost_tracker: object | None = None,
         max_ai_images: int = 4,
         max_stock_download_mb: int = 80,
+        max_reused_scenes: int = 1,
     ) -> None:
         settings = get_settings()
         self.image_model = image_model
         self.fallback_image_model = fallback_image_model
         self.cost_tracker = cost_tracker
         self.max_ai_images = max(1, max_ai_images)
+        self.max_reused_scenes = max(0, min(2, max_reused_scenes))
         max_bytes = max(10, max_stock_download_mb) * 1024 * 1024
         coverr_key = os.getenv("COVERR_API_KEY", "").strip()
         pexels_key = os.getenv("PEXELS_API_KEY", "").strip()
-        self.stock = StockVideoProviderChain((
-            CoverrStockVideoProvider(coverr_key, max_download_bytes=max_bytes),
-            PexelsStockVideoProvider(pexels_key, max_download_bytes=max_bytes),
-        ))
+        allow_coverr = (
+            os.getenv("SCRIPT_VIDEO_ALLOW_COVERR", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        providers = []
+        if pexels_key:
+            providers.append(PexelsStockVideoProvider(pexels_key, max_download_bytes=max_bytes))
+        providers.append(WikimediaCommonsStockVideoProvider(max_download_bytes=max_bytes))
+        if coverr_key and allow_coverr:
+            providers.append(CoverrStockVideoProvider(coverr_key, max_download_bytes=max_bytes))
+        self.stock = StockVideoProviderChain(providers)
         self.stock_enabled = (
             os.getenv("SCRIPT_VIDEO_HYBRID_MEDIA_ENABLED", "true").strip().lower()
             not in {"0", "false", "no", "off"}
@@ -95,6 +111,15 @@ class HybridMediaResolver:
             scene.importance,
             -index,
         )
+
+    def _ai_budget(self, unresolved_count: int) -> int:
+        """Keep cost low without allowing obvious repeated-scene degradation."""
+        if unresolved_count <= 0:
+            return 0
+        if not self.stock_enabled:
+            return unresolved_count
+        quality_floor = max(0, unresolved_count - self.max_reused_scenes)
+        return min(unresolved_count, max(self.max_ai_images, quality_floor))
 
     @staticmethod
     async def _save_generated_image(item: str, path_stem: Path) -> Path:
@@ -147,6 +172,14 @@ class HybridMediaResolver:
                 )
                 if asset is None:
                     continue
+                if asset.path.suffix.lower() not in SUPPORTED_STOCK_SUFFIXES:
+                    logger.info(
+                        "script_stock_video_skipped_container",
+                        provider=asset.provider,
+                        suffix=asset.path.suffix.lower(),
+                    )
+                    asset.path.unlink(missing_ok=True)
+                    continue
                 paths[index] = asset.path
                 stock_assets.append(asset)
                 used_stock_ids.add(asset.unique_id)
@@ -161,14 +194,7 @@ class HybridMediaResolver:
                 reused_scenes=0,
             )
 
-        # Without a configured stock API we keep the known-good V2 behavior.
-        # With stock enabled, enforce a hard AI budget and reuse a nearby visual
-        # only if a stock search failed after the paid keyframes are allocated.
-        ai_budget = (
-            len(unresolved)
-            if not self.stock_enabled
-            else min(self.max_ai_images, len(unresolved))
-        )
+        ai_budget = self._ai_budget(len(unresolved))
         ai_indices = sorted(
             unresolved,
             key=lambda index: self._ai_priority(plan, index),
@@ -177,27 +203,26 @@ class HybridMediaResolver:
         ai_indices.sort()
 
         prompts = [plan.scenes[index].visual_prompt for index in ai_indices]
-        generated = await ImageGenerator(
-            model=self.image_model,
-            fallback_model=self.fallback_image_model,
-            concurrency=self.image_concurrency,
-            cost_tracker=self.cost_tracker,
-        ).generate(
-            prompts,
-            aspect_ratio="9:16",
-            max_images=len(prompts),
-        )
-        if not generated:
-            raise RuntimeError("image generation returned no images")
-
-        # One image per prompt is requested. ImageGenerator already fills isolated
-        # provider failures with the nearest successful result, preserving length.
-        for position, scene_index in enumerate(ai_indices):
-            source = generated[min(position, len(generated) - 1)]
-            paths[scene_index] = await self._save_generated_image(
-                source,
-                workdir / f"scene-{scene_index:02d}-ai",
+        if prompts:
+            generated = await ImageGenerator(
+                model=self.image_model,
+                fallback_model=self.fallback_image_model,
+                concurrency=self.image_concurrency,
+                cost_tracker=self.cost_tracker,
+            ).generate(
+                prompts,
+                aspect_ratio="9:16",
+                max_images=len(prompts),
             )
+            if not generated:
+                raise RuntimeError("image generation returned no images")
+
+            for position, scene_index in enumerate(ai_indices):
+                source = generated[min(position, len(generated) - 1)]
+                paths[scene_index] = await self._save_generated_image(
+                    source,
+                    workdir / f"scene-{scene_index:02d}-ai",
+                )
 
         reused = 0
         for index, path in enumerate(paths):
@@ -213,6 +238,9 @@ class HybridMediaResolver:
                 scene_index=index,
                 source=nearest.name,
             )
+
+        if reused > self.max_reused_scenes:
+            raise RuntimeError("hybrid media quality floor was not satisfied")
 
         resolved = tuple(path for path in paths if path is not None)
         if len(resolved) != scene_count:
