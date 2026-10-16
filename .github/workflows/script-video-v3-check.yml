@@ -49,7 +49,7 @@ jobs:
           python -m pip install --upgrade pip &&
           python -m pip install
           pytest pytest-asyncio httpx pydantic pydantic-settings python-dotenv
-          structlog edge-tts aiogram sqlalchemy asyncpg
+          structlog edge-tts aiogram sqlalchemy asyncpg greenlet
       - name: Compile changed Python modules
         run: python -m compileall -q app/services/script_video app/bot/handlers/script_video.py app/bot/handlers/start.py app/bot/middlewares/render_queue.py app/services/subtitles/scene_adapter.py tests/test_script_video.py tests/test_script_video_v3.py
       - name: Verify shared render admission imports
