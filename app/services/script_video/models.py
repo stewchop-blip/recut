@@ -1,28 +1,26 @@
 """Script video generation schemas.
 
-VideoPlan -> scenes -> image prompts -> motion -> assembly.
+VideoPlan -> scenes -> hybrid media -> motion -> assembly.
 Validated before any expensive AI call.
 """
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from pydantic import BaseModel, Field, field_validator, ValidationError
+from pydantic import BaseModel, Field, field_validator
 
-
-# ---------------------------------------------------------------------------
-# Structured output schema (matches OpenRouter JSON mode expectation)
-# ---------------------------------------------------------------------------
 
 class SceneSchema(BaseModel):
     id: str = Field(..., description="Scene identifier, e.g. s1")
     narration: str = Field(..., description="Text spoken in this scene")
-    visual_prompt: str = Field(..., description="Prompt for image generation")
+    visual_prompt: str = Field(..., description="Prompt for AI image generation")
+    stock_query: str = Field(default="", max_length=100, description="Short English stock-video search query")
+    prefer_stock: bool = Field(default=True, description="Prefer real stock footage when suitable")
     duration_hint: float = Field(default=5.0, ge=1.0, le=30.0)
     importance: int = Field(default=3, ge=1, le=5)
-    motion_type: str = Field(default="slow_pan", description="zoom_in | zoom_out | pan_left | pan_right | static")
+    motion_type: str = Field(default="zoom_in", description="zoom_in | zoom_out | pan_left | pan_right | static")
     transition: str = Field(default="fade", description="fade | slide_left | slide_right | cut")
     reference_scene_id: Optional[str] = Field(default=None, description="For visual consistency reuse")
 
@@ -32,6 +30,14 @@ class SceneSchema(BaseModel):
         allowed = {"zoom_in", "zoom_out", "pan_left", "pan_right", "static"}
         if v not in allowed:
             raise ValueError(f"motion_type must be one of {allowed}")
+        return v
+
+    @field_validator("transition")
+    @classmethod
+    def validate_transition(cls, v: str) -> str:
+        allowed = {"fade", "slide_left", "slide_right", "cut"}
+        if v not in allowed:
+            raise ValueError(f"transition must be one of {allowed}")
         return v
 
 
@@ -52,10 +58,6 @@ class VideoPlanSchema(BaseModel):
         return v
 
 
-# ---------------------------------------------------------------------------
-# Runtime dataclasses (used inside pipeline after validation)
-# ---------------------------------------------------------------------------
-
 @dataclass(frozen=True, slots=True)
 class Scene:
     id: str
@@ -66,6 +68,8 @@ class Scene:
     motion_type: str
     transition: str
     reference_scene_id: Optional[str] = None
+    stock_query: str = ""
+    prefer_stock: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +93,8 @@ def from_schema(schema: VideoPlanSchema) -> VideoPlan:
             motion_type=s.motion_type,
             transition=s.transition,
             reference_scene_id=s.reference_scene_id,
+            stock_query=s.stock_query.strip(),
+            prefer_stock=s.prefer_stock,
         )
         for s in schema.scenes
     )
@@ -114,6 +120,8 @@ def to_json(plan: VideoPlan) -> str:
                 "id": s.id,
                 "narration": s.narration,
                 "visual_prompt": s.visual_prompt,
+                "stock_query": s.stock_query,
+                "prefer_stock": s.prefer_stock,
                 "duration_hint": s.duration_hint,
                 "importance": s.importance,
                 "motion_type": s.motion_type,
