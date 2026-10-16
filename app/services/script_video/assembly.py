@@ -90,8 +90,6 @@ class ScriptVideoAssembler:
 
     @classmethod
     def _video_filter(cls, duration: float) -> str:
-        # Keep the full source visible even when a stock clip is landscape. A
-        # blurred fill is less destructive than an aggressive center crop.
         return (
             f"[0:v]split=2[bg][fg];"
             f"[bg]scale={cls.width}:{cls.height}:force_original_aspect_ratio=increase,"
@@ -191,8 +189,6 @@ class ScriptVideoAssembler:
     ) -> None:
         graph_path = output_path.with_suffix(".filter.txt")
         graph_path.write_text(self._video_filter(duration), encoding="utf-8")
-        # Offset repeated uses slightly so a duplicated source does not restart at
-        # the exact same frame. stream_loop keeps short stock clips long enough.
         seek_seconds = (beat_index % 3) * 0.35
         command = [
             _find_ffmpeg_bin(), "-y", "-v", "error", "-stream_loop", "-1",
@@ -228,8 +224,6 @@ class ScriptVideoAssembler:
         audio_path: Optional[Path] = None,
         output_path: Optional[Path] = None,
     ) -> Path:
-        # Keep the public parameter name `images` for backwards compatibility;
-        # Quality V3 accepts either image paths or video paths in this list.
         if not images:
             raise ScriptVideoAssemblyError("No visual assets provided for assembly")
         asset_paths = [Path(p).resolve() for p in images]
@@ -266,11 +260,9 @@ class ScriptVideoAssembler:
                     .replace(":", "\\:")
                     .replace("'", "\\'")
                 )
-                subtitle_filter = (
-                    f"subtitles='{escaped}':force_style='FontName=Arial,FontSize=56,"
-                    "PrimaryColour=&H00FFFFFF,SecondaryColour=&H0000D7FF,"
-                    "OutlineColour=&H000000,BorderStyle=1,Outline=4,MarginV=60'"
-                )
+                # The ASS file already contains the safe-area margins, font,
+                # outline and karaoke colors. Do not overwrite MarginV here.
+                subtitle_filter = f"subtitles='{escaped}'"
                 filter_graph += f";[vout]{subtitle_filter}[vfinal]"
             graph_path.write_text(filter_graph, encoding="utf-8")
             command = [_find_ffmpeg_bin(), "-y", "-v", "error"]
