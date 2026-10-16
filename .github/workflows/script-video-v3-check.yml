@@ -28,6 +28,7 @@ jobs:
       OPENROUTER_API_KEY: "test-openrouter-key"
       DATABASE_URL: "postgresql+asyncpg://recut:recut@localhost:5432/recut"
       ENVIRONMENT: development
+      PYTHONPATH: "."
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,8 +37,12 @@ jobs:
           cache: pip
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - name: Install package and test dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Install focused test dependencies
+        run: >-
+          python -m pip install --upgrade pip &&
+          python -m pip install
+          pytest pytest-asyncio httpx pydantic pydantic-settings python-dotenv
+          structlog edge-tts
       - name: Compile changed Python modules
         run: python -m compileall -q app/services/script_video app/bot/handlers/script_video.py tests/test_script_video.py tests/test_script_video_v3.py
       - name: Run focused script-video tests
