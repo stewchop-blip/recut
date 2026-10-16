@@ -125,6 +125,11 @@ class ScriptPlanner:
                         temperature=0.3,
                         max_tokens=4000,
                         response_format={"type": "json_object"},
+                        # This is a formatting/planning task, not a reasoning task.
+                        # Hidden reasoning consumes the same completion budget and
+                        # was causing 4k-token truncation followed by a second paid
+                        # retry. Disable it explicitly so budget is spent on JSON.
+                        reasoning={"enabled": False},
                     )
                     usage = data.get("usage") or {}
                     cost = usage.get("cost") if isinstance(usage, dict) else None
