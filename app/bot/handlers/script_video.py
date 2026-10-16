@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import tempfile
 from contextlib import suppress
@@ -30,7 +31,6 @@ _awaiting_idea: set[int] = set()
 _script_requests: set[int] = set()
 _script_tasks: dict[int, asyncio.Task] = {}
 _script_render_semaphore = asyncio.Semaphore(1)
-_alignment_service = None
 
 QUALITY_IMAGE_MODEL = "recraft/recraft-v4.1-flash"
 QUALITY_TTS_MODEL = "elevenlabs/eleven-v4-turbo"
@@ -117,29 +117,31 @@ def _cost_capped_ai_budget(current_actual_cost: float) -> tuple[int, dict[str, f
 
 
 async def _build_synced_subtitles(plan, audio_path: Path, audio_duration: float):
-    """Use free local word timestamps when possible, with safe plan fallback."""
+    """Use free local word timestamps when possible, with safe plan fallback.
+
+    The lightweight Whisper model is deliberately job-scoped. ReCut also has a
+    separate long-video Whisper service, so keeping both models resident on a
+    small Railway container can trigger OOM later. Releasing the alignment model
+    after every Script Video trades a little latency for predictable memory.
+    """
     builder = SceneSubtitleBuilder()
     fallback_delay = _env_float(
         "SCRIPT_VIDEO_SUBTITLE_DELAY_SECONDS", SUBTITLE_DELAY_SECONDS, 0.0, 0.5
     )
     if _env_bool("SCRIPT_VIDEO_WORD_ALIGNMENT_ENABLED", True):
+        alignment_service = None
         try:
             from app.services.transcription.base import TranscriptionRequest
             from app.services.transcription.faster_whisper import WhisperTranscriptionService
 
-            global _alignment_service
             alignment_model = os.getenv("SCRIPT_VIDEO_ALIGNMENT_MODEL", "tiny").strip() or "tiny"
-            if (
-                _alignment_service is None
-                or getattr(_alignment_service, "model_id", None) != alignment_model
-            ):
-                settings = get_settings()
-                _alignment_service = WhisperTranscriptionService(
-                    model=alignment_model,
-                    device=settings.whisper_device,
-                    compute_type=settings.whisper_compute_type,
-                )
-            result = await _alignment_service.transcribe(
+            settings = get_settings()
+            alignment_service = WhisperTranscriptionService(
+                model=alignment_model,
+                device=settings.whisper_device,
+                compute_type=settings.whisper_compute_type,
+            )
+            result = await alignment_service.transcribe(
                 TranscriptionRequest(
                     audio_path=str(audio_path),
                     language=plan.language,
@@ -168,6 +170,9 @@ async def _build_synced_subtitles(plan, audio_path: Path, audio_duration: float)
                 "script_subtitle_alignment_fallback",
                 error_type=type(exc).__name__,
             )
+        finally:
+            alignment_service = None
+            gc.collect()
 
     return builder.build_from_plan(
         plan,
