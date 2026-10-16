@@ -221,9 +221,10 @@ class ScriptVideoAssembler:
                         scene_id=beat.scene_id, image_index=beat.image_index,
                         duration=beat.duration, motion=beat.motion, transition="cut",
                     ) for beat in beats]
-                    graph_path.write_text(
-                        self._filter_graph(cut_beats, beat_durations), encoding="utf-8",
-                    )
+                    fallback_graph = self._filter_graph(cut_beats, beat_durations)
+                    if subtitle_filter:
+                        fallback_graph += f";[vout]{subtitle_filter}[vfinal]"
+                    graph_path.write_text(fallback_graph, encoding="utf-8")
                     proc = await asyncio.create_subprocess_exec(
                         *command, stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.PIPE,
