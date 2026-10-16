@@ -189,12 +189,11 @@ class ScriptPlanner:
         }
 
         async with self.client as c:
-            # Do not require provider-level support for every optional parameter.
-            # OpenRouter treats response_format as a preference without
-            # require_parameters and can still route through a compatible regional
-            # endpoint. ReCut validates the returned JSON locally either way.
-            # A second paid request is allowed only for genuinely truncated or
-            # malformed transport output, never for semantic schema mismatches.
+            # Keep the caller contract stable for tests and future provider
+            # preferences. OpenRouterClient deliberately downgrades the hard
+            # router enforcement so regional availability cannot make this
+            # request unroutable, then falls back to a portable request on a
+            # parameter-routing 404.
             for attempt in range(2):
                 try:
                     data = await c.chat_completion(
@@ -204,6 +203,7 @@ class ScriptPlanner:
                         max_tokens=3200,
                         response_format=response_format,
                         reasoning={"enabled": False},
+                        provider={"require_parameters": True},
                     )
                     usage = data.get("usage") or {}
                     cost = usage.get("cost") if isinstance(usage, dict) else None
