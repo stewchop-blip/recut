@@ -55,12 +55,13 @@ class HybridMediaResult:
 
 
 class HybridMediaResolver:
-    """Use free real B-roll for generic scenes and AI for specific keyframes.
+    """Use free B-roll first, then a strictly bounded number of AI keyframes.
 
-    Wikimedia Commons gives the pipeline a zero-key, zero-API-cost stock source.
-    Optional Pexels/Coverr providers can add coverage. A quality floor limits
-    repeated visuals: when stock misses, ReCut buys another AI keyframe rather
-    than turning the result into a visibly repetitive slideshow.
+    The paid image budget is a hard ceiling. A weak stock search must never
+    silently turn a 4-image plan into 8-10 paid generations. Missing scenes are
+    filled from the nearest already-resolved asset and the editor varies the
+    crop/motion later. This is cheaper than failing late and retrying the whole
+    job, and keeps spend deterministic.
     """
 
     def __init__(
@@ -70,16 +71,14 @@ class HybridMediaResolver:
         fallback_image_model: str,
         cost_tracker: object | None = None,
         max_ai_images: int = 4,
-        max_stock_download_mb: int = 80,
-        max_reused_scenes: int = 1,
+        max_stock_download_mb: int = 25,
     ) -> None:
         settings = get_settings()
         self.image_model = image_model
         self.fallback_image_model = fallback_image_model
         self.cost_tracker = cost_tracker
-        self.max_ai_images = max(1, max_ai_images)
-        self.max_reused_scenes = max(0, min(2, max_reused_scenes))
-        max_bytes = max(10, max_stock_download_mb) * 1024 * 1024
+        self.max_ai_images = max(0, min(12, max_ai_images))
+        max_bytes = max(8, max_stock_download_mb) * 1024 * 1024
         coverr_key = os.getenv("COVERR_API_KEY", "").strip()
         pexels_key = os.getenv("PEXELS_API_KEY", "").strip()
         allow_coverr = (
@@ -113,13 +112,10 @@ class HybridMediaResolver:
         )
 
     def _ai_budget(self, unresolved_count: int) -> int:
-        """Keep cost low without allowing obvious repeated-scene degradation."""
+        """Return the paid-image count without ever exceeding the configured cap."""
         if unresolved_count <= 0:
             return 0
-        if not self.stock_enabled:
-            return unresolved_count
-        quality_floor = max(0, unresolved_count - self.max_reused_scenes)
-        return min(unresolved_count, max(self.max_ai_images, quality_floor))
+        return min(unresolved_count, self.max_ai_images)
 
     @staticmethod
     async def _save_generated_image(item: str, path_stem: Path) -> Path:
@@ -224,6 +220,9 @@ class HybridMediaResolver:
                     workdir / f"scene-{scene_index:02d}-ai",
                 )
 
+        # If stock coverage is poor, do not silently spend above the cap. Reuse
+        # the nearest resolved asset. Timeline/assembly will vary motion/crops so
+        # the duplicate is less obvious, and logs make the quality tradeoff clear.
         reused = 0
         for index, path in enumerate(paths):
             if path is not None:
@@ -233,14 +232,12 @@ class HybridMediaResolver:
                 raise RuntimeError("hybrid media resolver produced no fallback asset")
             paths[index] = nearest
             reused += 1
-            logger.info(
-                "script_media_reused",
+            logger.warning(
+                "script_media_reused_cost_guard",
                 scene_index=index,
                 source=nearest.name,
+                max_ai_images=self.max_ai_images,
             )
-
-        if reused > self.max_reused_scenes:
-            raise RuntimeError("hybrid media quality floor was not satisfied")
 
         resolved = tuple(path for path in paths if path is not None)
         if len(resolved) != scene_count:
@@ -252,6 +249,7 @@ class HybridMediaResolver:
             ai_images=len(ai_indices),
             reused_scenes=reused,
             stock_enabled=self.stock_enabled,
+            hard_ai_cap=self.max_ai_images,
         )
         return HybridMediaResult(
             paths=resolved,
