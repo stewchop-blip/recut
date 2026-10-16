@@ -128,6 +128,22 @@ class ScriptPlanner:
                     if start < 0 or end < start:
                         raise ValueError("Planner returned no JSON object")
                     schema = VideoPlanSchema.model_validate_json(content[start:end + 1])
+                    # Quality guard: narration, captions and visual timing must all
+                    # describe the same words. Derive timing from spoken word count
+                    # instead of trusting arbitrary LLM duration guesses.
+                    scene_narration = " ".join(
+                        scene.narration.strip() for scene in schema.scenes if scene.narration.strip()
+                    ).strip()
+                    spoken_words = len(scene_narration.split())
+                    min_words = max(30, round(target_words * 0.85))
+                    min_scenes = 8 if target_duration >= 30 else 6
+                    if len(schema.scenes) < min_scenes:
+                        raise ValueError("Planner returned too few visual scenes")
+                    if spoken_words < min_words:
+                        raise ValueError("Planner narration is too short for target duration")
+                    schema.narration = scene_narration
+                    for scene in schema.scenes:
+                        scene.duration_hint = max(1.0, min(30.0, len(scene.narration.split()) / 2.35))
                     break
                 except (ValidationError, ValueError, TypeError) as exc:
                     if attempt == 0:
