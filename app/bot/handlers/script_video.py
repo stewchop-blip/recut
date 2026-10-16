@@ -77,7 +77,10 @@ async def handle_idea(message: Message, bot=None) -> bool:
             return True
 
     is_premium = False
-    is_unlimited_tester = settings.has_unlimited_generations(user_id)
+    is_unlimited_tester = (
+        settings.has_unlimited_generations(user_id)
+        or user_id in settings.internal_user_ids
+    )
     async with db_manager.session() as session:
         user_settings = await UserSettingsRepository(session).get(user_id)
         if user_settings:
