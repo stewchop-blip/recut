@@ -1,21 +1,21 @@
 """ScriptPlanner - generates VideoPlan via OpenRouter structured output."""
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from pydantic import ValidationError
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.services.script_video.models import VideoPlanSchema, from_schema, VideoPlan
+from app.services.script_video.models import VideoPlan, VideoPlanSchema, from_schema
 from app.services.script_video.openrouter_client import OpenRouterClient
 
 logger = get_logger(__name__)
 
 SYSTEM_PROMPT = """You are ReCut Short-Form Director. Create a production-ready plan for a vertical TikTok/Reels/Shorts video.
 
-OUTPUT FORMAT: one strict compact JSON object matching VideoPlan schema. No markdown, comments, or text outside JSON.
-Fields: title, language, target_duration, narration, visual_style, scenes[].
+The API enforces the output JSON schema. Fill every field exactly as requested.
 
 TOKEN BUDGET IS IMPORTANT:
 - Keep the whole JSON compact.
@@ -24,7 +24,6 @@ TOKEN BUDGET IS IMPORTANT:
 - Every scene narration: maximum 14 words.
 - Every visual_prompt: maximum 28 English words.
 - Every stock_query: 2-5 simple English words.
-- Never repeat explanations outside the required fields.
 
 STORY + VOICEOVER rules:
 - Write for spoken delivery, not for an article. The voiceover must sound like a real creator talking to one person.
@@ -34,31 +33,73 @@ STORY + VOICEOVER rules:
 - Aim for roughly 2.0-2.2 spoken words per second so narration sounds natural instead of rushed.
 
 HYBRID VISUAL rules:
-- ReCut mixes free real stock video with a small number of AI keyframes. Your plan must decide which source fits each scene.
-- Each scene must include stock_query and prefer_stock.
+- ReCut mixes free real stock video with a small number of AI keyframes. Decide which source fits each scene.
 - Set prefer_stock=true for generic real-world B-roll that stock libraries can plausibly contain: hands, streets, desks, phones, laptops, markets, driving, cooking, offices, nature, walking, objects in use, ordinary environments.
-- Set prefer_stock=false only when the spoken beat needs a very specific fictional/story detail, exact visual continuity, impossible coincidence, custom composition, or a key reveal that generic stock would weaken.
-- Across a normal 8-12 scene video, target roughly 65-80% prefer_stock=true and only 20-35% AI-worthy scenes.
-- stock_query must describe only the searchable action/object, not camera jargon. Good: "old film camera", "flea market hands", "family beach vacation". Bad: a full cinematic prompt.
-- visual_prompt is the AI fallback and MUST be in English. It must describe one concrete photographic/cinematic 9:16 shot.
-- Every visual_prompt must be self-contained and include only essential style/character traits needed for continuity.
-- Use native vertical composition with important details away from extreme top/bottom UI zones.
-- Vary shot scale and angle across adjacent scenes: close-up, medium, wide, POV, over-the-shoulder, detail shot.
-- Avoid fake interface text, captions baked into images, logos, watermarks, distorted hands, crowds of faces, and generic stock-photo poses.
-- If the same AI character/object must recur, use reference_scene_id and keep age, clothing, setting, lighting, and key traits consistent.
+- Set prefer_stock=false only for a very specific fictional/story detail, continuity, impossible coincidence, custom composition, or key reveal.
+- Across a normal 8-12 scene video, target roughly 65-80% prefer_stock=true.
+- stock_query describes only the searchable action/object, not camera jargon.
+- visual_prompt is the AI fallback and MUST be English. Describe one concrete photographic/cinematic 9:16 shot.
+- Avoid fake interface text, captions baked into images, logos, watermarks, crowds of faces, and generic stock-photo poses.
+- If the same AI character/object must recur, set reference_scene_id to that earlier scene id. Otherwise use an empty string.
 
 EDITING rules:
 - Think in shots, not slides. Each scene is one distinct visual beat.
-- Use the requested scene count. For a normal 30-45 second video this is usually 8-12 scenes.
-- Each scene must have: id, narration, visual_prompt, stock_query, prefer_stock, duration_hint, importance (1-5), motion_type, transition, reference_scene_id (optional).
-- Use cuts for energetic changes, but include a few deliberate fades/slides so the result does not feel mechanically hard-cut throughout.
-- For 8-12 scenes, usually 2-4 transitions should be fade/slide and the rest cuts.
+- Use cuts for energetic changes, with a few deliberate fades/slides.
+- Vary shot scale and angle across adjacent scenes.
 
 QUALITY BAR:
 - The result must feel like edited short-form content, not an AI slideshow.
-- Every visual should support the exact spoken idea at that moment.
-- Do not add claims, statistics, brands, UI text, or factual details that were not supplied by the user unless they are generic and safe.
+- Every visual must support the spoken idea at that moment.
+- Do not invent claims, statistics, brands, UI text, or factual details not supplied by the user.
 """
+
+# Keep the schema intentionally simple. Anthropic structured outputs support the
+# enum/type shape reliably, while some numerical JSON-Schema constraints vary by
+# provider. Business limits stay enforced by Pydantic after parsing.
+VIDEO_PLAN_JSON_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "language": {"type": "string"},
+        "target_duration": {"type": "integer"},
+        "narration": {"type": "string"},
+        "visual_style": {"type": "string"},
+        "scenes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "narration": {"type": "string"},
+                    "visual_prompt": {"type": "string"},
+                    "stock_query": {"type": "string"},
+                    "prefer_stock": {"type": "boolean"},
+                    "duration_hint": {"type": "number"},
+                    "importance": {"type": "integer"},
+                    "motion_type": {
+                        "type": "string",
+                        "enum": ["zoom_in", "zoom_out", "pan_left", "pan_right", "static"],
+                    },
+                    "transition": {
+                        "type": "string",
+                        "enum": ["fade", "slide_left", "slide_right", "cut"],
+                    },
+                    "reference_scene_id": {"type": "string"},
+                },
+                "required": [
+                    "id", "narration", "visual_prompt", "stock_query", "prefer_stock",
+                    "duration_hint", "importance", "motion_type", "transition",
+                    "reference_scene_id",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": [
+        "title", "language", "target_duration", "narration", "visual_style", "scenes"
+    ],
+    "additionalProperties": False,
+}
 
 
 class ScriptPlanner:
@@ -71,6 +112,43 @@ class ScriptPlanner:
         self.model = model or s.script_video_planner_model
         self.client = client or OpenRouterClient()
         self.actual_cost_usd = 0.0
+
+    @staticmethod
+    def _extract_json(content: str) -> str:
+        content = content.strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        elif content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        start, end = content.find("{"), content.rfind("}")
+        if start < 0 or end < start:
+            raise ValueError("Planner returned no JSON object")
+        return content[start:end + 1]
+
+    @staticmethod
+    def _finalize_schema(schema: VideoPlanSchema, target_words: int) -> VideoPlanSchema:
+        scene_narration = " ".join(
+            scene.narration.strip() for scene in schema.scenes if scene.narration.strip()
+        ).strip()
+        if not scene_narration:
+            raise ValueError("Planner narration is empty")
+        # Do not pay for a second model call because the first script is slightly
+        # shorter than the target. Audio duration becomes the source of truth.
+        spoken_words = len(scene_narration.split())
+        if spoken_words < max(24, round(target_words * 0.55)):
+            raise ValueError("Planner narration is unusably short")
+        if len(schema.scenes) < 6:
+            raise ValueError("Planner returned too few visual scenes")
+        schema.narration = scene_narration
+        for index, scene in enumerate(schema.scenes, start=1):
+            if not scene.id.strip():
+                scene.id = f"s{index}"
+            if not scene.stock_query.strip():
+                scene.stock_query = "generic lifestyle"
+            scene.duration_hint = max(1.0, min(30.0, len(scene.narration.split()) / 2.1))
+        return schema
 
     async def plan(
         self,
@@ -88,48 +166,35 @@ class ScriptPlanner:
                     f"User idea: {user_idea}\n"
                     f"Target duration: {target_duration} seconds\n"
                     f"Language: {language}\n"
-                    f"Target voiceover length: about {target_words} spoken words (within ±10%).\n"
+                    f"Target voiceover length: about {target_words} spoken words.\n"
                     f"Use exactly {target_scenes} distinct scenes/shots.\n"
-                    "Prefer free real stock footage for generic B-roll and reserve AI imagery for only the key story-specific shots. "
-                    "Return one compact complete VideoPlan JSON object. Set top-level narration to an empty string. "
-                    "Keep visual_prompt under 28 words, stock_query under 5 words, and scene narration under 14 words. "
-                    "Do not include extra text."
+                    "Prefer free real stock footage for generic B-roll and reserve AI imagery for key story-specific shots."
                 ),
             },
         ]
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "recut_video_plan",
+                "strict": True,
+                "schema": VIDEO_PLAN_JSON_SCHEMA,
+            },
+        }
+
         async with self.client as c:
-            schema = None
+            # One normal paid request. A second request is allowed only when the
+            # provider actually truncates/returns malformed JSON, never for a
+            # cosmetic enum/type mismatch.
             for attempt in range(2):
-                retry_scenes = max(8, target_scenes - 2)
-                request_messages = messages if attempt == 0 else [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Create a new compact hybrid-media video plan for this idea: {user_idea}\n"
-                            f"Duration: {target_duration} seconds. Language: {language}.\n"
-                            f"Voiceover: about {target_words} spoken words.\n"
-                            f"Use exactly {retry_scenes} distinct vertical shots.\n"
-                            "The previous output was truncated or invalid. Minimize JSON size aggressively. "
-                            "Set top-level narration to an empty string. Keep visual_style under 25 words, "
-                            "visual_prompt under 22 words, stock_query under 4 words, and scene narration under 14 words. "
-                            "Use stock for most generic scenes and AI only for story-specific keyframes. "
-                            "Return exactly one valid JSON object with all required fields and no markdown."
-                        ),
-                    },
-                ]
                 try:
                     data = await c.chat_completion(
                         model=self.model,
-                        messages=request_messages,
-                        temperature=0.3,
-                        max_tokens=4000,
-                        response_format={"type": "json_object"},
-                        # This is a formatting/planning task, not a reasoning task.
-                        # Hidden reasoning consumes the same completion budget and
-                        # was causing 4k-token truncation followed by a second paid
-                        # retry. Disable it explicitly so budget is spent on JSON.
+                        messages=messages,
+                        temperature=0.25,
+                        max_tokens=3200,
+                        response_format=response_format,
                         reasoning={"enabled": False},
+                        provider={"require_parameters": True},
                     )
                     usage = data.get("usage") or {}
                     cost = usage.get("cost") if isinstance(usage, dict) else None
@@ -141,59 +206,55 @@ class ScriptPlanner:
                         raise ValueError("Planner returned empty response")
                     if choice.get("finish_reason") == "length":
                         raise ValueError("Planner response was truncated")
-                    content = content.strip()
-                    if content.startswith("```json"):
-                        content = content[7:]
-                    elif content.startswith("```"):
-                        content = content[3:]
-                    if content.endswith("```"):
-                        content = content[:-3]
-                    start, end = content.find("{"), content.rfind("}")
-                    if start < 0 or end < start:
-                        raise ValueError("Planner returned no JSON object")
-                    schema = VideoPlanSchema.model_validate_json(content[start:end + 1])
 
-                    scene_narration = " ".join(
-                        scene.narration.strip() for scene in schema.scenes if scene.narration.strip()
-                    ).strip()
-                    spoken_words = len(scene_narration.split())
-                    min_words = max(30, round(target_words * 0.80))
-                    expected_scenes = target_scenes if attempt == 0 else retry_scenes
-                    min_scenes = max(6, expected_scenes - 1)
-                    if len(schema.scenes) < min_scenes:
-                        raise ValueError("Planner returned too few visual scenes")
-                    if spoken_words < min_words:
-                        raise ValueError("Planner narration is too short for target duration")
-                    schema.narration = scene_narration
-                    for scene in schema.scenes:
-                        scene.duration_hint = max(1.0, min(30.0, len(scene.narration.split()) / 2.1))
-                        if not scene.stock_query.strip():
-                            scene.stock_query = "generic lifestyle"
-                    break
-                except (ValidationError, ValueError, TypeError) as exc:
+                    raw_json = self._extract_json(content)
+                    # json.loads first differentiates malformed transport output
+                    # from semantic validation. Semantic errors must not trigger
+                    # another paid attempt.
+                    json.loads(raw_json)
+                    try:
+                        schema = VideoPlanSchema.model_validate_json(raw_json)
+                        schema = self._finalize_schema(schema, target_words)
+                    except ValidationError as exc:
+                        logger.error(
+                            "script_planner_schema_rejected_no_retry",
+                            model=self.model,
+                            reason=str(exc)[:240],
+                        )
+                        raise RuntimeError("Planner returned an invalid structured plan") from exc
+                    except ValueError as exc:
+                        logger.error(
+                            "script_planner_quality_rejected_no_retry",
+                            model=self.model,
+                            reason=str(exc)[:240],
+                        )
+                        raise RuntimeError("Planner returned an unusable plan") from exc
+                    plan = from_schema(schema)
+                    logger.info(
+                        "script_plan_ready",
+                        title=plan.title,
+                        scenes=len(plan.scenes),
+                        stock_preferred=sum(1 for scene in plan.scenes if scene.prefer_stock),
+                        duration_target=plan.target_duration,
+                        planner_attempts=attempt + 1,
+                    )
+                    return plan
+                except RuntimeError:
+                    raise
+                except (json.JSONDecodeError, ValueError, TypeError) as exc:
                     if attempt == 0:
                         logger.warning(
-                            "script_planner_invalid_response_retrying",
+                            "script_planner_transport_retrying",
                             model=self.model,
                             error_type=type(exc).__name__,
                             reason=str(exc)[:160],
                         )
-                    else:
-                        logger.error(
-                            "script_planner_invalid_response",
-                            model=self.model,
-                            error_type=type(exc).__name__,
-                            reason=str(exc)[:160],
-                        )
-                        raise RuntimeError("Planner could not return a valid video plan") from exc
-            if schema is None:
-                raise RuntimeError("Planner could not return a valid video plan")
-        plan = from_schema(schema)
-        logger.info(
-            "script_plan_ready",
-            title=plan.title,
-            scenes=len(plan.scenes),
-            stock_preferred=sum(1 for scene in plan.scenes if scene.prefer_stock),
-            duration_target=plan.target_duration,
-        )
-        return plan
+                        continue
+                    logger.error(
+                        "script_planner_transport_failed",
+                        model=self.model,
+                        error_type=type(exc).__name__,
+                        reason=str(exc)[:160],
+                    )
+                    raise RuntimeError("Planner could not return valid JSON") from exc
+        raise RuntimeError("Planner could not return a valid video plan")
