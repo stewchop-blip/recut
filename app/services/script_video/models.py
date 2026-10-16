@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -24,6 +24,63 @@ class SceneSchema(BaseModel):
     transition: str = Field(default="fade", description="fade | slide_left | slide_right | cut")
     reference_scene_id: Optional[str] = Field(default=None, description="For visual consistency reuse")
 
+    @field_validator("id", mode="before")
+    @classmethod
+    def normalize_id(cls, value: Any) -> str:
+        """LLMs sometimes emit numeric ids although the schema wants strings."""
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if isinstance(value, float) and not value.is_integer():
+                return str(value)
+            return str(int(value))
+        return str(value).strip()
+
+    @field_validator("reference_scene_id", mode="before")
+    @classmethod
+    def normalize_reference_scene_id(cls, value: Any) -> Optional[str]:
+        if value is None or value == "":
+            return None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if isinstance(value, float) and not value.is_integer():
+                return str(value)
+            return str(int(value))
+        return str(value).strip() or None
+
+    @field_validator("motion_type", mode="before")
+    @classmethod
+    def normalize_motion(cls, value: Any) -> str:
+        """Map harmless natural-language motion labels onto renderer enums.
+
+        This avoids paying for a second planner call only because a model wrote
+        `slow push in` instead of the renderer token `zoom_in`.
+        """
+        raw = str(value or "").strip().lower().replace("-", "_")
+        compact = " ".join(raw.replace("_", " ").split())
+        aliases = {
+            "zoom in": "zoom_in",
+            "slow zoom in": "zoom_in",
+            "slow zoom": "zoom_in",
+            "push in": "zoom_in",
+            "slow push in": "zoom_in",
+            "gentle push in": "zoom_in",
+            "zoom out": "zoom_out",
+            "slow zoom out": "zoom_out",
+            "pull out": "zoom_out",
+            "pan left": "pan_left",
+            "slow pan left": "pan_left",
+            "pan right": "pan_right",
+            "slow pan right": "pan_right",
+            "slow pan": "pan_right",
+            "gentle drift": "zoom_in",
+            "static": "static",
+            "static hold": "static",
+            "hold": "static",
+            "still": "static",
+        }
+        if compact in aliases:
+            return aliases[compact]
+        normalized = compact.replace(" ", "_")
+        return normalized
+
     @field_validator("motion_type")
     @classmethod
     def validate_motion(cls, v: str) -> str:
@@ -31,6 +88,26 @@ class SceneSchema(BaseModel):
         if v not in allowed:
             raise ValueError(f"motion_type must be one of {allowed}")
         return v
+
+    @field_validator("transition", mode="before")
+    @classmethod
+    def normalize_transition(cls, value: Any) -> str:
+        raw = str(value or "").strip().lower().replace("-", "_")
+        compact = " ".join(raw.replace("_", " ").split())
+        aliases = {
+            "fade": "fade",
+            "crossfade": "fade",
+            "cross fade": "fade",
+            "dissolve": "fade",
+            "cut": "cut",
+            "hard cut": "cut",
+            "slide": "slide_left",
+            "slide left": "slide_left",
+            "slide right": "slide_right",
+        }
+        if compact in aliases:
+            return aliases[compact]
+        return compact.replace(" ", "_")
 
     @field_validator("transition")
     @classmethod
