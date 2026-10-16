@@ -54,6 +54,7 @@ class OpenRouterClient:
         temperature: float = 0.3,
         max_tokens: int = 2000,
         response_format: Optional[dict[str, Any]] = None,
+        reasoning: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         if not self._client:
             raise RuntimeError("Client not entered; use async with")
@@ -66,6 +67,8 @@ class OpenRouterClient:
         }
         if response_format:
             payload["response_format"] = response_format
+        if reasoning is not None:
+            payload["reasoning"] = reasoning
         try:
             resp = await self._client.post(
                 f"{self.base_url}/chat/completions",
