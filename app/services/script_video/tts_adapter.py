@@ -72,7 +72,7 @@ class ScriptTTSAdapter:
         client: httpx.AsyncClient,
         generation_id: str,
     ) -> float | None:
-        """Resolve exact TTS spend from OpenRouter's generation metadata."""
+        """Resolve exact TTS dollar spend from OpenRouter generation metadata."""
         if not generation_id:
             return None
         headers = {"Authorization": f"Bearer {self.api_key}"}
@@ -90,7 +90,9 @@ class ScriptTTSAdapter:
                     continue
                 response.raise_for_status()
                 data = (response.json() or {}).get("data") or {}
-                for key in ("total_cost", "usage", "upstream_inference_cost"):
+                # `usage` can represent token/unit consumption and must never be
+                # interpreted as USD. Only explicit cost fields are accepted.
+                for key in ("total_cost", "upstream_inference_cost"):
                     value = data.get(key)
                     if isinstance(value, (int, float)) and value >= 0:
                         return float(value)
