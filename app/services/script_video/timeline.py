@@ -20,7 +20,7 @@ class TimelineCompiler:
     """Compile planned scenes into visual beats without needless visual reuse.
 
     Quality V3 keeps most planned scenes as one beat. Stock clips provide their
-    own motion, while long AI still scenes can still split into a second subtle
+    own motion, while long AI still scenes can split into a second subtle
     crop/motion beat at no provider cost.
     """
 
@@ -50,12 +50,16 @@ class TimelineCompiler:
         beat_target = self.beat_target_seconds if len(plan.scenes) >= 8 else min(self.beat_target_seconds, 2.8)
         beat_counts = [max(1, math.ceil(seconds / beat_target)) for seconds in scene_seconds]
 
-        transitions = 0
-        for scene_index, (scene, count) in enumerate(zip(plan.scenes, beat_counts)):
-            transitions += max(0, count - 1)
-            if scene_index > 0 and scene.transition != "cut":
-                transitions += 1
-        visual_duration = duration + transitions * self.transition_seconds
+        # Only xfade/slide transitions shorten the concatenated visual timeline.
+        # Internal sub-beats are hard cuts, so compensating for them made the
+        # visual stream longer than narration and forced `-shortest` to chop the
+        # ending. Add overlap compensation only for actual cross-scene xfade.
+        overlaps = sum(
+            1
+            for scene_index, scene in enumerate(plan.scenes)
+            if scene_index > 0 and scene.transition != "cut"
+        )
+        visual_duration = duration + overlaps * self.transition_seconds
         scene_seconds = [visual_duration * weight / weight_total for weight in weights]
 
         beats: list[VisualBeat] = []
