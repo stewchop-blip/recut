@@ -17,15 +17,15 @@ class VisualBeat:
 
 
 class TimelineCompiler:
-    """Compile planned scenes into visual beats without needless still reuse.
+    """Compile planned scenes into visual beats without needless visual reuse.
 
-    Quality V2 plans already contain many distinct short-form shots, so a scene
-    should normally stay one beat. Only unusually long scenes are split and reuse
-    the same still with a second subtle motion.
+    Quality V3 keeps most planned scenes as one beat. Stock clips provide their
+    own motion, while long AI still scenes can still split into a second subtle
+    crop/motion beat at no provider cost.
     """
 
     beat_target_seconds = 4.2
-    transition_seconds = 0.16
+    transition_seconds = 0.22
 
     @staticmethod
     def _second_motion(motion: str) -> str:

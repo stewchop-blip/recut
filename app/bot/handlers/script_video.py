@@ -1,12 +1,11 @@
 """Telegram flow for creating a short video from a text idea."""
 from __future__ import annotations
 
-import base64
+import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import httpx
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, FSInputFile, Message
 from sqlalchemy import func, select
@@ -16,7 +15,8 @@ from app.core.logging import get_logger
 from app.database.models import Job, JobStatus
 from app.database.repositories import JobRepository, UserSettingsRepository
 from app.database.session import db_manager
-from app.services.script_video import ImageGenerator, ScriptPlanner, ScriptVideoAssembler, get_cost_tracker
+from app.services.script_video import ScriptPlanner, ScriptVideoAssembler, get_cost_tracker
+from app.services.script_video.hybrid_media import HybridMediaResolver
 from app.services.script_video.image_generator import ImageCreditsExhaustedError
 from app.services.script_video.tts_adapter import ScriptTTSAdapter
 from app.services.subtitles.scene_adapter import SceneSubtitleBuilder
@@ -26,14 +26,14 @@ logger = get_logger(__name__)
 _awaiting_idea: set[int] = set()
 _script_requests: set[int] = set()
 
-# Quality V2 keeps the Telegram UX unchanged while upgrading the media pipeline.
-# Old configured providers remain fallbacks so a new provider outage does not
-# make the whole feature unavailable.
+# Quality V3: real B-roll for generic scenes + a small paid AI keyframe budget.
+# With no stock API key configured, HybridMediaResolver intentionally keeps the
+# known-good all-AI V2 path, so this change is safe to roll back or deploy early.
 QUALITY_IMAGE_MODEL = "recraft/recraft-v4.1-flash"
-QUALITY_TTS_MODEL = "elevenlabs/eleven-v4"
+QUALITY_TTS_MODEL = "elevenlabs/eleven-v4-turbo"
 QUALITY_TTS_VOICE = "george"
-QUALITY_IMAGE_CAP_FREE = 12
-QUALITY_IMAGE_CAP_PRO = 14
+QUALITY_AI_KEYFRAMES = 4
+SUBTITLE_DELAY_SECONDS = 0.12
 
 
 @router.callback_query(F.data == "script_video:start")
@@ -127,41 +127,21 @@ async def handle_idea(message: Message, bot=None) -> bool:
             )
             tracker.add_actual_cost("planner", planner.actual_cost_usd)
 
-            prompts = [scene.visual_prompt for scene in plan.scenes]
-            quality_cap = QUALITY_IMAGE_CAP_PRO if is_premium else QUALITY_IMAGE_CAP_FREE
-            image_cap = min(len(prompts), quality_cap)
-            fallback_image_model = settings.script_video_image_model
-            image_results = await ImageGenerator(
-                model=QUALITY_IMAGE_MODEL,
-                fallback_model=fallback_image_model,
-                cost_tracker=tracker,
-            ).generate(
-                prompts,
-                aspect_ratio="9:16",
-                max_images=image_cap,
+            ai_budget = max(
+                1,
+                min(
+                    8,
+                    int(os.getenv("SCRIPT_VIDEO_MAX_AI_IMAGES", str(QUALITY_AI_KEYFRAMES))),
+                ),
             )
-            if not image_results:
-                raise RuntimeError("image generation returned no images")
-            image_paths: list[Path] = []
-            async with httpx.AsyncClient(timeout=45, follow_redirects=True) as client:
-                for index, item in enumerate(image_results):
-                    if item.startswith("data:"):
-                        header, encoded = item.split(",", 1)
-                        image_bytes = base64.b64decode(encoded, validate=True)
-                        ext = ".jpg" if "jpeg" in header else ".png"
-                    else:
-                        response = await client.get(item)
-                        response.raise_for_status()
-                        image_bytes = response.content
-                        content_type = response.headers.get("content-type", "")
-                        ext = ".jpg" if "jpeg" in content_type else ".png"
-                    if len(image_bytes) > 15 * 1024 * 1024:
-                        raise RuntimeError("generated image exceeds size limit")
-                    path = workdir / f"scene-{index:02d}{ext}"
-                    path.write_bytes(image_bytes)
-                    image_paths.append(path)
+            media = await HybridMediaResolver(
+                image_model=QUALITY_IMAGE_MODEL,
+                fallback_image_model=settings.script_video_image_model,
+                cost_tracker=tracker,
+                max_ai_images=ai_budget,
+            ).resolve(plan, workdir)
+            tracker.images_generated = media.ai_images
 
-            tracker.images_generated = len(image_paths)
             audio_path = workdir / "narration.mp3"
             narration = plan.narration or " ".join(scene.narration for scene in plan.scenes)
             await ScriptTTSAdapter(
@@ -170,43 +150,70 @@ async def handle_idea(message: Message, bot=None) -> bool:
             ).synthesize_narration(narration, audio_path)
             audio_duration = await ScriptVideoAssembler.audio_duration(audio_path)
             tracker.audio_duration_seconds = audio_duration
+
+            subtitle_delay = max(
+                0.0,
+                min(
+                    0.5,
+                    float(os.getenv("SCRIPT_VIDEO_SUBTITLE_DELAY_SECONDS", str(SUBTITLE_DELAY_SECONDS))),
+                ),
+            )
             subtitles = SceneSubtitleBuilder().build_from_plan(
-                plan, total_duration=audio_duration,
+                plan,
+                start_offset=subtitle_delay,
+                total_duration=max(0.5, audio_duration - subtitle_delay),
             )
             subtitle_path = Path(subtitles.output_path) if subtitles.output_path else None
             output = workdir / "recut-video.mp4"
             await ScriptVideoAssembler().assemble(
                 plan=plan,
-                images=[str(path) for path in image_paths],
+                images=[str(path) for path in media.paths],
                 subtitle_path=str(subtitle_path) if subtitle_path else None,
                 audio_path=audio_path,
                 output_path=output,
             )
             if not output.is_file() or output.stat().st_size == 0:
                 raise RuntimeError("video output is empty")
+
+            caption = f"✅ {plan.title}\nГотово — вертикальный ролик с озвучкой и субтитрами."
+            if media.attribution_text:
+                caption += f"\n\nB-roll: {media.attribution_text}"
             await message.answer_video(
                 video=FSInputFile(str(output), filename="recut-video.mp4"),
-                caption=f"✅ {plan.title}\nГотово — вертикальный ролик с озвучкой и субтитрами.",
+                caption=caption,
                 supports_streaming=True,
             )
 
         async with db_manager.session() as session:
             await JobRepository(session).mark_completed(job_id, clips_generated=1)
         cost = tracker.actual_cost_usd
-        logger.info("script_video_completed", user_id=user_id, job_id=job_id,
-                    images=tracker.images_generated, actual_cost_usd=cost,
-                    actual_cost_breakdown=tracker.actual_costs)
+        logger.info(
+            "script_video_completed",
+            user_id=user_id,
+            job_id=job_id,
+            ai_images=media.ai_images,
+            stock_videos=media.stock_videos,
+            reused_scenes=media.reused_scenes,
+            actual_cost_usd=cost,
+            actual_cost_breakdown=tracker.actual_costs,
+        )
         await status.delete()
         if bot is not None:
             from app.bot.handlers.video import _offer_subscription_after_first_result
             await _offer_subscription_after_first_result(bot, user_id, message)
     except Exception as exc:
-        logger.exception("script_video_failed", user_id=user_id, job_id=job_id,
-                         error_type=type(exc).__name__)
+        logger.exception(
+            "script_video_failed",
+            user_id=user_id,
+            job_id=job_id,
+            error_type=type(exc).__name__,
+        )
         if job_id is not None:
             try:
                 async with db_manager.session() as session:
-                    await JobRepository(session).mark_failed(job_id, "SCRIPT_VIDEO_FAILED", type(exc).__name__)
+                    await JobRepository(session).mark_failed(
+                        job_id, "SCRIPT_VIDEO_FAILED", type(exc).__name__
+                    )
             except Exception:
                 logger.exception("script_video_job_failure_record_failed", job_id=job_id)
         if isinstance(exc, ImageCreditsExhaustedError):
