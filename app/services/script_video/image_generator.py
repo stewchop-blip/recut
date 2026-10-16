@@ -37,9 +37,30 @@ class ImageGenerator:
         s = get_settings()
         self.model = model or s.script_video_image_model
         configured_fallback = fallback_model or s.script_video_image_fallback_model
+
+        # Quality V3 deliberately uses Recraft Flash as the low-cost paid image
+        # path. Nano Banana was previously the default image model and can become
+        # an unexpectedly expensive fallback when Recraft has a transient error.
+        # Never silently jump from the cheap V3 model to Nano Banana. If we want
+        # that model again later it should be an explicit product decision, not a
+        # hidden retry that burns credits.
+        if (
+            self.model.startswith("recraft/recraft-v4.1-flash")
+            and configured_fallback
+            and "nano-banana" in configured_fallback
+        ):
+            logger.warning(
+                "expensive_image_fallback_disabled",
+                primary_model=self.model,
+                fallback_model=configured_fallback,
+            )
+            configured_fallback = ""
+
         self.fallback_model = (
             configured_fallback
-            if configured_fallback and configured_fallback != "openrouter/auto"
+            if configured_fallback
+            and configured_fallback != "openrouter/auto"
+            and configured_fallback != self.model
             else ""
         )
         self.concurrency = concurrency or s.script_video_image_concurrency
