@@ -1,8 +1,11 @@
 """Resolve one visual asset per planned scene using stock video + AI keyframes."""
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +13,7 @@ import httpx
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.services.media.ffmpeg import _find_ffmpeg_bin
 from app.services.script_video.image_generator import ImageGenerator
 from app.services.script_video.models import VideoPlan
 from app.services.script_video.stock_video import (
@@ -60,8 +64,7 @@ class HybridMediaResolver:
     The paid image budget is a hard ceiling. A weak stock search must never
     silently turn a 4-image plan into 8-10 paid generations. Missing scenes are
     filled from the nearest already-resolved asset and the editor varies the
-    crop/motion later. This is cheaper than failing late and retrying the whole
-    job, and keeps spend deterministic.
+    crop/motion later. This keeps spend deterministic.
     """
 
     def __init__(
@@ -146,6 +149,40 @@ class HybridMediaResolver:
         nearest = min(candidates, key=lambda candidate: abs(candidate - index))
         return paths[nearest]
 
+    @staticmethod
+    async def _validate_stock_video(path: Path) -> bool:
+        """Reject broken/non-video stock before AI/TTS money is spent downstream."""
+        ffmpeg = Path(_find_ffmpeg_bin())
+        ffprobe = shutil.which("ffprobe") or str(ffmpeg.with_name("ffprobe"))
+        proc = await asyncio.create_subprocess_exec(
+            ffprobe,
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height:format=duration",
+            "-of", "json",
+            str(path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return False
+        if proc.returncode:
+            return False
+        try:
+            data = json.loads(stdout.decode() or "{}")
+            streams = data.get("streams") or []
+            fmt = data.get("format") or {}
+            duration = float(fmt.get("duration") or 0.0)
+            width = int((streams[0] if streams else {}).get("width") or 0)
+            height = int((streams[0] if streams else {}).get("height") or 0)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return False
+        return duration > 0.15 and width > 0 and height > 0
+
     async def resolve(self, plan: VideoPlan, workdir: Path) -> HybridMediaResult:
         scene_count = len(plan.scenes)
         if scene_count < 1:
@@ -173,6 +210,14 @@ class HybridMediaResolver:
                         "script_stock_video_skipped_container",
                         provider=asset.provider,
                         suffix=asset.path.suffix.lower(),
+                    )
+                    asset.path.unlink(missing_ok=True)
+                    continue
+                if not await self._validate_stock_video(asset.path):
+                    logger.warning(
+                        "script_stock_video_rejected_probe",
+                        provider=asset.provider,
+                        asset_id=asset.asset_id,
                     )
                     asset.path.unlink(missing_ok=True)
                     continue
@@ -220,9 +265,6 @@ class HybridMediaResolver:
                     workdir / f"scene-{scene_index:02d}-ai",
                 )
 
-        # If stock coverage is poor, do not silently spend above the cap. Reuse
-        # the nearest resolved asset. Timeline/assembly will vary motion/crops so
-        # the duplicate is less obvious, and logs make the quality tradeoff clear.
         reused = 0
         for index, path in enumerate(paths):
             if path is not None:
