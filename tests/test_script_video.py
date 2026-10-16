@@ -4,12 +4,14 @@ from types import SimpleNamespace
 import json
 import shutil
 import subprocess
+import sys
 
 from app.services.script_video import VideoPlanSchema, from_schema, CostTracker, ScriptPlanner
 from app.services.script_video.image_generator import ImageGenerator, ImageCreditsExhaustedError
 from app.services.script_video.assembly import ScriptVideoAssembler
 from app.services.script_video.models import Scene, VideoPlan
 from app.services.script_video.timeline import TimelineCompiler
+from app.services.script_video.tts_adapter import ScriptTTSAdapter
 
 
 class _PlannerClient:
@@ -175,6 +177,43 @@ async def test_image_generator_reuses_successful_asset_after_partial_credit_fail
         "https://example.test/first.png",
     ]
     assert client.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_tts_falls_back_to_edge_when_openrouter_rejects_request(tmp_path, monkeypatch):
+    import httpx
+    import app.services.script_video.tts_adapter as tts_module
+
+    class _FailedClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, *args, **kwargs):
+            request = httpx.Request("POST", "https://openrouter.ai/api/v1/audio/speech")
+            response = httpx.Response(400, request=request, json={"error": {"code": "bad_request"}})
+            raise httpx.HTTPStatusError("bad request", request=request, response=response)
+
+    class _FakeCommunicate:
+        def __init__(self, text, voice):
+            assert text == "Тест озвучки"
+            assert voice == "ru-RU-DmitryNeural"
+
+        async def save(self, path):
+            from pathlib import Path
+            Path(path).write_bytes(b"fixture-audio")
+
+    monkeypatch.setattr(tts_module, "get_settings", lambda: SimpleNamespace(
+        script_video_tts_model="openai/gpt-4o-mini-tts-2025-12-15",
+        openrouter_api_key="test-key",
+    ))
+    monkeypatch.setattr(tts_module.httpx, "AsyncClient", lambda **kwargs: _FailedClient())
+    monkeypatch.setitem(sys.modules, "edge_tts", SimpleNamespace(Communicate=_FakeCommunicate))
+
+    output = await ScriptTTSAdapter().synthesize_narration("Тест озвучки", tmp_path / "voice.mp3")
+    assert output.read_bytes() == b"fixture-audio"
 
 
 def _sample_plan():
