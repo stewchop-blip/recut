@@ -243,10 +243,14 @@ def test_timeline_creates_short_moving_beats_and_respects_scene_assets():
 
 
 @pytest.mark.asyncio
-async def test_assembler_renders_vertical_mp4_with_audio_and_valid_probe(tmp_path):
+async def test_assembler_renders_vertical_mp4_with_audio_and_valid_probe(tmp_path, monkeypatch):
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
         pytest.skip("FFmpeg and ffprobe are required for the integration test")
+
+    # Force a longer chained xfade graph in a short fixture so CFR normalization
+    # is exercised without rendering a full-length paid generation.
+    monkeypatch.setattr(TimelineCompiler, "beat_target_seconds", 0.5)
 
     image_paths = []
     for index, color in enumerate(("red", "blue", "green")):
@@ -261,7 +265,7 @@ async def test_assembler_renders_vertical_mp4_with_audio_and_valid_probe(tmp_pat
     audio_path = tmp_path / "voice.wav"
     subprocess.run(
         [ffmpeg, "-v", "error", "-f", "lavfi", "-i",
-         "sine=frequency=440:duration=2", "-c:a", "pcm_s16le", str(audio_path)],
+         "sine=frequency=440:duration=8", "-c:a", "pcm_s16le", str(audio_path)],
         check=True, timeout=30,
     )
     output_path = tmp_path / "result.mp4"
@@ -280,4 +284,4 @@ async def test_assembler_renders_vertical_mp4_with_audio_and_valid_probe(tmp_pat
     assert video["codec_name"] == "h264"
     assert video["pix_fmt"] == "yuv420p"
     assert audio["codec_name"] == "aac"
-    assert abs(float(metadata["format"]["duration"]) - 2.0) < 0.5
+    assert abs(float(metadata["format"]["duration"]) - 8.0) < 0.5
