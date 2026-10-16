@@ -48,10 +48,11 @@ class SceneSchema(BaseModel):
     @field_validator("motion_type", mode="before")
     @classmethod
     def normalize_motion(cls, value: Any) -> str:
-        """Map harmless natural-language motion labels onto renderer enums.
+        """Map free-form camera language onto the small renderer motion enum.
 
-        This avoids paying for a second planner call only because a model wrote
-        `slow push in` instead of the renderer token `zoom_in`.
+        A harmless wording difference must never trigger a second paid planner
+        request. Unknown but valid-looking camera directions are deliberately
+        degraded to a safe supported motion instead of rejecting the whole plan.
         """
         raw = str(value or "").strip().lower().replace("-", "_")
         compact = " ".join(raw.replace("_", " ").split())
@@ -62,15 +63,31 @@ class SceneSchema(BaseModel):
             "push in": "zoom_in",
             "slow push in": "zoom_in",
             "gentle push in": "zoom_in",
+            "dolly in": "zoom_in",
+            "move in": "zoom_in",
             "zoom out": "zoom_out",
             "slow zoom out": "zoom_out",
             "pull out": "zoom_out",
+            "dolly out": "zoom_out",
+            "move out": "zoom_out",
             "pan left": "pan_left",
             "slow pan left": "pan_left",
+            "slide left": "pan_left",
+            "truck left": "pan_left",
             "pan right": "pan_right",
             "slow pan right": "pan_right",
             "slow pan": "pan_right",
+            "slide right": "pan_right",
+            "slide": "pan_right",
+            "truck right": "pan_right",
             "gentle drift": "zoom_in",
+            "drift": "zoom_in",
+            "handheld": "zoom_in",
+            "tracking": "pan_right",
+            "orbit": "pan_right",
+            "tilt up": "zoom_in",
+            "tilt down": "zoom_out",
+            "rack focus": "static",
             "static": "static",
             "static hold": "static",
             "hold": "static",
@@ -78,8 +95,23 @@ class SceneSchema(BaseModel):
         }
         if compact in aliases:
             return aliases[compact]
-        normalized = compact.replace(" ", "_")
-        return normalized
+
+        # Tolerate wording variants without spending money on a planner retry.
+        if "left" in compact and any(word in compact for word in ("pan", "slide", "truck", "move")):
+            return "pan_left"
+        if "right" in compact and any(word in compact for word in ("pan", "slide", "truck", "move")):
+            return "pan_right"
+        if any(word in compact for word in ("out", "away", "back")) and any(
+            word in compact for word in ("zoom", "pull", "dolly", "move")
+        ):
+            return "zoom_out"
+        if any(word in compact for word in ("zoom", "push", "dolly", "closer", "in")):
+            return "zoom_in"
+        if any(word in compact for word in ("pan", "slide", "truck", "tracking", "orbit")):
+            return "pan_right"
+        if any(word in compact for word in ("static", "still", "hold", "focus")):
+            return "static"
+        return "zoom_in"
 
     @field_validator("motion_type")
     @classmethod
@@ -101,13 +133,22 @@ class SceneSchema(BaseModel):
             "dissolve": "fade",
             "cut": "cut",
             "hard cut": "cut",
+            "jump cut": "cut",
             "slide": "slide_left",
             "slide left": "slide_left",
             "slide right": "slide_right",
+            "swipe left": "slide_left",
+            "swipe right": "slide_right",
         }
         if compact in aliases:
             return aliases[compact]
-        return compact.replace(" ", "_")
+        if "right" in compact and any(word in compact for word in ("slide", "swipe")):
+            return "slide_right"
+        if any(word in compact for word in ("slide", "swipe")):
+            return "slide_left"
+        if any(word in compact for word in ("fade", "dissolve")):
+            return "fade"
+        return "cut"
 
     @field_validator("transition")
     @classmethod
