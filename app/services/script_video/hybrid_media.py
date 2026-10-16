@@ -44,9 +44,8 @@ class HybridMediaResult:
                 if asset.provider == "pexels" and asset.creator_name not in creators:
                     creators.append(asset.creator_name)
             credit = ", ".join(creators[:2])
-            parts.append(
-                f"Pexels{f' ({credit})' if credit else ''}: https://www.pexels.com"
-            )
+            suffix = f" ({credit})" if credit else ""
+            parts.append(f"Pexels{suffix}: https://www.pexels.com")
         return " · ".join(parts)
 
 
@@ -91,7 +90,11 @@ class HybridMediaResolver:
         specific = 1 if not scene.prefer_stock else 0
         continuity = 1 if scene.reference_scene_id else 0
         edge = 1 if index in {0, len(plan.scenes) - 1} else 0
-        return (specific * 10 + continuity * 4 + edge * 2 + scene.importance, scene.importance, -index)
+        return (
+            specific * 10 + continuity * 4 + edge * 2 + scene.importance,
+            scene.importance,
+            -index,
+        )
 
     @staticmethod
     async def _save_generated_image(item: str, path_stem: Path) -> Path:
@@ -161,7 +164,11 @@ class HybridMediaResolver:
         # Without a configured stock API we keep the known-good V2 behavior.
         # With stock enabled, enforce a hard AI budget and reuse a nearby visual
         # only if a stock search failed after the paid keyframes are allocated.
-        ai_budget = len(unresolved) if not self.stock_enabled else min(self.max_ai_images, len(unresolved))
+        ai_budget = (
+            len(unresolved)
+            if not self.stock_enabled
+            else min(self.max_ai_images, len(unresolved))
+        )
         ai_indices = sorted(
             unresolved,
             key=lambda index: self._ai_priority(plan, index),
