@@ -102,7 +102,7 @@ async def test_planner_fails_cleanly_after_second_invalid_transport_response():
 @pytest.mark.asyncio
 async def test_planner_does_not_pay_retry_for_semantic_schema_error():
     broken = json.loads(_valid_planner_json())
-    broken["title"] = "x"
+    broken["scenes"] = broken["scenes"][:2]
     client = _PlannerClient([_planner_response(json.dumps(broken, ensure_ascii=False))])
     with pytest.raises(RuntimeError, match="structured plan"):
         await ScriptPlanner(client=client).plan("Тестовая тема")
@@ -131,6 +131,19 @@ def test_video_plan_normalizes_free_form_motion_and_numeric_ids():
     assert schema.scenes[1].motion_type == "zoom_in"
     assert schema.scenes[1].reference_scene_id == "1"
     assert schema.scenes[2].motion_type == "static"
+
+
+def test_video_plan_clamps_noncritical_planner_fields():
+    raw = '{"title":"x","language":"ru-RU","target_duration":999,"narration":"x","visual_style":"x","scenes":[{"id":1,"narration":"a","visual_prompt":"b","stock_query":"query","duration_hint":0,"importance":99,"motion_type":"zoom_in","transition":"cut"},{"id":2,"narration":"b","visual_prompt":"c","stock_query":"query","duration_hint":99,"importance":0,"motion_type":"zoom_in","transition":"cut"},{"id":3,"narration":"c","visual_prompt":"d","stock_query":"query","duration_hint":5,"importance":3,"motion_type":"static","transition":"cut"}]}'
+    schema = VideoPlanSchema.model_validate_json(raw)
+    assert schema.title == "ReCut video"
+    assert schema.language == "ru"
+    assert schema.target_duration == 120
+    assert schema.visual_style == "Realistic vertical short-form video"
+    assert schema.scenes[0].duration_hint == 1.0
+    assert schema.scenes[0].importance == 5
+    assert schema.scenes[1].duration_hint == 30.0
+    assert schema.scenes[1].importance == 1
 
 
 def test_cost_tracker_estimate():
