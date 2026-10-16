@@ -61,10 +61,11 @@ class HybridMediaResult:
 class HybridMediaResolver:
     """Use free B-roll first, then a strictly bounded number of AI keyframes.
 
-    The paid image budget is a hard ceiling. A weak stock search must never
-    silently turn a 4-image plan into 8-10 paid generations. Missing scenes are
-    filled from the nearest already-resolved asset and the editor varies the
-    crop/motion later. This keeps spend deterministic.
+    The paid image budget is a hard ceiling. Missing scenes are filled from the
+    nearest resolved asset, but paid keyframes are deliberately spread across
+    the whole story timeline. This avoids the pathological case where four
+    expensive images all land near the ending and the first 20-30 seconds show
+    one repeated frame.
     """
 
     def __init__(
@@ -115,10 +116,68 @@ class HybridMediaResolver:
         )
 
     def _ai_budget(self, unresolved_count: int) -> int:
-        """Return the paid-image count without ever exceeding the configured cap."""
         if unresolved_count <= 0:
             return 0
         return min(unresolved_count, self.max_ai_images)
+
+    @classmethod
+    def _select_ai_indices(
+        cls,
+        plan: VideoPlan,
+        unresolved: list[int],
+        budget: int,
+    ) -> list[int]:
+        """Pick paid keyframes for temporal coverage first, priority second.
+
+        Four keyframes across ten unresolved scenes should land roughly around
+        0/3/6/9 rather than all clustering on story-specific ending shots. For
+        each evenly spaced timeline target, prefer the closest unresolved scene;
+        scene specificity/importance only breaks near ties.
+        """
+        candidates = sorted(set(unresolved))
+        if budget <= 0 or not candidates:
+            return []
+        if budget >= len(candidates):
+            return candidates
+        if budget == 1:
+            return [max(candidates, key=lambda idx: cls._ai_priority(plan, idx))]
+
+        first_scene = 0
+        last_scene = max(0, len(plan.scenes) - 1)
+        targets = [
+            round(first_scene + slot * (last_scene - first_scene) / (budget - 1))
+            for slot in range(budget)
+        ]
+        selected: list[int] = []
+        remaining = set(candidates)
+        for target in targets:
+            if not remaining:
+                break
+            chosen = min(
+                remaining,
+                key=lambda idx: (
+                    abs(idx - target),
+                    -cls._ai_priority(plan, idx)[0],
+                    -cls._ai_priority(plan, idx)[1],
+                    idx,
+                ),
+            )
+            selected.append(chosen)
+            remaining.remove(chosen)
+
+        # Defensive fill for unusual sparse unresolved layouts where rounding or
+        # future selection changes leave fewer than `budget` indices.
+        while len(selected) < budget and remaining:
+            chosen = max(
+                remaining,
+                key=lambda idx: (
+                    min(abs(idx - picked) for picked in selected) if selected else 999,
+                    cls._ai_priority(plan, idx),
+                ),
+            )
+            selected.append(chosen)
+            remaining.remove(chosen)
+        return sorted(selected)
 
     @staticmethod
     async def _save_generated_image(item: str, path_stem: Path) -> Path:
@@ -146,12 +205,11 @@ class HybridMediaResolver:
         candidates = [i for i, path in enumerate(paths) if path is not None]
         if not candidates:
             return None
-        nearest = min(candidates, key=lambda candidate: abs(candidate - index))
+        nearest = min(candidates, key=lambda candidate: (abs(candidate - index), candidate))
         return paths[nearest]
 
     @staticmethod
     async def _validate_stock_video(path: Path) -> bool:
-        """Reject broken/non-video stock before AI/TTS money is spent downstream."""
         ffmpeg = Path(_find_ffmpeg_bin())
         ffprobe = shutil.which("ffprobe") or str(ffmpeg.with_name("ffprobe"))
         proc = await asyncio.create_subprocess_exec(
@@ -240,12 +298,13 @@ class HybridMediaResolver:
             )
 
         ai_budget = self._ai_budget(len(unresolved))
-        ai_indices = sorted(
-            unresolved,
-            key=lambda index: self._ai_priority(plan, index),
-            reverse=True,
-        )[:ai_budget]
-        ai_indices.sort()
+        ai_indices = self._select_ai_indices(plan, unresolved, ai_budget)
+        logger.info(
+            "script_ai_keyframe_selection",
+            unresolved=unresolved,
+            selected=ai_indices,
+            budget=ai_budget,
+        )
 
         prompts = [plan.scenes[index].visual_prompt for index in ai_indices]
         if prompts:
