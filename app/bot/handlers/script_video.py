@@ -77,12 +77,13 @@ async def handle_idea(message: Message, bot=None) -> bool:
             return True
 
     is_premium = False
+    is_unlimited_tester = settings.has_unlimited_generations(user_id)
     async with db_manager.session() as session:
         user_settings = await UserSettingsRepository(session).get(user_id)
         if user_settings:
             from app.services.appearance import is_premium as has_premium
             is_premium = has_premium(user_settings)
-        if settings.script_video_enable_limit and not is_premium:
+        if settings.script_video_enable_limit and not is_premium and not is_unlimited_tester:
             cutoff = datetime.now(timezone.utc) - timedelta(days=7)
             completed = await session.scalar(
                 select(func.count(Job.id)).where(
