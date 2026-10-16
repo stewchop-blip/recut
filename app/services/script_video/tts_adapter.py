@@ -35,16 +35,45 @@ class ScriptTTSAdapter:
             "voice": "nova",
             "response_format": "mp3",
         }
-        async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(
-                "https://openrouter.ai/api/v1/audio/speech",
-                headers=headers,
-                json=payload,
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(
+                    "https://openrouter.ai/api/v1/audio/speech",
+                    headers=headers,
+                    json=payload,
+                )
+                response.raise_for_status()
+                audio = response.content
+            if not audio or not response.headers.get("content-type", "").startswith("audio/"):
+                raise RuntimeError("TTS provider returned no audio")
+            output_path.write_bytes(audio)
+            logger.info("script_tts_completed", model=self.model, provider="openrouter", bytes=len(audio))
+            return output_path
+        except (httpx.HTTPError, RuntimeError) as exc:
+            error_code = None
+            if isinstance(exc, httpx.HTTPStatusError):
+                try:
+                    error_code = exc.response.json().get("error", {}).get("code")
+                except (ValueError, AttributeError):
+                    pass
+            # Do not include the provider's error message: it may echo user narration.
+            logger.warning(
+                "script_tts_openrouter_failed",
+                model=self.model,
+                status_code=getattr(getattr(exc, "response", None), "status_code", None),
+                provider_error_code=error_code,
+                error_type=type(exc).__name__,
             )
-            response.raise_for_status()
-            audio = response.content
-        if not audio or not response.headers.get("content-type", "").startswith("audio/"):
-            raise RuntimeError("TTS provider returned no audio")
-        output_path.write_bytes(audio)
-        logger.info("script_tts_completed", model=self.model, bytes=len(audio))
-        return output_path
+
+        try:
+            import edge_tts
+
+            await edge_tts.Communicate(text[:4000], "ru-RU-DmitryNeural").save(str(output_path))
+            audio = output_path.read_bytes()
+            if not audio:
+                raise RuntimeError("Edge TTS returned no audio")
+            logger.info("script_tts_completed", model="edge-tts/ru-RU-DmitryNeural", provider="edge_tts", bytes=len(audio))
+            return output_path
+        except Exception as exc:
+            logger.exception("script_tts_fallback_failed", error_type=type(exc).__name__)
+            raise RuntimeError("Both OpenRouter and Edge TTS narration failed") from exc
