@@ -1,6 +1,7 @@
 """OpenRouter text-to-speech adapter for generated video narration."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import httpx
@@ -12,10 +13,79 @@ logger = get_logger(__name__)
 
 
 class ScriptTTSAdapter:
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str | None = None,
+        voice: str | None = None,
+        fallback_model: str | None = None,
+        fallback_voice: str | None = None,
+    ) -> None:
         settings = get_settings()
         self.model = model or settings.script_video_tts_model
+        self.voice = voice or getattr(settings, "script_video_tts_voice", "george")
+        self.fallback_model = fallback_model or getattr(
+            settings,
+            "script_video_tts_fallback_model",
+            "openai/gpt-4o-mini-tts-2025-12-15",
+        )
+        self.fallback_voice = fallback_voice or getattr(
+            settings,
+            "script_video_tts_fallback_voice",
+            "nova",
+        )
         self.api_key = settings.openrouter_api_key
+
+    @staticmethod
+    def _clean_text(text: str) -> str:
+        cleaned = re.sub(r"[`*_#]+", "", text)
+        cleaned = re.sub(r"[ \t]+", " ", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
+
+    def _prepare_text(self, text: str, model: str) -> str:
+        cleaned = self._clean_text(text)
+        if model.startswith("elevenlabs/eleven-v4"):
+            return f"[confident] {cleaned}"
+        return cleaned
+
+    async def _synthesize_openrouter(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        text: str,
+        output_path: Path,
+        model: str,
+        voice: str,
+    ) -> Path:
+        payload = {
+            "model": model,
+            "input": self._prepare_text(text, model)[:10000],
+            "voice": voice,
+            "response_format": "mp3",
+        }
+        response = await client.post(
+            "https://openrouter.ai/api/v1/audio/speech",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/stewchop-blip/recut",
+            },
+            json=payload,
+        )
+        response.raise_for_status()
+        audio = response.content
+        content_type = response.headers.get("content-type", "")
+        if not audio or not content_type.startswith("audio/"):
+            raise RuntimeError("TTS provider returned no audio")
+        output_path.write_bytes(audio)
+        logger.info(
+            "script_tts_completed",
+            model=model,
+            provider="openrouter",
+            voice=voice,
+            bytes=len(audio),
+        )
+        return output_path
 
     async def synthesize_narration(self, text: str, output_path: Path) -> Path:
         if not text.strip():
@@ -24,56 +94,60 @@ class ScriptTTSAdapter:
             raise RuntimeError("OpenRouter API key is not configured")
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/stewchop-blip/recut",
-        }
-        payload = {
-            "model": self.model,
-            "input": text[:4000],
-            "voice": "nova",
-            "response_format": "mp3",
-        }
+
+        primary_error: Exception | None = None
         try:
             async with httpx.AsyncClient(timeout=120) as client:
-                response = await client.post(
-                    "https://openrouter.ai/api/v1/audio/speech",
-                    headers=headers,
-                    json=payload,
+                return await self._synthesize_openrouter(
+                    client=client,
+                    text=text,
+                    output_path=output_path,
+                    model=self.model,
+                    voice=self.voice,
                 )
-                response.raise_for_status()
-                audio = response.content
-            if not audio or not response.headers.get("content-type", "").startswith("audio/"):
-                raise RuntimeError("TTS provider returned no audio")
-            output_path.write_bytes(audio)
-            logger.info("script_tts_completed", model=self.model, provider="openrouter", bytes=len(audio))
-            return output_path
         except (httpx.HTTPError, RuntimeError) as exc:
-            error_code = None
-            if isinstance(exc, httpx.HTTPStatusError):
-                try:
-                    error_code = exc.response.json().get("error", {}).get("code")
-                except (ValueError, AttributeError):
-                    pass
-            # Do not include the provider's error message: it may echo user narration.
+            primary_error = exc
             logger.warning(
-                "script_tts_openrouter_failed",
+                "script_tts_primary_failed",
                 model=self.model,
                 status_code=getattr(getattr(exc, "response", None), "status_code", None),
-                provider_error_code=error_code,
                 error_type=type(exc).__name__,
             )
+
+        if self.fallback_model and self.fallback_model != self.model:
+            try:
+                async with httpx.AsyncClient(timeout=120) as client:
+                    return await self._synthesize_openrouter(
+                        client=client,
+                        text=text,
+                        output_path=output_path,
+                        model=self.fallback_model,
+                        voice=self.fallback_voice,
+                    )
+            except (httpx.HTTPError, RuntimeError) as exc:
+                logger.warning(
+                    "script_tts_openrouter_fallback_failed",
+                    model=self.fallback_model,
+                    status_code=getattr(getattr(exc, "response", None), "status_code", None),
+                    error_type=type(exc).__name__,
+                )
 
         try:
             import edge_tts
 
-            await edge_tts.Communicate(text[:4000], "ru-RU-DmitryNeural").save(str(output_path))
+            await edge_tts.Communicate(self._clean_text(text)[:4000], "ru-RU-DmitryNeural").save(
+                str(output_path)
+            )
             audio = output_path.read_bytes()
             if not audio:
                 raise RuntimeError("Edge TTS returned no audio")
-            logger.info("script_tts_completed", model="edge-tts/ru-RU-DmitryNeural", provider="edge_tts", bytes=len(audio))
+            logger.info(
+                "script_tts_completed",
+                model="edge-tts/ru-RU-DmitryNeural",
+                provider="edge_tts",
+                bytes=len(audio),
+            )
             return output_path
         except Exception as exc:
             logger.exception("script_tts_fallback_failed", error_type=type(exc).__name__)
-            raise RuntimeError("Both OpenRouter and Edge TTS narration failed") from exc
+            raise RuntimeError("All narration providers failed") from (primary_error or exc)

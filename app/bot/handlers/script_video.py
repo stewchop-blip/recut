@@ -26,6 +26,15 @@ logger = get_logger(__name__)
 _awaiting_idea: set[int] = set()
 _script_requests: set[int] = set()
 
+# Quality V2 keeps the Telegram UX unchanged while upgrading the media pipeline.
+# Old configured providers remain fallbacks so a new provider outage does not
+# make the whole feature unavailable.
+QUALITY_IMAGE_MODEL = "recraft/recraft-v4.1-flash"
+QUALITY_TTS_MODEL = "elevenlabs/eleven-v4"
+QUALITY_TTS_VOICE = "george"
+QUALITY_IMAGE_CAP_FREE = 12
+QUALITY_IMAGE_CAP_PRO = 14
+
 
 @router.callback_query(F.data == "script_video:start")
 async def start_script_video(call: CallbackQuery) -> None:
@@ -62,7 +71,6 @@ async def handle_idea(message: Message, bot=None) -> bool:
         await message.answer("Создание роликов временно недоступно. Попробуй позже.")
         return True
 
-    # Reuse the existing first-result subscription gate for this output too.
     if bot is not None:
         from app.bot.handlers.video import _subscription_gate_blocked
         if await _subscription_gate_blocked(bot, user_id, message.answer):
@@ -120,9 +128,17 @@ async def handle_idea(message: Message, bot=None) -> bool:
             tracker.add_actual_cost("planner", planner.actual_cost_usd)
 
             prompts = [scene.visual_prompt for scene in plan.scenes]
-            image_cap = settings.script_video_max_images_pro if is_premium else settings.script_video_max_images_free
-            image_results = await ImageGenerator(cost_tracker=tracker).generate(
-                prompts, size="1024x1024", max_images=image_cap,
+            quality_cap = QUALITY_IMAGE_CAP_PRO if is_premium else QUALITY_IMAGE_CAP_FREE
+            image_cap = min(len(prompts), quality_cap)
+            fallback_image_model = settings.script_video_image_model
+            image_results = await ImageGenerator(
+                model=QUALITY_IMAGE_MODEL,
+                fallback_model=fallback_image_model,
+                cost_tracker=tracker,
+            ).generate(
+                prompts,
+                aspect_ratio="9:16",
+                max_images=image_cap,
             )
             if not image_results:
                 raise RuntimeError("image generation returned no images")
@@ -148,7 +164,10 @@ async def handle_idea(message: Message, bot=None) -> bool:
             tracker.images_generated = len(image_paths)
             audio_path = workdir / "narration.mp3"
             narration = plan.narration or " ".join(scene.narration for scene in plan.scenes)
-            await ScriptTTSAdapter().synthesize_narration(narration, audio_path)
+            await ScriptTTSAdapter(
+                model=QUALITY_TTS_MODEL,
+                voice=QUALITY_TTS_VOICE,
+            ).synthesize_narration(narration, audio_path)
             audio_duration = await ScriptVideoAssembler.audio_duration(audio_path)
             tracker.audio_duration_seconds = audio_duration
             subtitles = SceneSubtitleBuilder().build_from_plan(
@@ -206,6 +225,4 @@ async def handle_idea(message: Message, bot=None) -> bool:
 
 @router.message()
 async def on_script_video_request(message: Message) -> None:
-    # The regular URL handler has priority; this remains a fallback for routers
-    # mounted without that handler.
     await handle_idea(message)

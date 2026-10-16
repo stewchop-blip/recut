@@ -17,10 +17,15 @@ class VisualBeat:
 
 
 class TimelineCompiler:
-    """Split each narrated scene into subtle motion beats, reusing its still."""
+    """Compile planned scenes into visual beats without needless still reuse.
 
-    beat_target_seconds = 2.8
-    transition_seconds = 0.18
+    Quality V2 plans already contain many distinct short-form shots, so a scene
+    should normally stay one beat. Only unusually long scenes are split and reuse
+    the same still with a second subtle motion.
+    """
+
+    beat_target_seconds = 4.2
+    transition_seconds = 0.16
 
     @staticmethod
     def _second_motion(motion: str) -> str:
@@ -42,7 +47,8 @@ class TimelineCompiler:
         weights = [max(1.0, float(scene.duration_hint)) for scene in plan.scenes]
         weight_total = sum(weights)
         scene_seconds = [duration * weight / weight_total for weight in weights]
-        beat_counts = [max(1, math.ceil(seconds / self.beat_target_seconds)) for seconds in scene_seconds]
+        beat_target = self.beat_target_seconds if len(plan.scenes) >= 8 else min(self.beat_target_seconds, 2.8)
+        beat_counts = [max(1, math.ceil(seconds / beat_target)) for seconds in scene_seconds]
 
         transitions = 0
         for scene_index, (scene, count) in enumerate(zip(plan.scenes, beat_counts)):
@@ -57,7 +63,7 @@ class TimelineCompiler:
             image_index = round(scene_index * (image_count - 1) / max(1, len(plan.scenes) - 1))
             beat_duration = seconds / count
             for beat_index in range(count):
-                transition = "cut" if not beats else (scene.transition if beat_index == 0 else "fade")
+                transition = "cut" if not beats else (scene.transition if beat_index == 0 else "cut")
                 motion = scene.motion_type if beat_index % 2 == 0 else self._second_motion(scene.motion_type)
                 beats.append(VisualBeat(
                     scene_id=scene.id,

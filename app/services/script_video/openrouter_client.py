@@ -100,13 +100,18 @@ class OpenRouterClient:
         model: str,
         prompt: str,
         *,
-        size: str = "1024x1024",
+        size: str | None = None,
+        aspect_ratio: str | None = None,
+        resolution: str | None = None,
         n: int = 1,
         on_actual_cost: Optional[Callable[[float], None]] = None,
     ) -> list[str]:
-        """Return list of image URLs (or base64 data if model supports)."""
-        # OpenRouter image generation endpoint: /v1/images/generations
-        # For models like google/gemini-nano-banana-2.1.
+        """Return image URLs or base64 data from OpenRouter's unified Images API.
+
+        Prefer ``aspect_ratio`` over a square ``size`` for short-form generation.
+        OpenRouter exposes native aspect-ratio controls for compatible image models,
+        which avoids generating square assets only to crop them into 9:16 later.
+        """
         if not self._client:
             raise RuntimeError("Client not entered; use async with")
         self.last_actual_cost_usd = None
@@ -114,8 +119,13 @@ class OpenRouterClient:
             "model": model,
             "prompt": prompt,
             "n": n,
-            "size": size,
         }
+        if aspect_ratio:
+            payload["aspect_ratio"] = aspect_ratio
+        elif size:
+            payload["size"] = size
+        if resolution:
+            payload["resolution"] = resolution
         try:
             resp = await self._client.post(
                 f"{self.base_url}/images",
@@ -128,7 +138,6 @@ class OpenRouterClient:
             self.last_actual_cost_usd = float(actual_cost) if isinstance(actual_cost, (int, float)) else None
             if self.last_actual_cost_usd is not None and on_actual_cost:
                 on_actual_cost(self.last_actual_cost_usd)
-            # OpenRouter returns image URLs or base64 data
             results: list[str] = []
             for item in data.get("data", []):
                 url = item.get("url")
@@ -138,8 +147,14 @@ class OpenRouterClient:
                 elif b64:
                     media_type = item.get("media_type") or "image/png"
                     results.append(f"data:{media_type};base64,{b64}")
-            logger.info("openrouter_image", model=model, count=len(results),
-                        actual_cost_usd=self.last_actual_cost_usd)
+            logger.info(
+                "openrouter_image",
+                model=model,
+                count=len(results),
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+                actual_cost_usd=self.last_actual_cost_usd,
+            )
             return results
         except httpx.HTTPStatusError as e:
             logger.error(

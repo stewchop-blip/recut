@@ -1,7 +1,8 @@
 """ImageGenerator — parallel image generation with bounded retry + fallback.
 
-Uses OpenRouter /images/generations endpoint.
-Concurrency capped by settings (default 2) to avoid rate limits.
+Uses OpenRouter /images endpoint. Concurrency is capped by settings to avoid
+provider rate limits. Generated script-video assets default to native 9:16 so
+composition is created for the final canvas instead of cropped from a square.
 """
 from __future__ import annotations
 
@@ -45,6 +46,8 @@ class ImageGenerator:
         self.max_retries = max_retries
         self.client = client or OpenRouterClient()
         self.cost_tracker = cost_tracker
+        self.default_aspect_ratio = getattr(s, "script_video_image_aspect_ratio", "9:16")
+        self.default_resolution = getattr(s, "script_video_image_resolution", "")
 
     def _record_actual_cost(self, component: str, cost: float) -> None:
         add_cost = getattr(self.cost_tracker, "add_actual_cost", None)
@@ -54,19 +57,23 @@ class ImageGenerator:
     async def generate(
         self,
         prompts: list[str],
-        size: str = "1024x1024",
+        size: str | None = None,
         n_per_prompt: int = 1,
         max_images: Optional[int] = None,
+        aspect_ratio: str | None = None,
+        resolution: str | None = None,
     ) -> list[str]:
         """Generate images for multiple prompts concurrently.
 
-        Returns flat list of image URLs / base64 strings.
-        On failure for a specific prompt, retries with fallback model.
+        Returns a flat list of image URLs / base64 strings. A compatible image
+        model receives a native vertical aspect ratio by default. On a per-prompt
+        failure the bounded fallback behavior remains unchanged.
         """
-        # Enforce image limits based on user tier (free/pro)
         s = get_settings()
         image_limit = max_images or s.script_video_max_images_pro
         prompts = prompts[:image_limit]
+        aspect_ratio = aspect_ratio or self.default_aspect_ratio
+        resolution = resolution or self.default_resolution or None
         sem = asyncio.Semaphore(self.concurrency)
         credits_exhausted = asyncio.Event()
         results: list[Optional[list[str]]] = [None] * len(prompts)
@@ -83,11 +90,12 @@ class ImageGenerator:
                     if credits_exhausted.is_set():
                         return
                     try:
-                        model_to_use = self.model
                         urls = await client.generate_image(
-                            model=model_to_use,
+                            model=self.model,
                             prompt=prompt,
                             size=size,
+                            aspect_ratio=aspect_ratio,
+                            resolution=resolution,
                             n=n_per_prompt,
                             on_actual_cost=lambda cost: self._record_actual_cost("image", cost),
                         )
@@ -95,8 +103,10 @@ class ImageGenerator:
                         logger.info(
                             "image_generated",
                             prompt_preview=prompt[:60],
-                            model=model_to_use,
+                            model=self.model,
                             count=len(urls),
+                            aspect_ratio=aspect_ratio,
+                            resolution=resolution,
                         )
                         return
                     except Exception as exc:
@@ -114,27 +124,34 @@ class ImageGenerator:
                             attempt=attempt + 1,
                             exc=str(exc)[:200],
                         )
-                        # On last retry, try fallback model
                         if attempt == self.max_retries - 1 and self.fallback_model:
                             try:
                                 urls = await client.generate_image(
                                     model=self.fallback_model,
                                     prompt=prompt,
                                     size=size,
+                                    aspect_ratio=aspect_ratio,
+                                    resolution=resolution,
                                     n=n_per_prompt,
-                                    on_actual_cost=lambda cost: self._record_actual_cost("image_fallback", cost),
+                                    on_actual_cost=lambda cost: self._record_actual_cost(
+                                        "image_fallback", cost
+                                    ),
                                 )
                                 results[idx] = urls
                                 logger.info(
                                     "image_fallback",
                                     prompt_preview=prompt[:60],
                                     model=self.fallback_model,
+                                    aspect_ratio=aspect_ratio,
                                 )
                                 return
                             except Exception as fallback_exc:
                                 if _is_insufficient_credits(fallback_exc):
                                     credits_exhausted.set()
-                                    logger.error("image_generation_credits_exhausted", model=self.fallback_model)
+                                    logger.error(
+                                        "image_generation_credits_exhausted",
+                                        model=self.fallback_model,
+                                    )
                                     results[idx] = []
                                     return
                                 logger.error(
@@ -154,7 +171,6 @@ class ImageGenerator:
             raise ImageCreditsExhaustedError(
                 "OpenRouter image generation credits are exhausted"
             )
-        # Reuse the nearest successful asset when one scene's provider call fails.
         if successful:
             for index, result in enumerate(results):
                 if result:
@@ -168,7 +184,7 @@ class ImageGenerator:
                 )
 
         flat: list[str] = []
-        for r in results:
-            if r:
-                flat.extend(r)
+        for result in results:
+            if result:
+                flat.extend(result)
         return flat

@@ -12,18 +12,38 @@ from app.services.script_video.openrouter_client import OpenRouterClient
 
 logger = get_logger(__name__)
 
-SYSTEM_PROMPT = """You are ReCut ScriptPlanner. Create a vertical short-video plan.
+SYSTEM_PROMPT = """You are ReCut Short-Form Director. Create a production-ready plan for a vertical TikTok/Reels/Shorts video.
 
 OUTPUT FORMAT: one strict JSON object matching VideoPlan schema. No markdown, comments, or text outside JSON.
 Fields: title, language, target_duration, narration, visual_style, scenes[].
 
-SCENE rules:
-- Use 4-6 scenes. Keep the response compact so it remains valid JSON.
-- Each scene must have: id (s1, s2...), narration (spoken text), visual_prompt (descriptive image prompt), duration_hint (seconds), importance (1-5), motion_type (zoom_in/zoom_out/pan_left/pan_right/static), transition (fade/slide_left/slide_right/cut), reference_scene_id (optional, reuse character/object).
-- Visual style must describe: main character, setting, lighting, camera, colors, mood.
-- Use simple modern language, no jargon, no filler.
-- Keep each scene narration to one or two short sentences; visual_prompt to one concise sentence.
-- The top-level narration must contain the complete voiceover and be concise enough for the requested duration.
+STORY + VOICEOVER rules:
+- Write for spoken delivery, not for an article. The voiceover must sound like a real creator talking to one person.
+- Open immediately with a hook. No greeting, no title announcement, no "today we will" intro.
+- For Russian, use natural conversational Russian: short phrases, normal word order, contractions where appropriate, and punctuation that creates human pauses.
+- Avoid stiff enumerations like "во-первых / во-вторых / в-третьих" unless the idea truly requires a list.
+- Aim for roughly 2.2-2.5 spoken words per second so the narration actually fills the requested duration.
+- The top-level narration MUST equal the exact concatenation of scenes[].narration in scene order, separated only by spaces. Do not paraphrase or add words at top level.
+
+VISUAL DIRECTION rules:
+- Think in shots, not slides. Use roughly one distinct shot every 2.5-3.5 seconds.
+- Use 8-14 scenes for a normal 30-45 second video. Every scene should justify a new visual.
+- Each scene must have: id (s1, s2...), narration, visual_prompt, duration_hint, importance (1-5), motion_type (zoom_in/zoom_out/pan_left/pan_right/static), transition (fade/slide_left/slide_right/cut), reference_scene_id (optional).
+- visual_prompt MUST be in English even when narration is Russian. It must describe one concrete photographic/cinematic 9:16 shot, not an abstract concept.
+- Every visual_prompt must be self-contained and repeat the essential global style/character traits needed for continuity because shots are generated independently.
+- Write prompts for native vertical composition: subject framed for 9:16, important details away from extreme top/bottom UI zones.
+- Prefer believable creator/B-roll imagery: hands, devices, environments, over-the-shoulder shots, close-ups, details, real-world action, screens viewed at an angle, objects in use.
+- Vary shot scale and angle across adjacent scenes: close-up, medium, wide, POV, over-the-shoulder, detail shot. Do not repeat the same "person holding a phone" composition.
+- Avoid fake interface text, captions baked into images, logos, watermarks, distorted hands, crowds of faces, and generic stock-photo poses.
+- If the same person/object must recur, use reference_scene_id and keep age, clothing, setting, lighting, and key visual traits consistent.
+- visual_style must define a coherent look for the whole video: realism level, palette, lighting, lens/camera feel, texture, mood, and recurring character traits if any.
+- Prefer hard cuts for energetic short-form pacing. Use a fade/slide only when it serves a deliberate beat.
+- Keep each scene narration to one short sentence and each visual_prompt to one concise but specific sentence.
+
+QUALITY BAR:
+- The result must feel like edited short-form content, not an AI slideshow.
+- Every visual should support the exact spoken idea at that moment.
+- Do not add claims, statistics, brands, UI text, or factual details that were not supplied by the user unless they are generic and safe.
 """
 
 
@@ -44,6 +64,8 @@ class ScriptPlanner:
         target_duration: int = 40,
         language: str = "ru",
     ) -> VideoPlan:
+        target_words = max(35, round(target_duration * 2.35))
+        target_scenes = min(14, max(8, round(target_duration / 3.0)))
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -52,7 +74,9 @@ class ScriptPlanner:
                     f"User idea: {user_idea}\n"
                     f"Target duration: {target_duration} seconds\n"
                     f"Language: {language}\n"
-                    "Generate a compact, complete VideoPlan JSON object. Use 4-6 scenes. "
+                    f"Target voiceover length: about {target_words} spoken words (within ±10%).\n"
+                    f"Target shot count: about {target_scenes} distinct scenes/shots.\n"
+                    "Generate one compact, complete VideoPlan JSON object. "
                     "Do not include any extra text."
                 ),
             },
@@ -67,8 +91,10 @@ class ScriptPlanner:
                         "content": (
                             f"Create a new video plan for this idea: {user_idea}\n"
                             f"Duration: {target_duration} seconds. Language: {language}.\n"
-                            "The previous output was truncated or invalid. Return exactly one valid JSON object, "
-                            "with only 4 scenes, short narration, short visual prompts, and all required fields. "
+                            f"Voiceover: about {target_words} spoken words.\n"
+                            f"Use about {target_scenes} distinct vertical shots.\n"
+                            "The previous output was truncated or invalid. Return exactly one valid compact JSON object, "
+                            "with short scene narration and concise visual prompts, while keeping all required fields. "
                             "Do not include markdown or any text outside the JSON object."
                         ),
                     },
@@ -77,8 +103,8 @@ class ScriptPlanner:
                     data = await c.chat_completion(
                         model=self.model,
                         messages=request_messages,
-                        temperature=0.1,
-                        max_tokens=4000,
+                        temperature=0.35,
+                        max_tokens=5500,
                         response_format={"type": "json_object"},
                     )
                     usage = data.get("usage") or {}
@@ -98,7 +124,6 @@ class ScriptPlanner:
                         content = content[3:]
                     if content.endswith("```"):
                         content = content[:-3]
-                    # Some providers wrap JSON in a short preamble despite JSON mode.
                     start, end = content.find("{"), content.rfind("}")
                     if start < 0 or end < start:
                         raise ValueError("Planner returned no JSON object")
