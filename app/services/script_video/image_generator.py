@@ -36,14 +36,16 @@ class ImageGenerator:
     ) -> None:
         s = get_settings()
         self.model = model or s.script_video_image_model
-        configured_fallback = fallback_model or s.script_video_image_fallback_model
+        # None means "use configured fallback". Empty string explicitly disables
+        # a second paid provider, which is what the cost-capped V3 path uses.
+        configured_fallback = (
+            s.script_video_image_fallback_model
+            if fallback_model is None
+            else fallback_model
+        )
 
-        # Quality V3 deliberately uses Recraft Flash as the low-cost paid image
-        # path. Nano Banana was previously the default image model and can become
-        # an unexpectedly expensive fallback when Recraft has a transient error.
-        # Never silently jump from the cheap V3 model to Nano Banana. If we want
-        # that model again later it should be an explicit product decision, not a
-        # hidden retry that burns credits.
+        # Never silently jump from cheap Recraft to Nano Banana. Re-enabling an
+        # expensive fallback must be an explicit product decision.
         if (
             self.model.startswith("recraft/recraft-v4.1-flash")
             and configured_fallback
@@ -64,7 +66,7 @@ class ImageGenerator:
             else ""
         )
         self.concurrency = concurrency or s.script_video_image_concurrency
-        self.max_retries = max_retries
+        self.max_retries = max(1, min(3, max_retries))
         self.client = client or OpenRouterClient()
         self.cost_tracker = cost_tracker
         self.default_aspect_ratio = getattr(s, "script_video_image_aspect_ratio", "9:16")
@@ -87,11 +89,12 @@ class ImageGenerator:
         """Generate images for multiple prompts concurrently.
 
         Returns a flat list of image URLs / base64 strings. A compatible image
-        model receives a native vertical aspect ratio by default. On a per-prompt
-        failure the bounded fallback behavior remains unchanged.
+        model receives a native vertical aspect ratio by default.
         """
         s = get_settings()
-        image_limit = max_images or s.script_video_max_images_pro
+        image_limit = max_images if max_images is not None else s.script_video_max_images_pro
+        if image_limit <= 0 or not prompts:
+            return []
         prompts = prompts[:image_limit]
         aspect_ratio = aspect_ratio or self.default_aspect_ratio
         resolution = resolution or self.default_resolution or None
