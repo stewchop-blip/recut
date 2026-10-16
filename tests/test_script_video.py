@@ -35,18 +35,38 @@ def _planner_response(content, finish_reason="stop"):
 
 
 def _valid_planner_json():
-    return (
-        '{"title":"Короткий тестовый ролик","language":"ru","target_duration":30,'
-        '"narration":"Краткий текст озвучки.","visual_style":"Современный стиль, мягкий свет",'
-        '"scenes":['
-        '{"id":"s1","narration":"Начало.","visual_prompt":"Тихий город на рассвете",'
-        '"duration_hint":10,"importance":3,"motion_type":"zoom_in","transition":"fade"},'
-        '{"id":"s2","narration":"Продолжение.","visual_prompt":"Человек идёт по улице",'
-        '"duration_hint":10,"importance":3,"motion_type":"pan_right","transition":"fade"},'
-        '{"id":"s3","narration":"Финал.","visual_prompt":"Солнечный горизонт",'
-        '"duration_hint":10,"importance":3,"motion_type":"static","transition":"cut"}'
-        ']}'
-    )
+    scene_narrations = [
+        "Сначала кажется, что проблема просто в нехватке времени.",
+        "Но чаще мы откладываем именно те дела, которые для нас важны.",
+        "Мозг быстро замечает риск ошибки и включает привычное избегание.",
+        "Поэтому простая задача вдруг ощущается тяжелее, чем она есть.",
+        "Мы открываем сообщения, ленту или находим срочную мелочь.",
+        "Так появляется короткое облегчение, которое закрепляет привычку откладывать.",
+        "Работает другой подход: уменьшить первый шаг до смешного размера.",
+        "Начни с двух минут, и сопротивление заметно падает.",
+        "После старта продолжить обычно гораздо легче, чем начать.",
+        "Поэтому цель не закончить всё сразу, а просто войти в действие.",
+    ]
+    scenes = []
+    motions = ["zoom_in", "pan_right", "static", "pan_left", "zoom_out"]
+    for index, narration in enumerate(scene_narrations, start=1):
+        scenes.append({
+            "id": f"s{index}",
+            "narration": narration,
+            "visual_prompt": f"Vertical cinematic everyday productivity shot number {index}, realistic lighting, clean composition",
+            "duration_hint": 3,
+            "importance": 3,
+            "motion_type": motions[(index - 1) % len(motions)],
+            "transition": "cut",
+        })
+    return json.dumps({
+        "title": "Короткий тестовый ролик",
+        "language": "ru",
+        "target_duration": 40,
+        "narration": "",
+        "visual_style": "Реалистичный вертикальный ролик, мягкий естественный свет, живые бытовые детали",
+        "scenes": scenes,
+    }, ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -59,6 +79,8 @@ async def test_planner_retries_truncated_json_once():
     assert plan.title == "Короткий тестовый ролик"
     assert len(client.calls) == 2
     assert client.calls[0]["max_tokens"] >= 4000
+    assert len(plan.scenes) >= 8
+    assert plan.narration.startswith("Сначала кажется")
 
 
 @pytest.mark.asyncio
