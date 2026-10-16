@@ -16,7 +16,12 @@ active_render_users: set[int] = set()
 class RenderQueueMiddleware(BaseMiddleware):
     def __init__(self):
         self._users = active_render_users
-        self._semaphore = asyncio.Semaphore(1)
+        # Script Video starts from a text message and therefore does not pass
+        # through this callback middleware. Reuse its semaphore so the old video
+        # pipeline and Script Video can never run heavy FFmpeg work in parallel
+        # on the same Railway worker.
+        from app.bot.handlers.script_video import _script_render_semaphore
+        self._semaphore = _script_render_semaphore
 
     async def __call__(self, handler, event, data):
         user = getattr(event, 'from_user', None)
