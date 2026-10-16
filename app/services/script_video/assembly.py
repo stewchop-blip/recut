@@ -1,4 +1,4 @@
-"""Assemble generated stills, narration, and ASS subtitles into vertical MP4."""
+"""Assemble hybrid stock video, AI stills, narration, and subtitles."""
 from __future__ import annotations
 
 import asyncio
@@ -25,6 +25,7 @@ class ScriptVideoAssembler:
     height = 1920
     fps = 30
     crossfade_seconds = TimelineCompiler.transition_seconds
+    video_suffixes = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
     @staticmethod
     async def audio_duration(audio_path: Path) -> float:
@@ -52,6 +53,10 @@ class ScriptVideoAssembler:
         if duration <= 0:
             raise ScriptVideoAssemblyError("Narration duration must be positive")
         return duration
+
+    @classmethod
+    def _is_video_asset(cls, path: Path) -> bool:
+        return path.suffix.lower() in cls.video_suffixes
 
     @staticmethod
     def _motion_filter(beat: VisualBeat, index: int, duration: float) -> str:
@@ -83,9 +88,21 @@ class ScriptVideoAssembler:
             f"settb=1/{ScriptVideoAssembler.fps},setpts=N,setsar=1,format=yuv420p[v{index}]"
         )
 
+    @classmethod
+    def _video_filter(cls, duration: float) -> str:
+        # Keep the full source visible even when a stock clip is landscape. A
+        # blurred fill is less destructive than an aggressive center crop.
+        return (
+            f"[0:v]split=2[bg][fg];"
+            f"[bg]scale={cls.width}:{cls.height}:force_original_aspect_ratio=increase,"
+            f"crop={cls.width}:{cls.height},gblur=sigma=28[bg2];"
+            f"[fg]scale={cls.width}:{cls.height}:force_original_aspect_ratio=decrease[fg2];"
+            f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2,"
+            f"trim=duration={duration:.4f},fps={cls.fps},settb=1/{cls.fps},"
+            f"setpts=N,setsar=1,format=yuv420p[v0]"
+        )
+
     def _filter_graph(self, beats: list[VisualBeat], durations: list[float]) -> str:
-        # Transition only between already encoded CFR clips. Passing zoompan outputs
-        # directly into xfade is not reliable across FFmpeg builds: some report 1/0.
         graph = [
             f"[{i}:v]fps={self.fps},settb=AVTB,setpts=PTS-STARTPTS,"
             f"setsar=1,format=yuv420p[v{i}]"
@@ -117,14 +134,39 @@ class ScriptVideoAssembler:
             group_outputs.append(current)
 
         if len(group_outputs) > 1:
-            graph.append("".join(f"[{label}]" for label in group_outputs)
-                         + f"concat=n={len(group_outputs)}:v=1:a=0,format=yuv420p[vout]")
+            graph.append(
+                "".join(f"[{label}]" for label in group_outputs)
+                + f"concat=n={len(group_outputs)}:v=1:a=0,format=yuv420p[vout]"
+            )
         else:
             graph.append(f"[{group_outputs[0]}]format=yuv420p[vout]")
         return ";".join(graph)
 
-    async def _render_beat(self, beat: VisualBeat, image_path: Path, duration: float,
-                           output_path: Path) -> None:
+    async def _run_beat_command(self, command: list[str], output_path: Path) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=90)
+        except asyncio.TimeoutError as exc:
+            proc.kill()
+            await proc.communicate()
+            raise ScriptVideoAssemblyError("FFmpeg timed out rendering a visual beat") from exc
+        if proc.returncode or not output_path.is_file() or output_path.stat().st_size == 0:
+            logger.error(
+                "script_video_beat_render_failed",
+                exit_code=proc.returncode,
+                stderr=(stderr or b"").decode(errors="replace")[-500:],
+            )
+            raise ScriptVideoAssemblyError("FFmpeg failed to render a visual beat")
+
+    async def _render_image_beat(
+        self,
+        beat: VisualBeat,
+        image_path: Path,
+        duration: float,
+        output_path: Path,
+    ) -> None:
         graph_path = output_path.with_suffix(".filter.txt")
         graph_path.write_text(self._motion_filter(beat, 0, duration), encoding="utf-8")
         command = [
@@ -135,21 +177,48 @@ class ScriptVideoAssembler:
             str(self.fps), "-pix_fmt", "yuv420p", "-t", f"{duration:.4f}",
             "-movflags", "+faststart", str(output_path),
         ]
-        proc = await asyncio.create_subprocess_exec(
-            *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-        )
         try:
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=90)
-        except asyncio.TimeoutError as exc:
-            proc.kill()
-            await proc.communicate()
-            raise ScriptVideoAssemblyError("FFmpeg timed out rendering a visual beat") from exc
+            await self._run_beat_command(command, output_path)
         finally:
             graph_path.unlink(missing_ok=True)
-        if proc.returncode or not output_path.is_file() or output_path.stat().st_size == 0:
-            logger.error("script_video_beat_render_failed", exit_code=proc.returncode,
-                         stderr=(stderr or b"").decode(errors="replace")[-500:])
-            raise ScriptVideoAssemblyError("FFmpeg failed to render a visual beat")
+
+    async def _render_video_beat(
+        self,
+        video_path: Path,
+        duration: float,
+        output_path: Path,
+        beat_index: int,
+    ) -> None:
+        graph_path = output_path.with_suffix(".filter.txt")
+        graph_path.write_text(self._video_filter(duration), encoding="utf-8")
+        # Offset repeated uses slightly so a duplicated source does not restart at
+        # the exact same frame. stream_loop keeps short stock clips long enough.
+        seek_seconds = (beat_index % 3) * 0.35
+        command = [
+            _find_ffmpeg_bin(), "-y", "-v", "error", "-stream_loop", "-1",
+            "-ss", f"{seek_seconds:.2f}", "-i", str(video_path),
+            "-filter_complex_script", str(graph_path), "-map", "[v0]", "-an",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-r",
+            str(self.fps), "-pix_fmt", "yuv420p", "-t", f"{duration:.4f}",
+            "-movflags", "+faststart", str(output_path),
+        ]
+        try:
+            await self._run_beat_command(command, output_path)
+        finally:
+            graph_path.unlink(missing_ok=True)
+
+    async def _render_beat(
+        self,
+        beat: VisualBeat,
+        asset_path: Path,
+        duration: float,
+        output_path: Path,
+        beat_index: int,
+    ) -> None:
+        if self._is_video_asset(asset_path):
+            await self._render_video_beat(asset_path, duration, output_path, beat_index)
+        else:
+            await self._render_image_beat(beat, asset_path, duration, output_path)
 
     async def assemble(
         self,
@@ -159,11 +228,13 @@ class ScriptVideoAssembler:
         audio_path: Optional[Path] = None,
         output_path: Optional[Path] = None,
     ) -> Path:
+        # Keep the public parameter name `images` for backwards compatibility;
+        # Quality V3 accepts either image paths or video paths in this list.
         if not images:
-            raise ScriptVideoAssemblyError("No images provided for assembly")
-        image_paths = [Path(p).resolve() for p in images]
-        if any(not p.is_file() for p in image_paths):
-            raise ScriptVideoAssemblyError("An image file is missing")
+            raise ScriptVideoAssemblyError("No visual assets provided for assembly")
+        asset_paths = [Path(p).resolve() for p in images]
+        if any(not p.is_file() for p in asset_paths):
+            raise ScriptVideoAssemblyError("A visual asset file is missing")
         if audio_path is None or not Path(audio_path).is_file():
             raise ScriptVideoAssemblyError("Narration audio is missing")
 
@@ -172,20 +243,29 @@ class ScriptVideoAssembler:
         temp_dir = Path(tempfile.mkdtemp(prefix="recut_assembly_", dir=str(output_path.parent)))
         try:
             audio_duration = await self.audio_duration(Path(audio_path))
-            beats = TimelineCompiler().compile(plan, len(image_paths), audio_duration)
+            beats = TimelineCompiler().compile(plan, len(asset_paths), audio_duration)
             beat_durations = [beat.duration for beat in beats]
             clip_paths: list[Path] = []
             for index, beat in enumerate(beats):
                 clip_path = temp_dir / f"beat-{index:03d}.mp4"
                 await self._render_beat(
-                    beat, image_paths[beat.image_index], beat_durations[index], clip_path,
+                    beat,
+                    asset_paths[beat.image_index],
+                    beat_durations[index],
+                    clip_path,
+                    index,
                 )
                 clip_paths.append(clip_path)
             filter_graph = self._filter_graph(beats, beat_durations)
             graph_path = temp_dir / "filter_complex.txt"
             subtitle_filter = ""
             if subtitle_path and Path(subtitle_path).is_file():
-                escaped = str(Path(subtitle_path).resolve()).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+                escaped = (
+                    str(Path(subtitle_path).resolve())
+                    .replace("\\", "\\\\")
+                    .replace(":", "\\:")
+                    .replace("'", "\\'")
+                )
                 subtitle_filter = (
                     f"subtitles='{escaped}':force_style='FontName=Arial,FontSize=56,"
                     "PrimaryColour=&H00FFFFFF,SecondaryColour=&H0000D7FF,"
@@ -217,16 +297,23 @@ class ScriptVideoAssembler:
                 stderr_text = (stderr or b"").decode(errors="replace")
                 if "xfade" in stderr_text and "frame rate" in stderr_text.lower():
                     logger.warning("script_video_transition_fallback", reason="invalid_xfade_framerate")
-                    cut_beats = [VisualBeat(
-                        scene_id=beat.scene_id, image_index=beat.image_index,
-                        duration=beat.duration, motion=beat.motion, transition="cut",
-                    ) for beat in beats]
+                    cut_beats = [
+                        VisualBeat(
+                            scene_id=beat.scene_id,
+                            image_index=beat.image_index,
+                            duration=beat.duration,
+                            motion=beat.motion,
+                            transition="cut",
+                        )
+                        for beat in beats
+                    ]
                     fallback_graph = self._filter_graph(cut_beats, beat_durations)
                     if subtitle_filter:
                         fallback_graph += f";[vout]{subtitle_filter}[vfinal]"
                     graph_path.write_text(fallback_graph, encoding="utf-8")
                     proc = await asyncio.create_subprocess_exec(
-                        *command, stdout=asyncio.subprocess.DEVNULL,
+                        *command,
+                        stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.PIPE,
                     )
                     try:
@@ -238,14 +325,22 @@ class ScriptVideoAssembler:
                     if proc.returncode == 0:
                         logger.info("script_video_cut_transition_fallback_completed")
                 if proc.returncode:
-                    logger.error("script_video_ffmpeg_failed", exit_code=proc.returncode,
-                                 stderr=(stderr or b"").decode(errors="replace")[-1000:])
+                    logger.error(
+                        "script_video_ffmpeg_failed",
+                        exit_code=proc.returncode,
+                        stderr=(stderr or b"").decode(errors="replace")[-1000:],
+                    )
                     raise ScriptVideoAssemblyError("FFmpeg failed to assemble video")
             if not output_path.is_file() or output_path.stat().st_size == 0:
                 raise ScriptVideoAssemblyError("FFmpeg produced an empty video")
-            logger.info("script_video_assembly_complete", image_count=len(image_paths),
-                        visual_beats=len(beats), audio_duration=audio_duration,
-                        output_bytes=output_path.stat().st_size)
+            logger.info(
+                "script_video_assembly_complete",
+                asset_count=len(asset_paths),
+                stock_video_count=sum(1 for path in asset_paths if self._is_video_asset(path)),
+                visual_beats=len(beats),
+                audio_duration=audio_duration,
+                output_bytes=output_path.stat().st_size,
+            )
             return output_path
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
