@@ -124,10 +124,13 @@ async def show_balance(message: types.Message):
         return
     settings = get_settings()
     from app.services.generations import free_remaining
+    from app.services.subscriptions import get_subscription, is_active
     async with db_manager.session() as session:
         credits = await balance(session, message.from_user.id)
         remaining = await free_remaining(session, message.from_user.id, settings)
-    details = (f"Бесплатно осталось сегодня: {remaining} из {settings.daily_free_generations}. "
+        paid_pro = is_active(await get_subscription(session, message.from_user.id))
+    day_limit = settings.pro_daily_generations if paid_pro else settings.daily_free_generations
+    details = (f"Доступно обычных обработок сегодня: {remaining} из {day_limit}. "
                "Лимит обновляется в 03:00 по Минску. Затем используется бонусный баланс. "
                "Один запуск, включая три варианта, — одна обработка. Приглашения: /referral"
                if not settings.has_unlimited_generations(message.from_user.id) else
@@ -137,7 +140,20 @@ async def show_balance(message: types.Message):
 
 @router.message(Command("terms"))
 async def terms(message: types.Message):
-    await message.answer(get_settings().payment_terms or UNAVAILABLE, parse_mode=None)
+    settings = get_settings()
+    pro_terms = (
+        f"ReCut PRO: {settings.pro_price_stars} Telegram Stars каждые 30 дней. "
+        "Автоматическое списание повторяется, пока продление не отменено. "
+        f"В течение каждого оплаченного периода доступно до {settings.pro_ai_videos_per_period} "
+        f"AI-роликов и {settings.pro_daily_generations} обычных обработок в день. "
+        "Доступ привязан к Telegram аккаунту покупателя. "
+        "Отменить новые списания можно командой /pro с сохранением доступа "
+        "до конца оплаченного периода. Изменения тарифа действуют для новых покупок. "
+        f"Поддержка платежей и вопросы возврата: {settings.payment_support}. "
+        "Возвраты обрабатываются поддержкой с учётом правил Telegram."
+    )
+    body = pro_terms + ("\\n\\n" + settings.payment_terms if settings.payment_terms else "")
+    await message.answer(body, parse_mode=None)
 
 
 @router.message(Command("paysupport"))
