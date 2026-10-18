@@ -76,6 +76,7 @@ def appearance_menu(style_id: str, banner: bool, decoration: bool = False) -> In
         [InlineKeyboardButton(text=f"🖼 Баннер: {'✅' if banner else 'нет'}", callback_data="banner:menu")],
         [InlineKeyboardButton(text=f"🤖 Персонаж снизу: {'ВКЛ' if decoration else 'ВЫКЛ'}", callback_data="decoration:toggle")],
         [InlineKeyboardButton(text="🔧 Настроить вручную", callback_data="fine:menu")],
+        [InlineKeyboardButton(text="⭐ Мой PRO", callback_data="pro:show")],
         [InlineKeyboardButton(text="❓ Как пользоваться", callback_data="help:show")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home:open")],
     ])
