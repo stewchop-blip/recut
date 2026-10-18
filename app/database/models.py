@@ -291,3 +291,31 @@ class ActivityDay(Base):
     __tablename__ = "analytics_activity_days"
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     day: Mapped[str] = mapped_column(String(10), primary_key=True, index=True)
+
+
+# Separate ledger for Telegram Stars renewable PRO. Legacy credit orders stay intact.
+class ProSubscription(Base):
+    __tablename__ = "pro_subscriptions"
+
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    invoice_payload: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
+    stars: Mapped[int] = mapped_column(Integer, default=399, nullable=False)
+    first_charge_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    period_start: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    auto_renew: Mapped[bool] = mapped_column(default=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    checkout_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ProSubscriptionCharge(Base):
+    __tablename__ = "pro_subscription_charges"
+
+    charge_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    invoice_payload: Mapped[str] = mapped_column(String(40), nullable=False)
+    stars: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    refunded: Mapped[bool] = mapped_column(default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

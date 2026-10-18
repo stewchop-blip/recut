@@ -277,6 +277,7 @@ async def _on_startup(bot: Bot) -> None:
             BotCommand(command="help", description="Как пользоваться"),
             BotCommand(command="referral", description="Пригласить друга"),
             BotCommand(command="balance", description="Баланс обработок"),
+            BotCommand(command="pro", description="Мой ReCut PRO"),
             BotCommand(command="cancel", description="Отменить"),
         ])
     except Exception as e:

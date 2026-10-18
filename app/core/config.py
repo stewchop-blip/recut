@@ -50,6 +50,11 @@ class Settings(BaseSettings):
 
     # Payments stay off until a separately tested commercial launch.
     payments_enabled: bool = False
+    # Separate kill switch: does not turn on legacy one-off credit sales.
+    pro_subscriptions_enabled: bool = False
+    pro_price_stars: int = Field(default=399, ge=1, le=10000)
+    pro_ai_videos_per_period: int = Field(default=20, ge=1, le=500)
+    pro_daily_generations: int = Field(default=50, ge=1, le=1000)
     payment_price_stars: int = Field(default=0, ge=0, le=100000)
     payment_credits: int = Field(default=0, ge=0, le=100000)
     payment_terms: str = ""
