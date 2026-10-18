@@ -311,3 +311,66 @@ def test_ffmpeg_xfade_chain_accepts_normalized_framerate(tmp_path):
         text=True,
     ).strip())
     assert 5.2 < duration <= 5.8
+
+
+def test_ffmpeg_three_consecutive_xfades(tmp_path):
+    """FFmpeg 7+ rejects xfade when input links lose their constant frame rate."""
+    from app.services.script_video.timeline import VisualBeat
+
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        pytest.skip("FFmpeg/ffprobe not available")
+
+    paths = []
+    for index, color in enumerate(("red", "green", "blue")):
+        path = tmp_path / f"xfade-{index}.mp4"
+        subprocess.run(
+            [
+                ffmpeg, "-v", "error", "-f", "lavfi", "-i",
+                f"color=c={color}:s=96x160:r=30:d=1",
+                "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-y", str(path),
+            ],
+            capture_output=True, check=True, timeout=20,
+        )
+        paths.append(path)
+
+    beats = [
+        VisualBeat(scene_id=f"s{i}", image_index=i, duration=1.0,
+                   motion="static", transition="cut" if i == 0 else "fade")
+        for i in range(3)
+    ]
+    graph = ScriptVideoAssembler()._filter_graph(beats, [1.0] * 3)
+    output = tmp_path / "three-xfades.mp4"
+    command = [ffmpeg, "-v", "error"]
+    for path in paths:
+        command += ["-i", str(path)]
+    command += [
+        "-filter_complex", graph, "-map", "[vout]", "-t", "2.56",
+        "-c:v", "libx264", "-y", str(output),
+    ]
+    subprocess.run(command, capture_output=True, check=True, timeout=20)
+    meta = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "json", str(output)],
+        capture_output=True, check=True, text=True, timeout=20,
+    )
+    import json
+    duration = float(json.loads(meta.stdout)["format"]["duration"])
+    assert 2.3 < duration < 2.9
+
+
+def test_whisper_pyav_supports_audio_metadata_flag(tmp_path):
+    """Catch incompatible newer PyAV before the deployment silently loses subtitles."""
+    av = pytest.importorskip("av")
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        pytest.skip("FFmpeg not available")
+    wav = tmp_path / "narration.wav"
+    subprocess.run(
+        [ffmpeg, "-v", "error", "-f", "lavfi", "-i",
+         "sine=frequency=440:duration=0.5", "-y", str(wav)],
+        capture_output=True, check=True, timeout=20,
+    )
+    with av.open(str(wav), mode="r", metadata_errors="ignore") as container:
+        assert any(stream.type == "audio" for stream in container.streams)
