@@ -374,3 +374,89 @@ def test_whisper_pyav_supports_audio_metadata_flag(tmp_path):
     )
     with av.open(str(wav), mode="r", metadata_errors="ignore") as container:
         assert any(stream.type == "audio" for stream in container.streams)
+
+
+def test_subtitles_keep_narration_text_not_whisper_guesses(tmp_path, monkeypatch):
+    """A recognition error must not change words already spoken by the TTS."""
+    import app.services.subtitles.scene_adapter as module
+
+    settings = SimpleNamespace(
+        subtitle_max_words_per_line=4,
+        output_width=1080,
+        output_height=1920,
+        subtitle_safe_bottom_px=520,
+        subtitle_safe_left_px=80,
+        subtitle_safe_right_px=80,
+    )
+    monkeypatch.setattr(module, "get_settings", lambda: settings)
+    original = "Маленькая девочка нашла старую плёнку у двери."
+    recognized = [
+        SimpleNamespace(start=i * 0.42, end=i * 0.42 + 0.30, text=word)
+        for i, word in enumerate(
+            ("Маленькая", "девочка", "нашла", "старую", "пленку", "у", "дверей.")
+        )
+    ]
+    result = SceneSubtitleBuilder().build_from_script_and_words(original, recognized)
+    assert result.output_path
+    assert " ".join(phrase.text for phrase in result.phrases) == original
+    assert all("дверей" not in phrase.text for phrase in result.phrases)
+    assert abs(result.phrases[0].start - 0.0) < 0.02
+    assert abs(result.phrases[-1].end - 2.82) < 0.08
+    text = open(result.output_path, encoding="utf-8").read()
+    assert "плёнку" in text
+    assert "дверей" not in text
+
+
+def test_subtitles_discard_unrelated_whisper_hallucination(tmp_path, monkeypatch):
+    import app.services.subtitles.scene_adapter as module
+
+    monkeypatch.setattr(
+        module, "get_settings", lambda: SimpleNamespace(
+            subtitle_max_words_per_line=4,
+            output_width=1080,
+            output_height=1920,
+            subtitle_safe_bottom_px=520,
+            subtitle_safe_left_px=80,
+            subtitle_safe_right_px=80,
+        )
+    )
+    result = SceneSubtitleBuilder().build_from_script_and_words(
+        "Эта таинственная история началась в старом городе.",
+        [SimpleNamespace(start=0.1, end=0.4, text="Подписывайтесь")],
+    )
+    assert not result.output_path
+
+
+def test_reused_still_shares_one_zoom_trajectory():
+    """Two independently rendered cuts into the same file must not restart zoom."""
+    from pathlib import Path
+    from app.services.script_video.timeline import VisualBeat
+
+    still = Path("/tmp/repeated-still.png")
+    stock = Path("/tmp/stock.mp4")
+    assets = [still, still, stock]
+    beats = [
+        VisualBeat(scene_id="s1", image_index=0, duration=2.0,
+                   motion="zoom_in", transition="cut"),
+        VisualBeat(scene_id="s2", image_index=1, duration=2.0,
+                   motion="pan_right", transition="cut"),
+        VisualBeat(scene_id="s3", image_index=2, duration=1.0,
+                   motion="static", transition="cut"),
+    ]
+    windows = ScriptVideoAssembler._still_motion_windows(beats, assets, [2.0, 2.0, 1.0])
+    assert windows[:2] == [(0, 120, "zoom_in"), (60, 120, "zoom_in")]
+    first = ScriptVideoAssembler._motion_filter(
+        beats[0], 0, 2.0,
+        start_frame=windows[0][0], total_frames=windows[0][1],
+        continuous_motion=windows[0][2],
+    )
+    second = ScriptVideoAssembler._motion_filter(
+        beats[1], 0, 2.0,
+        start_frame=windows[1][0], total_frames=windows[1][1],
+        continuous_motion=windows[1][2],
+    )
+    assert "(on+0)/120" in first
+    assert "(on+60)/120" in second
+    assert "(on+0)/60" not in second
+    assert "pan_right" not in second
+    assert windows[2][0] == 0
