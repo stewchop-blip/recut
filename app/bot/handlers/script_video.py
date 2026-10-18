@@ -152,14 +152,25 @@ async def _build_synced_subtitles(plan, audio_path: Path, audio_duration: float)
             words = tuple(word for segment in result.segments for word in segment.words)
             expected_words = len((plan.narration or "").split())
             if len(words) >= max(3, int(expected_words * 0.55)):
-                subtitles = builder.build_from_words(words)
-                logger.info(
-                    "script_subtitles_word_aligned",
-                    words=len(words),
-                    model=result.model,
-                    duration_seconds=result.duration_seconds,
+                # TTS already received the exact script. Whisper supplies
+                # timestamps, never the caption text: ASR often misspells
+                # names and Russian word endings even on synthesized speech.
+                subtitles = builder.build_from_script_and_words(plan.narration, words)
+                if subtitles.output_path:
+                    logger.info(
+                        "script_subtitles_word_aligned",
+                        words=len(words),
+                        script_words=expected_words,
+                        model=result.model,
+                        duration_seconds=result.duration_seconds,
+                        source="narration_script",
+                    )
+                    return subtitles
+                logger.warning(
+                    "script_subtitle_alignment_script_mismatch",
+                    aligned_words=len(words),
+                    expected_words=expected_words,
                 )
-                return subtitles
             logger.warning(
                 "script_subtitle_alignment_too_sparse",
                 aligned_words=len(words),
