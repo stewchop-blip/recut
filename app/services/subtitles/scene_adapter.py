@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import tempfile
+import re
+from difflib import SequenceMatcher
+from types import SimpleNamespace
 from typing import Optional, Sequence
 
 from app.core.config import get_settings
@@ -94,6 +97,105 @@ class SceneSubtitleBuilder(SubtitleBuilder):
             fh.write(ass)
             path = fh.name
         return SubtitleBuildResult(phrases=tuple(phrases), output_path=path, line_count=len(phrases))
+
+    def build_from_script_and_words(
+        self,
+        script: str,
+        recognized_words: Sequence[object],
+    ) -> SubtitleBuildResult:
+        """Keep the *exact TTS script* on screen, using STT only for timing.
+
+        Whisper is an imperfect transcriber even when speech was synthesized
+        from a known text. Using its guessed text creates spelling mistakes and
+        invented words. SequenceMatcher anchors recognizable words to their
+        audio timestamps; occasional mismatches are mapped locally.
+        """
+        source = script.split()
+        raw = []
+        for item in recognized_words:
+            word = str(getattr(item, "text", "") or "").strip()
+            if not word:
+                continue
+            try:
+                start = float(getattr(item, "start"))
+                end = float(getattr(item, "end"))
+            except (ValueError, TypeError):
+                continue
+            if start < 0 or end <= start:
+                continue
+            raw.append((start, end, word))
+
+        if not source or not raw:
+            return SubtitleBuildResult(phrases=(), output_path="", line_count=0)
+
+        def normalized(word: str) -> str:
+            return re.sub(r"[^\\w]", "", word.casefold().replace("ё", "е"))
+
+        clean_source = [normalized(word) for word in source]
+        clean_recognized = [normalized(word) for _, _, word in raw]
+        matcher = SequenceMatcher(None, clean_source, clean_recognized, autojunk=False)
+        operations = matcher.get_opcodes()
+        matched = sum(i2 - i1 for tag, i1, i2, _, _ in operations if tag == "equal")
+        # If the transcription doesn't broadly resemble the script (wrong
+        # language, hallucinations, etc), use the safe plan-based fallback.
+        if matched < max(2, int(len(source) * 0.55)):
+            return SubtitleBuildResult(phrases=(), output_path="", line_count=0)
+
+        times: list[tuple[float, float] | None] = [None] * len(source)
+        for tag, i1, i2, j1, j2 in operations:
+            if tag == "equal":
+                for offset in range(i2 - i1):
+                    times[i1 + offset] = raw[j1 + offset][:2]
+            elif tag == "replace" and j2 > j1:
+                count = i2 - i1
+                recognized_count = j2 - j1
+                if count == recognized_count:
+                    for offset in range(count):
+                        times[i1 + offset] = raw[j1 + offset][:2]
+                else:
+                    # A phrase can be split/merged differently by ASR. Spread
+                    # the true script words over the corresponding audio span.
+                    start, end = raw[j1][0], raw[j2 - 1][1]
+                    for offset in range(count):
+                        st = start + (end - start) * offset / count
+                        en = start + (end - start) * (offset + 1) / count
+                        times[i1 + offset] = (st, en)
+
+        index = 0
+        while index < len(times):
+            if times[index] is not None:
+                index += 1
+                continue
+            end_index = index
+            while end_index < len(times) and times[end_index] is None:
+                end_index += 1
+            count = end_index - index
+            before = times[index - 1][1] if index > 0 and times[index - 1] else None
+            after = times[end_index][0] if end_index < len(times) and times[end_index] else None
+            if before is None:
+                after_value = after if after is not None else raw[0][0]
+                left = max(0.0, after_value - 0.24 * count)
+                right = max(left + 0.05 * count, after_value)
+            else:
+                left = before
+                right = after if after is not None and after > before else before + 0.24 * count
+            for offset in range(count):
+                st = left + (right - left) * offset / count
+                en = left + (right - left) * (offset + 1) / count
+                times[index + offset] = (st, en)
+            index = end_index
+
+        aligned: list[SimpleNamespace] = []
+        prev_start = 0.0
+        for word, entry in zip(source, times):
+            assert entry is not None
+            start, end = entry
+            start = max(0.0, prev_start, start)
+            end = max(start + 0.04, end)
+            aligned.append(SimpleNamespace(text=word, start=start, end=end))
+            prev_start = start
+
+        return self.build_from_words(aligned)
 
     def build(self, request: SubtitleBuildRequest) -> SubtitleBuildResult:
         raise NotImplementedError(
