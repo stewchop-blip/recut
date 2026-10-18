@@ -32,6 +32,9 @@ dependencies = [
     "pytz>=2024.1,<2025",
     # Speech-to-text (stage D)
     "faster-whisper>=1.0,<2",
+    # faster-whisper 1.2.x uses av.open(metadata_errors=...), removed in PyAV 18+.
+    # Keep word-level subtitle alignment functional on Railway/Python 3.12.
+    "av>=11,<18",
     # Free Russian narration fallback when OpenRouter TTS is unavailable
     "edge-tts>=7.0,<8",
     # Memory guard (stage D)
