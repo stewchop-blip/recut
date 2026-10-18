@@ -14,7 +14,7 @@ from app.services.subscriptions import (
 
 
 @pytest.mark.asyncio
-async def test_pro_recurring_checkout_renewal_cancel_and_refund():
+async def test_pro_recurring_checkout_renewal_cancel_and_refund(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     try:
         async with engine.begin() as conn:
@@ -48,6 +48,10 @@ async def test_pro_recurring_checkout_renewal_cancel_and_refund():
             with pytest.raises(SubscriptionRejected):
                 await prepare_subscription(session, user_id, cfg)
 
+        # Simulate the next real billing date; Telegram never pays 60 days in advance.
+        import app.services.subscriptions as service
+        now_at_renewal = datetime.fromtimestamp(expiry, timezone.utc) + timedelta(seconds=2)
+        monkeypatch.setattr(service, "utcnow", lambda: now_at_renewal)
         renewal = SimpleNamespace(
             currency="XTR", total_amount=399, invoice_payload=payload,
             is_recurring=True, is_first_recurring=False,
