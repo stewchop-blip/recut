@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from pathlib import Path
 
@@ -39,6 +40,10 @@ class ScriptTTSAdapter:
         )
         self.api_key = settings.openrouter_api_key
         self.actual_cost_usd = 0.0
+        # Not all TTS replies carry billable cost metadata; keep an explicitly
+        # labeled estimate and do not silently treat an unknown charge as free.
+        self.estimated_cost_usd = 0.0
+        self.cost_confirmed = False
 
     @staticmethod
     def _clean_text(text: str) -> str:
@@ -137,6 +142,20 @@ class ScriptTTSAdapter:
             actual_cost = await self._generation_cost(client, generation_id)
         if actual_cost is not None:
             self.actual_cost_usd += actual_cost
+            self.estimated_cost_usd += actual_cost
+            self.cost_confirmed = True
+        elif model == "elevenlabs/eleven-v4-turbo":
+            # Conservative undiscounted list-price estimate, not a verified
+            # charge. A price promotion can make the actual charge smaller.
+            try:
+                usd_per_million = float(
+                    os.getenv("SCRIPT_VIDEO_TTS_ESTIMATE_PER_M_CHARS", "40")
+                )
+            except (TypeError, ValueError):
+                usd_per_million = 40.0
+            self.estimated_cost_usd += (
+                len(payload["input"]) * max(0.0, usd_per_million) / 1_000_000
+            )
         logger.info(
             "script_tts_completed",
             model=model,
@@ -145,6 +164,8 @@ class ScriptTTSAdapter:
             bytes=len(audio),
             generation_id=generation_id or None,
             actual_cost_usd=actual_cost,
+            estimated_cost_usd=round(self.estimated_cost_usd, 6),
+            cost_confirmed=self.cost_confirmed,
         )
         return output_path
 
