@@ -339,3 +339,55 @@ async def pro_confirm_cancel(callback: types.CallbackQuery):
 @router.callback_query(F.data == "pro:resume")
 async def pro_resume(callback: types.CallbackQuery):
     await _switch_renewal(callback, False)
+
+
+@router.message(Command("refund_pro"))
+async def refund_pro(message: types.Message):
+    """Admin-only refund of the latest non-refunded PRO renewal charge."""
+    from types import SimpleNamespace
+    from app.database.models import ProSubscriptionCharge
+    from app.services.subscriptions import refund_subscription_payment, get_subscription, is_active
+
+    settings = get_settings()
+    admins = {int(x.strip()) for x in settings.payment_admin_ids.split(",") if x.strip().isdigit()}
+    if not message.from_user or message.from_user.id not in admins or message.chat.type != "private":
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: /refund_pro TELEGRAM_ID")
+        return
+    user_id = int(parts[1])
+    async with db_manager.session() as session:
+        charge = await session.scalar(select(ProSubscriptionCharge).where(
+            ProSubscriptionCharge.telegram_user_id == user_id,
+            ProSubscriptionCharge.refunded.is_(False),
+        ).order_by(ProSubscriptionCharge.expires_at.desc()).limit(1))
+        sub = await get_subscription(session, user_id)
+        first_charge_id = sub.first_charge_id if sub and is_active(sub) and sub.auto_renew else None
+    if not charge:
+        await message.answer("Нет оплаченного PRO-периода для возврата.")
+        return
+    if first_charge_id:
+        try:
+            await message.bot.edit_user_star_subscription(
+                user_id=user_id, telegram_payment_charge_id=first_charge_id,
+                is_canceled=True)
+        except Exception:
+            logger.warning("pro_refund_cancellation_requires_check", user_id=user_id)
+    try:
+        await message.bot.refund_star_payment(user_id=user_id,
+                                              telegram_payment_charge_id=charge.charge_id)
+    except Exception:
+        logger.exception("pro_refund_telegram_state_uncertain", user_id=user_id)
+        await message.answer("Не удалось подтвердить возврат. Проверь историю Stars и /paysupport.")
+        return
+    receipt = SimpleNamespace(invoice_payload=charge.invoice_payload,
+                              total_amount=charge.stars, currency="XTR",
+                              telegram_payment_charge_id=charge.charge_id)
+    async with db_manager.session() as session:
+        await refund_subscription_payment(session, user_id, receipt)
+        if first_charge_id:
+            sub = await get_subscription(session, user_id)
+            if sub:
+                sub.auto_renew = False
+    await message.answer("✅ Возврат последнего платежа PRO обработан.")
