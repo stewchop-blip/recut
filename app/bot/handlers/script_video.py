@@ -377,6 +377,15 @@ async def handle_idea(message: Message, bot=None) -> bool:
             reused_scenes=media.reused_scenes if media else 0,
             actual_cost_usd=tracker.actual_cost_usd,
             actual_cost_breakdown=tracker.actual_costs,
+            # The TTS API may not expose exact charges. Do not present that
+            # missing value as zero: show a separately labeled estimate.
+            tts_cost_confirmed=tts.cost_confirmed,
+            tts_cost_estimate_usd=round(tts.estimated_cost_usd, 6),
+            total_cost_estimate_usd=round(
+                tracker.actual_cost_usd
+                + (0.0 if tts.cost_confirmed else tts.estimated_cost_usd),
+                6,
+            ),
         )
         with suppress(Exception):
             await status.delete()
