@@ -152,7 +152,7 @@ async def terms(message: types.Message):
         f"Поддержка платежей и вопросы возврата: {settings.payment_support}. "
         "Возвраты обрабатываются поддержкой с учётом правил Telegram."
     )
-    body = pro_terms + ("\\n\\n" + settings.payment_terms if settings.payment_terms else "")
+    body = pro_terms + ("\n\n" + settings.payment_terms if settings.payment_terms else "")
     await message.answer(body, parse_mode=None)
 
 
