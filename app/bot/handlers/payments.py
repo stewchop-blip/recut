@@ -226,7 +226,7 @@ async def pro_info(message: types.Message):
     if not message.from_user or message.chat.type != "private":
         return
     text, keyboard = await _show_pro(message.bot, message.from_user.id)
-    await message.answer(text.replace("\\\n", "\n"), reply_markup=keyboard, parse_mode="HTML")
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "pro:show")
@@ -236,7 +236,7 @@ async def pro_show(callback: types.CallbackQuery):
         return
     text, keyboard = await _show_pro(callback.bot, callback.from_user.id)
     await callback.answer()
-    await callback.message.answer(text.replace("\\\n", "\n"), reply_markup=keyboard, parse_mode="HTML")
+    await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "pro:buy")
@@ -312,7 +312,7 @@ async def _switch_renewal(callback: types.CallbackQuery, canceled: bool):
         return
     await callback.answer("Автопродление отключено." if canceled else "Автопродление включено.")
     text, keyboard = await _show_pro(callback.bot, callback.from_user.id)
-    await callback.message.answer(text.replace("\\\n", "\n"), reply_markup=keyboard, parse_mode="HTML")
+    await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "pro:confirm_cancel")
