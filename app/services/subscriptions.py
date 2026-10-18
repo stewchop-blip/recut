@@ -45,12 +45,20 @@ async def prepare_subscription(session, user_id, settings):
     await session.execute(update(UserSettings).where(UserSettings.id == row.id).values(
         telegram_user_id=user_id))
     sub = await session.get(ProSubscription, user_id)
-    if is_active(sub):
-        raise SubscriptionRejected("Подписка уже активна. Управление: /pro")
-    if sub and sub.status == "pending" and sub.stars == settings.pro_price_stars and (
+    if is_active(sub) or (sub and sub.status == "active" and sub.auto_renew):
+        raise SubscriptionRejected("Подписка уже оформлена. Управление: /pro")
+    if sub and sub.stars == settings.pro_price_stars and (
         utcnow() - aware(sub.created_at)
     ) < timedelta(minutes=55):
-        return sub
+        if sub.status == "pending":
+            return sub
+        if sub.status == "checkout_pending" and sub.checkout_at and (
+            utcnow() - aware(sub.checkout_at)) > timedelta(minutes=2):
+            sub.status = "pending"
+            sub.checkout_at = None
+            return sub
+        if sub.status == "checkout_pending":
+            raise SubscriptionRejected("Платёж обрабатывается. Проверь статус через /pro.")
     if sub is None:
         sub = ProSubscription(telegram_user_id=user_id)
         session.add(sub)
@@ -61,6 +69,7 @@ async def prepare_subscription(session, user_id, settings):
     sub.period_start = None
     sub.auto_renew = True
     sub.status = "pending"
+    sub.checkout_at = None
     sub.created_at = utcnow()
     await session.flush()
     return sub
@@ -76,6 +85,12 @@ async def validate_subscription_checkout(session, payload, user_id, currency, am
         raise SubscriptionRejected("Срок действия счёта истёк.")
     if currency != "XTR" or amount != sub.stars:
         raise SubscriptionRejected("Неверная сумма платежа.")
+    # Commit before Telegram receives pre-checkout approval. It is not a charge.
+    updated = await session.execute(update(ProSubscription).where(
+        ProSubscription.telegram_user_id == user_id, ProSubscription.status == "pending"
+    ).values(status="checkout_pending", checkout_at=utcnow()))
+    if updated.rowcount != 1:
+        raise SubscriptionRejected("Подписка уже оформляется.")
     return sub
 
 
@@ -102,7 +117,7 @@ async def record_subscription_payment(session, user_id, payment):
     if not sub or sub.invoice_payload != payment.invoice_payload or sub.stars != payment.total_amount:
         raise SubscriptionRejected("Unknown recurring invoice")
     if sub.first_charge_id is None:
-        if sub.status != "pending" or not payment.is_first_recurring:
+        if sub.status != "checkout_pending" or not payment.is_first_recurring:
             raise SubscriptionRejected("Unexpected first recurring payment")
         sub.first_charge_id = charge
     elif payment.is_first_recurring:
@@ -115,6 +130,7 @@ async def record_subscription_payment(session, user_id, payment):
         sub.expires_at = expiry
         sub.period_start = expiry - timedelta(seconds=PERIOD_SECONDS)
     sub.status = "active"
+    sub.checkout_at = None
     user = await UserSettingsRepository(session).get_or_create(user_id)
     if not user.premium_until or aware(user.premium_until) < expiry:
         user.premium_until = expiry
