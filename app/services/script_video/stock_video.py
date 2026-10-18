@@ -224,7 +224,15 @@ class WikimediaCommonsStockVideoProvider:
         excluded = set(used_ids)
         try:
             timeout = httpx.Timeout(self.timeout_seconds, connect=12.0)
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                follow_redirects=True,
+                headers={
+                    # Wikimedia requires client identification on actual downloads,
+                    # not only on metadata search requests.
+                    "User-Agent": "ReCutBot/1.0 (https://github.com/stewchop-blip/recut) httpx",
+                },
+            ) as client:
                 videos = await self._search(client, query)
                 candidates = [
                     video for video in videos
@@ -269,6 +277,7 @@ class WikimediaCommonsStockVideoProvider:
                             provider="wikimedia",
                             asset_id=asset_id,
                             error_type=type(exc).__name__,
+                            status_code=getattr(getattr(exc, "response", None), "status_code", None),
                         )
                 return None
         except Exception as exc:
