@@ -123,7 +123,7 @@ class ScriptVideoAssembler:
 
     def _filter_graph(self, beats: list[VisualBeat], durations: list[float]) -> str:
         graph = [
-            f"[{i}:v]fps={self.fps},settb=AVTB,setpts=PTS-STARTPTS,"
+            f"[{i}:v]setpts=PTS-STARTPTS,fps={self.fps},settb=1/{self.fps},"
             f"setsar=1,format=yuv420p[v{i}]"
             for i in range(len(beats))
         ]
