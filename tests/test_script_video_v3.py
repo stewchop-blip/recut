@@ -227,3 +227,87 @@ async def test_assembler_renders_stock_video_beat_to_vertical_mp4(tmp_path):
     assert "height=1920" in probe
     assert "codec_name=h264" in probe
     assert "pix_fmt=yuv420p" in probe
+
+
+def test_pyav_version_is_compatible_with_released_faster_whisper():
+    """Prevent Railway builds from silently upgrading to unsupported PyAV 18+."""
+    import tomllib
+    from pathlib import Path
+
+    project = tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    requirements = project["project"]["dependencies"]
+    assert any(req.replace(" ", "") == "av>=11,<18" for req in requirements)
+
+
+@pytest.mark.asyncio
+async def test_wikimedia_download_uses_identifiable_user_agent(tmp_path, monkeypatch):
+    """The file download must not use default python-httpx identification."""
+    import app.services.script_video.stock_video as stock_module
+
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    provider = WikimediaCommonsStockVideoProvider()
+    async def no_matches(client, query):
+        return []
+    monkeypatch.setattr(provider, "_search", no_matches)
+    monkeypatch.setattr(stock_module.httpx, "AsyncClient", FakeClient)
+    assert await provider.fetch(
+        query="old camera", workdir=tmp_path, slot=0, target_seconds=3.0,
+    ) is None
+    assert "ReCutBot" in captured["headers"]["User-Agent"]
+    assert "github.com/stewchop-blip/recut" in captured["headers"]["User-Agent"]
+
+
+def test_ffmpeg_xfade_chain_accepts_normalized_framerate(tmp_path):
+    """Regression for FFmpeg 7.x: settb=AVTB alone loses constant frame rate."""
+    from app.services.script_video.timeline import VisualBeat
+
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        pytest.skip("FFmpeg and ffprobe are required")
+    videos = []
+    for i, color in enumerate(("red", "blue", "green")):
+        path = tmp_path / f"clip-{i}.mp4"
+        subprocess.run(
+            [ffmpeg, "-y", "-v", "error", "-f", "lavfi", "-i",
+             f"color=c={color}:s=96x160:r=30:d=2", "-c:v", "libx264",
+             "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(path)],
+            check=True, timeout=20,
+        )
+        videos.append(path)
+
+    beats = [
+        VisualBeat("s1", 0, 2.0, "zoom_in", "cut"),
+        VisualBeat("s2", 1, 2.0, "zoom_in", "fade"),
+        VisualBeat("s3", 2, 2.0, "zoom_in", "fade"),
+    ]
+    graph = ScriptVideoAssembler()._filter_graph(beats, [2.0, 2.0, 2.0])
+    output = tmp_path / "xfade.mp4"
+    command = [ffmpeg, "-y", "-v", "error"]
+    for path in videos:
+        command += ["-i", str(path)]
+    command += [
+        "-filter_complex", graph, "-map", "[vout]", "-an",
+        "-c:v", "libx264", "-preset", "ultrafast", "-t", "5.56", str(output),
+    ]
+    subprocess.run(command, check=True, timeout=30, capture_output=True)
+    assert output.is_file() and output.stat().st_size > 0
+    duration = float(subprocess.check_output(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(output)],
+        text=True,
+    ).strip())
+    assert 5.2 < duration <= 5.8
