@@ -203,19 +203,19 @@ async def _show_pro(bot, user_id):
         date = aware(sub.expires_at).astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
         renewal = ("Автопродление включено" if sub.auto_renew else
                    "Автопродление отключено, повторных списаний не будет")
-        text = (f"👑 <b>ReCut PRO активен</b>\\n\\n"
-                f"Текущий период до: {date}\\n{renewal}\\n"
-                f"AI-роликов: {settings.pro_ai_videos_per_period} за 30 дней.\\n"
+        text = (f"👑 <b>ReCut PRO активен</b>\n\n"
+                f"Текущий период до: {date}\n{renewal}\n"
+                f"AI-роликов: {settings.pro_ai_videos_per_period} за 30 дней.\n"
                 f"Обычных обработок: до {settings.pro_daily_generations} в день.")
     else:
-        text = (f"⭐ <b>ReCut PRO</b>\\n\\n"
-                f"{settings.pro_price_stars} Stars каждые 30 дней с автопродлением.\\n"
+        text = (f"⭐ <b>ReCut PRO</b>\n\n"
+                f"{settings.pro_price_stars} Stars каждые 30 дней с автопродлением.\n"
                 f"До {settings.pro_ai_videos_per_period} AI-роликов за период, "
                 f"до {settings.pro_daily_generations} обычных обработок в день, "
-                "без обязательного брендинга ReCut.\\n\\n"
+                "без обязательного брендинга ReCut.\n\n"
                 "Отменить автоматическое продление можно в самом боте; "
-                "PRO останется до конца оплаченного периода.\\n"
-                f"Поддержка: {settings.payment_support}\\n"
+                "PRO останется до конца оплаченного периода.\n"
+                f"Поддержка: {settings.payment_support}\n"
                 + ("Продажи пока не открыты." if not settings.pro_subscriptions_enabled else
                    "Нажимая «Оформить», ты соглашаешься с условиями /terms."))
     return text, _pro_keyboard(sub, settings.pro_subscriptions_enabled, active)
@@ -226,7 +226,7 @@ async def pro_info(message: types.Message):
     if not message.from_user or message.chat.type != "private":
         return
     text, keyboard = await _show_pro(message.bot, message.from_user.id)
-    await message.answer(text.replace("\\\\n", "\\n"), reply_markup=keyboard, parse_mode="HTML")
+    await message.answer(text.replace("\\\n", "\n"), reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "pro:show")
@@ -236,7 +236,7 @@ async def pro_show(callback: types.CallbackQuery):
         return
     text, keyboard = await _show_pro(callback.bot, callback.from_user.id)
     await callback.answer()
-    await callback.message.answer(text.replace("\\\\n", "\\n"), reply_markup=keyboard, parse_mode="HTML")
+    await callback.message.answer(text.replace("\\\n", "\n"), reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "pro:buy")
@@ -269,10 +269,10 @@ async def pro_buy(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="⬅️ Мой PRO", callback_data="pro:show")],
     ])
     await callback.message.answer(
-        f"👑 <b>Подписка ReCut PRO</b>\\n\\n"
-        f"{sub.stars} ⭐ каждые 30 дней, если не отменить продление.\\n"
-        "Отмена: /pro, доступ сохраняется до конца оплаченного периода.\\n"
-        f"Поддержка: {settings.payment_support}\\n"
+        f"👑 <b>Подписка ReCut PRO</b>\n\n"
+        f"{sub.stars} ⭐ каждые 30 дней, если не отменить продление.\n"
+        "Отмена: /pro, доступ сохраняется до конца оплаченного периода.\n"
+        f"Поддержка: {settings.payment_support}\n"
         "Условия: /terms", reply_markup=keyboard, parse_mode="HTML")
 
 
@@ -312,7 +312,7 @@ async def _switch_renewal(callback: types.CallbackQuery, canceled: bool):
         return
     await callback.answer("Автопродление отключено." if canceled else "Автопродление включено.")
     text, keyboard = await _show_pro(callback.bot, callback.from_user.id)
-    await callback.message.answer(text.replace("\\\\n", "\\n"), reply_markup=keyboard, parse_mode="HTML")
+    await callback.message.answer(text.replace("\\\n", "\n"), reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "pro:confirm_cancel")
