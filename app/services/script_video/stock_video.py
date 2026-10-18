@@ -279,6 +279,10 @@ class WikimediaCommonsStockVideoProvider:
                             error_type=type(exc).__name__,
                             status_code=getattr(getattr(exc, "response", None), "status_code", None),
                         )
+                        # A global block or rate limit affects the whole provider;
+                        # trying additional CDN URLs wastes time and amplifies it.
+                        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (403, 429):
+                            break
                 return None
         except Exception as exc:
             logger.warning(
