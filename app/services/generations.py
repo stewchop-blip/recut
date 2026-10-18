@@ -17,10 +17,13 @@ class AllowanceRejected(ValueError):
 
 async def free_remaining(session, user_id, settings):
     day = datetime.now(timezone.utc).date().isoformat()
+    from app.services.subscriptions import get_subscription, is_active
+    sub = await get_subscription(session, user_id)
+    quota = settings.pro_daily_generations if is_active(sub) else settings.daily_free_generations
     used = await session.scalar(select(func.count()).select_from(GenerationRun).where(
         GenerationRun.telegram_user_id == user_id, GenerationRun.day == day,
         GenerationRun.uses_credit.is_(False), GenerationRun.status.in_(['reserved', 'completed'])))
-    return max(0, settings.daily_free_generations - int(used or 0))
+    return max(0, quota - int(used or 0))
 
 
 async def reserve(session, user_id, request_id, settings):
