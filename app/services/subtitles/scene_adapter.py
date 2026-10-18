@@ -129,7 +129,7 @@ class SceneSubtitleBuilder(SubtitleBuilder):
             return SubtitleBuildResult(phrases=(), output_path="", line_count=0)
 
         def normalized(word: str) -> str:
-            return re.sub(r"[^\\w]", "", word.casefold().replace("ё", "е"))
+            return re.sub(r"[^\w]", "", word.casefold().replace("ё", "е"))
 
         clean_source = [normalized(word) for word in source]
         clean_recognized = [normalized(word) for _, _, word in raw]
