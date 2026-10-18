@@ -80,26 +80,44 @@ class ScriptVideoAssembler:
         return path.suffix.lower() in cls.video_suffixes
 
     @staticmethod
-    def _motion_filter(beat: VisualBeat, index: int, duration: float) -> str:
+    def _motion_filter(
+        beat: VisualBeat,
+        index: int,
+        duration: float,
+        *,
+        start_frame: int = 0,
+        total_frames: int | None = None,
+        continuous_motion: str | None = None,
+    ) -> str:
+        """Animate a whole run of identical stills without restarting the zoom.
+
+        A visual plan can reuse an AI frame for two or three neighbouring
+        scenes. Those scenes are rendered separately, but the animation must
+        retain its exact camera position at the cut. The frame offset is based
+        on encoded frame counts rather than floating point seconds.
+        """
         frames = max(2, int(round(duration * ScriptVideoAssembler.fps)))
-        progress = f"min(on/{frames},1)"
-        zoom_in = f"min(1+0.06*{progress},1.06)"
-        zoom_out = f"max(1.06-0.06*{progress},1)"
-        if beat.motion == "zoom_out":
-            zoom = zoom_out
-        elif beat.motion in {"pan_left", "pan_right"}:
-            zoom = "1.06"
+        run_frames = max(frames, total_frames or frames)
+        # Use one progress function for an entire repeated-image run.
+        progress = f"min(max((on+{max(0, start_frame)})/{run_frames},0),1)"
+        # Easing is continuous at every beat boundary and slows at the ends.
+        eased = f"({progress})*({progress})*(3-2*({progress}))"
+        motion = continuous_motion or beat.motion
+        if motion == "static":
+            zoom = "1"
+        elif motion == "zoom_out":
+            zoom = f"max(1.045-0.045*({eased}),1)"
+        elif motion in {"pan_left", "pan_right"}:
+            zoom = "1.045"
         else:
-            zoom = zoom_in
-        if beat.motion == "pan_left":
-            x = f"(iw-iw/zoom)*(0.5-0.3*{progress})"
-            y = "ih/2-(ih/zoom/2)"
-        elif beat.motion == "pan_right":
-            x = f"(iw-iw/zoom)*(0.2+0.3*{progress})"
-            y = "ih/2-(ih/zoom/2)"
+            zoom = f"min(1+0.045*({eased}),1.045)"
+        if motion == "pan_left":
+            x = f"(iw-iw/zoom)*(0.72-0.44*({eased}))"
+        elif motion == "pan_right":
+            x = f"(iw-iw/zoom)*(0.28+0.44*({eased}))"
         else:
             x = "iw/2-(iw/zoom/2)"
-            y = "ih/2-(ih/zoom/2)"
+        y = "ih/2-(ih/zoom/2)"
         return (
             f"[{index}:v]scale={ScriptVideoAssembler.width}:{ScriptVideoAssembler.height}:"
             f"force_original_aspect_ratio=increase,crop={ScriptVideoAssembler.width}:{ScriptVideoAssembler.height},"
@@ -108,6 +126,40 @@ class ScriptVideoAssembler:
             f"trim=duration={duration:.4f},fps={ScriptVideoAssembler.fps},"
             f"settb=1/{ScriptVideoAssembler.fps},setpts=N,setsar=1,format=yuv420p[v{index}]"
         )
+
+    @classmethod
+    def _still_motion_windows(
+        cls,
+        beats: list[VisualBeat],
+        assets: list[Path],
+        durations: list[float],
+    ) -> list[tuple[int, int, str]]:
+        """Give consecutive beats using the same still a shared camera path."""
+        windows: list[tuple[int, int, str]] = [
+            (0, max(2, round(duration * cls.fps)), beat.motion)
+            for beat, duration in zip(beats, durations)
+        ]
+        cursor = 0
+        while cursor < len(beats):
+            asset = assets[beats[cursor].image_index]
+            if cls._is_video_asset(asset):
+                cursor += 1
+                continue
+            stop = cursor + 1
+            while (
+                stop < len(beats)
+                and assets[beats[stop].image_index] == asset
+            ):
+                stop += 1
+            lengths = [max(2, round(durations[i] * cls.fps)) for i in range(cursor, stop)]
+            full_length = sum(lengths)
+            offset = 0
+            motion = beats[cursor].motion
+            for idx, length in zip(range(cursor, stop), lengths):
+                windows[idx] = (offset, full_length, motion)
+                offset += length
+            cursor = stop
+        return windows
 
     @classmethod
     def _video_filter(cls, duration: float) -> str:
@@ -184,9 +236,21 @@ class ScriptVideoAssembler:
         image_path: Path,
         duration: float,
         output_path: Path,
+        *,
+        start_frame: int = 0,
+        total_frames: int | None = None,
+        continuous_motion: str | None = None,
     ) -> None:
         graph_path = output_path.with_suffix(".filter.txt")
-        graph_path.write_text(self._motion_filter(beat, 0, duration), encoding="utf-8")
+        graph_path.write_text(
+            self._motion_filter(
+                beat, 0, duration,
+                start_frame=start_frame,
+                total_frames=total_frames,
+                continuous_motion=continuous_motion,
+            ),
+            encoding="utf-8",
+        )
         command = [
             _find_ffmpeg_bin(), "-y", "-v", "error", "-loop", "1", "-framerate",
             str(self.fps), "-t", f"{duration:.4f}", "-i", str(image_path),
@@ -230,11 +294,21 @@ class ScriptVideoAssembler:
         duration: float,
         output_path: Path,
         beat_index: int,
+        *,
+        still_window: tuple[int, int, str] | None = None,
     ) -> None:
         if self._is_video_asset(asset_path):
             await self._render_video_beat(asset_path, duration, output_path, beat_index)
         else:
-            await self._render_image_beat(beat, asset_path, duration, output_path)
+            frame, frames, motion = still_window or (
+                0, max(2, round(duration * self.fps)), beat.motion
+            )
+            await self._render_image_beat(
+                beat, asset_path, duration, output_path,
+                start_frame=frame,
+                total_frames=frames,
+                continuous_motion=motion,
+            )
 
     async def assemble(
         self,
@@ -259,6 +333,9 @@ class ScriptVideoAssembler:
             audio_duration = await self.audio_duration(Path(audio_path))
             beats = TimelineCompiler().compile(plan, len(asset_paths), audio_duration)
             beat_durations = [beat.duration for beat in beats]
+            # Image indices may differ while resolving to the same shared file.
+            # A single camera path across that run removes zoom jumps at cuts.
+            still_windows = self._still_motion_windows(beats, asset_paths, beat_durations)
             clip_paths: list[Path] = []
             for index, beat in enumerate(beats):
                 clip_path = temp_dir / f"beat-{index:03d}.mp4"
@@ -268,6 +345,7 @@ class ScriptVideoAssembler:
                     beat_durations[index],
                     clip_path,
                     index,
+                    still_window=still_windows[index],
                 )
                 clip_paths.append(clip_path)
             filter_graph = self._filter_graph(beats, beat_durations)
