@@ -254,6 +254,27 @@ async def handle_idea(message: Message, bot=None) -> bool:
         if user_settings:
             from app.services.appearance import is_premium as has_premium
             is_premium = has_premium(user_settings)
+        from app.services.subscriptions import get_subscription, is_active, aware
+        pro_sub = await get_subscription(session, user_id)
+        paid_pro = is_active(pro_sub)
+        is_premium = is_premium or paid_pro
+        if paid_pro and not is_unlimited_tester:
+            # Cap each paid Telegram period. Count successful renders, not failures.
+            completed_pro = await session.scalar(
+                select(func.count(Job.id)).where(
+                    Job.telegram_user_id == user_id,
+                    Job.source_filename == "script-video",
+                    Job.status == JobStatus.COMPLETED,
+                    Job.created_at >= aware(pro_sub.period_start),
+                    Job.created_at < aware(pro_sub.expires_at),
+                )
+            ) or 0
+            if completed_pro >= settings.pro_ai_videos_per_period:
+                await message.answer(
+                    "Лимит AI-роликов по PRO на этот период исчерпан. "
+                    "Посмотри дату следующего периода: /pro"
+                )
+                return True
         if settings.script_video_enable_limit and not is_premium and not is_unlimited_tester:
             cutoff = datetime.now(timezone.utc) - timedelta(days=7)
             completed = await session.scalar(
