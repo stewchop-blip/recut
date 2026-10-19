@@ -16,6 +16,10 @@ from app.core.logging import get_logger
 from app.services.media.ffmpeg import _find_ffmpeg_bin
 from app.services.script_video.image_generator import ImageGenerator
 from app.services.script_video.models import VideoPlan
+from app.services.script_video.visual_policy import (
+    narrative_plan_requires_visual_continuity,
+    stock_title_matches_query,
+)
 from app.services.script_video.stock_video import (
     CoverrStockVideoProvider,
     PexelsStockVideoProvider,
@@ -245,7 +249,9 @@ class HybridMediaResolver:
             return False
         return duration > 0.15 and width > 0 and height > 0
 
-    async def resolve(self, plan: VideoPlan, workdir: Path) -> HybridMediaResult:
+    async def resolve(
+        self, plan: VideoPlan, workdir: Path, *, user_idea: str = ""
+    ) -> HybridMediaResult:
         scene_count = len(plan.scenes)
         if scene_count < 1:
             raise RuntimeError("video plan has no scenes")
@@ -253,8 +259,18 @@ class HybridMediaResolver:
         paths: list[Path | None] = [None] * scene_count
         stock_assets: list[StockVideoAsset] = []
         used_stock_ids: set[str] = set()
+        narrative_mode = narrative_plan_requires_visual_continuity(user_idea, plan)
+        # Real stock clips are useful for explanatory videos, but a stock search
+        # cannot preserve characters, a specific family photo or a fictional
+        # reveal. Use capped AI storyboard keyframes in narrative mode.
+        logger.info(
+            "script_media_policy",
+            narrative_mode=narrative_mode,
+            stock_enabled=self.stock_enabled and not narrative_mode,
+            hard_ai_cap=self.max_ai_images,
+        )
 
-        if self.stock_enabled:
+        if self.stock_enabled and not narrative_mode:
             for index, scene in enumerate(plan.scenes):
                 if not scene.prefer_stock:
                     continue
@@ -266,6 +282,15 @@ class HybridMediaResolver:
                     used_ids=used_stock_ids,
                 )
                 if asset is None:
+                    continue
+                if not stock_title_matches_query(scene.stock_query, asset.title):
+                    logger.warning(
+                        "script_stock_rejected_irrelevant",
+                        provider=asset.provider,
+                        asset_id=asset.asset_id,
+                        scene_index=index,
+                    )
+                    asset.path.unlink(missing_ok=True)
                     continue
                 if asset.path.suffix.lower() not in SUPPORTED_STOCK_SUFFIXES:
                     logger.info(
@@ -354,7 +379,8 @@ class HybridMediaResolver:
             stock_videos=len(stock_assets),
             ai_images=len(ai_indices),
             reused_scenes=reused,
-            stock_enabled=self.stock_enabled,
+            stock_enabled=self.stock_enabled and not narrative_mode,
+            narrative_mode=narrative_mode,
             hard_ai_cap=self.max_ai_images,
         )
         return HybridMediaResult(

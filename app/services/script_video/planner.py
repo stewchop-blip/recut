@@ -10,6 +10,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.services.script_video.models import VideoPlan, VideoPlanSchema, from_schema
 from app.services.script_video.openrouter_client import OpenRouterClient
+from app.services.script_video.visual_policy import is_narrative_request
 
 logger = get_logger(__name__)
 
@@ -43,10 +44,13 @@ HYBRID VISUAL rules:
 - ReCut mixes free real stock video with a small number of AI keyframes. Decide which source fits each scene.
 - Set prefer_stock=true for generic real-world B-roll that stock libraries can plausibly contain: hands, streets, desks, phones, laptops, markets, driving, cooking, offices, nature, walking, objects in use, ordinary environments.
 - Set prefer_stock=false only for a very specific fictional/story detail, continuity, impossible coincidence, custom composition, or key reveal.
-- Across a normal 8-12 scene video, target roughly 65-80% prefer_stock=true.
+- CRITICAL: Fictional stories, mysteries and emotionally connected narratives require continuity. Set prefer_stock=false for every scene in these stories. Random real footage must NEVER stand in for the protagonist, family, a mysterious photo, a reveal or a specific house. This overrules stock percentage targets.
+- For non-fictional explainers ONLY, prefer real B-roll when generic and safe. No mandatory stock percentage.
 - stock_query describes only the searchable action/object, not camera jargon.
 - visual_prompt is the AI fallback and MUST be English. Describe one concrete photographic/cinematic 9:16 shot.
 - Avoid fake interface text, captions baked into images, logos, watermarks, crowds of faces, and generic stock-photo poses.
+- For fictional stories, keep the same protagonist, props, era, clothing and setting in visual_prompt throughout the story. A repeating film camera stays the same camera, not a different model every shot.
+- Make each key visual independently meaningful: establish place, show a real action, depict the crucial clue, deliver the final reveal. No unrelated cutaways, television broadcasts, embedded captions or stock news footage.
 - If the same AI character/object must recur, set reference_scene_id to that earlier scene id. Otherwise use an empty string.
 
 EDITING rules:
@@ -165,6 +169,12 @@ class ScriptPlanner:
     ) -> VideoPlan:
         target_words = max(35, round(target_duration * 2.1))
         target_scenes = min(12, max(8, round(target_duration / 4.0)))
+        narrative_mode = is_narrative_request(user_idea)
+        if narrative_mode:
+            # Four paid storyboard keyframes naturally cover ~two narrative
+            # beats each. Avoid asking for 10-12 unrelated visual moments that
+            # cannot be rendered consistently within the existing budget.
+            target_scenes = min(12, max(8, (target_words + 11) // 12))
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -175,7 +185,12 @@ class ScriptPlanner:
                     f"Language: {language}\n"
                     f"Target voiceover length: about {target_words} spoken words.\n"
                     f"Use exactly {target_scenes} distinct scenes/shots.\n"
-                    "Prefer free real stock footage for generic B-roll and reserve AI imagery for key story-specific shots."
+                    + (
+                        "This is a connected fictional story: keep every scene's prefer_stock=false. "
+                        "Reuse the same story world; write self-contained, consistent visuals."
+                        if narrative_mode else
+                        "For nonfiction, only prefer real stock when it can accurately show the narrated event."
+                    )
                 ),
             },
         ]
