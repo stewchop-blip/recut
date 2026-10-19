@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 20
     env:
       HYPERFRAMES_NO_UPDATE_CHECK: "1"
+      HYPERFRAMES_NO_TELEMETRY: "1"
+      DO_NOT_TRACK: "1"
       TELEGRAM_BOT_TOKEN: "123456:fake-test-token"
       OPENROUTER_API_KEY: "not-an-api-key"
       DATABASE_URL: "postgresql+asyncpg://fake:fake@localhost:5432/unused"
@@ -67,7 +69,7 @@ jobs:
           PY
       - name: Render real HyperFrames clip
         run: |
-          hyperframes render -c /tmp/hf-recut-smoke/index.html             --output /tmp/hf-recut-smoke/test.mp4 --fps 24             --workers 1 --low-memory-mode --no-browser-gpu             --no-best-effort --quality standard --quiet
+          hyperframes render /tmp/hf-recut-smoke -c index.html             --output /tmp/hf-recut-smoke/test.mp4 --fps 24             --workers 1 --low-memory-mode --no-browser-gpu             --no-best-effort --quality standard --quiet
           ffprobe -v error -show_entries stream=width,height:format=duration             -of json /tmp/hf-recut-smoke/test.mp4
       - name: Assert valid vertical MP4 with animated frames
         run: |
