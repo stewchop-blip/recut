@@ -180,7 +180,7 @@ class HyperframesGraphicRenderer:
             ),
         }
         cmd = [
-            self.binary, "render", "-c", str(html_path),
+            self.binary, "render", str(workdir), "-c", html_path.name,
             "--output", str(output_path), "--fps", "24",
             "--workers", "1", "--no-browser-gpu",
             "--low-memory-mode", "--no-best-effort", "--quiet",
