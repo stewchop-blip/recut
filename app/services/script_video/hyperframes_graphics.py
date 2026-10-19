@@ -116,7 +116,7 @@ class HyperframesGraphicRenderer:
             '@keyframes fill{from{transform:scaleX(0)}to{transform:scaleX(1)}}\n'
             '</style>\n</head>\n<body>\n'
             '<div id="scene" data-composition-id="recut-graphic" data-width="540" '
-            'data-height="960" data-fps="24" data-start="0" data-duration="'
+            'data-height="960" data-fps="24" data-no-timeline data-start="0" data-duration="'
             + duration_attr + '">\n'
             '<div class="grid"></div><div class="orb"></div>\n'
             '<div class="rail"></div><div class="heading">'
@@ -168,12 +168,21 @@ class HyperframesGraphicRenderer:
             "HYPERFRAMES_NO_UPDATE_CHECK": "1",
             "PRODUCER_LOW_MEMORY_MODE": "1",
             "NO_COLOR": "1",
+            # Use a system-installed Chromium from the optional image rather
+            # than a browser cache under a temporary HOME.
+            "PUPPETEER_EXECUTABLE_PATH": (
+                os.getenv("PUPPETEER_EXECUTABLE_PATH")
+                or shutil.which("chromium")
+                or shutil.which("chromium-browser")
+                or ""
+            ),
         }
         cmd = [
             self.binary, "render", "-c", str(html_path),
             "--output", str(output_path), "--fps", "24",
             "--workers", "1", "--no-browser-gpu",
             "--low-memory-mode", "--no-best-effort", "--quiet",
+            "--quality", "standard",
         ]
         try:
             proc = await asyncio.create_subprocess_exec(
