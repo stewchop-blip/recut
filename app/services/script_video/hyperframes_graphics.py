@@ -61,6 +61,28 @@ class HyperframesGraphicRenderer:
         )[:MAX_SCENES]
 
     @staticmethod
+    def _headline_parts(narration: str) -> tuple[str, str]:
+        """Split already-paid narration into readable, complete text blocks.
+
+        Preserve the exact words and order; do not call AI or paraphrase. Avoid
+        hanging a conjunction or preposition at the end of the large headline.
+        """
+        words = narration.split()
+        if len(words) < 4:
+            return " ".join(words), ""
+        split = max(3, min(len(words) - 2, round(len(words) * 0.55)))
+        hanging = {
+            "и", "а", "но", "или", "в", "во", "на", "с", "со", "к",
+            "по", "из", "от", "о", "об", "для", "без", "под",
+            "над", "при", "перед", "после", "через", "затем",
+        }
+        while split > 3 and words[split - 1].casefold().strip(".,:;!?") in hanging:
+            split -= 1
+        while split > 3 and len(" ".join(words[:split])) > 65:
+            split -= 1
+        return " ".join(words[:split]), " ".join(words[split:])
+
+    @staticmethod
     def composition_html(*, title: str, narration: str, duration: float) -> str:
         """Trusted code template with escaped text, no external fonts/scripts.
 
@@ -70,9 +92,9 @@ class HyperframesGraphicRenderer:
         duration = min(MAX_DURATION, max(1.0, float(duration)))
         title_text = html.escape(" ".join(title.split())[:48], quote=True)
         # Only use existing narration, no factual claims or hallucinated stats.
-        words = narration.split()
-        lead_text = html.escape(" ".join(words[:7])[:76], quote=True)
-        tail_text = html.escape(" ".join(words[7:])[:94], quote=True)
+        lead, tail = HyperframesGraphicRenderer._headline_parts(narration)
+        lead_text = html.escape(lead[:76], quote=True)
+        tail_text = html.escape(tail[:94], quote=True)
         duration_attr = f"{duration:.3f}"
         return (
             '<!doctype html>\n<html lang="ru">\n<head>\n'
