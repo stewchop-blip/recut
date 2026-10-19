@@ -23,6 +23,25 @@ It reuses the narration already in the plan and makes no additional AI calls.
   restore the existing stock/image path, unchanged. No new interface buttons.
 - No changes to the current AI-image ceiling or financial preflight.
 
+## Verified container smoke, October 19, 2026
+
+The separate GitHub Actions Docker smoke used the optional image and ran a
+real ReCut Python adapter -> HyperFrames CLI -> Chromium -> MP4 render in a
+container limited to 1 GiB RAM and 2 CPUs, without network access or
+OpenRouter credentials. A short 2.4-second composition rendered successfully.
+
+- Render wall time: 4.29 seconds on the CI machine.
+- Approximate peak RSS of Python and subprocess tree: 194.8 MiB.
+- Encoded MP4: 182,374 bytes; measured duration 2.417 seconds.
+- Full optional Docker image: 2,132,528,391 bytes (about 2.13 GB).
+- Paid AI/TTS API calls for graphic: none.
+- Browser override: HYPERFRAMES_BROWSER_PATH=/usr/bin/chromium.
+
+This is not a full production load test. Peak memory is a process-tree sample,
+not a guarantee of total host/cgroup memory, and simultaneous media tasks,
+Cloud CPU pricing, image storage and Railway limits may change operational
+cost. Do not change the existing plan or production Dockerfile automatically.
+
 ## Isolated smoke test
 
 Do not change the live Railway project's Dockerfile until RAM, CPU, image
