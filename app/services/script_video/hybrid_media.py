@@ -15,6 +15,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.services.media.ffmpeg import _find_ffmpeg_bin
 from app.services.script_video.image_generator import ImageGenerator
+from app.services.script_video.hyperframes_graphics import HyperframesGraphicRenderer
 from app.services.script_video.models import VideoPlan
 from app.services.script_video.visual_policy import (
     narrative_plan_requires_visual_continuity,
@@ -40,6 +41,7 @@ class HybridMediaResult:
     ai_images: int
     stock_videos: int
     reused_scenes: int
+    graphics_videos: int = 0
 
     @property
     def attribution_text(self) -> str:
@@ -287,9 +289,38 @@ class HybridMediaResolver:
             hard_ai_cap=self.max_ai_images,
         )
 
+        # HyperFrames is an OPTIONAL, local-only visual provider. It runs
+        # before any stock or paid image calls, so successful graphic beats
+        # replace assets that would otherwise consume AI budget. Narrative
+        # scenes are never passed to the graphic renderer.
+        graphics_count = 0
+        if not narrative_mode:
+            graphics = HyperframesGraphicRenderer()
+            if graphics.available:
+                for index in graphics.selected_indices(plan.scenes):
+                    scene = plan.scenes[index]
+                    render_path = await graphics.render_scene(
+                        title=plan.title,
+                        narration=scene.narration,
+                        duration=scene.duration_hint,
+                        workdir=workdir,
+                        index=index,
+                    )
+                    if render_path is None:
+                        continue
+                    if not await self._validate_stock_video(render_path):
+                        logger.warning(
+                            "script_hyperframes_video_rejected_probe",
+                            scene_index=index,
+                        )
+                        render_path.unlink(missing_ok=True)
+                        continue
+                    paths[index] = render_path
+                    graphics_count += 1
+
         if self.stock_enabled and not narrative_mode:
             for index, scene in enumerate(plan.scenes):
-                if not scene.prefer_stock:
+                if paths[index] is not None or not scene.prefer_stock:
                     continue
                 asset = await self.stock.fetch(
                     query=scene.stock_query or scene.visual_prompt[:80],
@@ -337,6 +368,7 @@ class HybridMediaResolver:
                 ai_images=0,
                 stock_videos=len(stock_assets),
                 reused_scenes=0,
+                graphics_videos=graphics_count,
             )
 
         ai_budget = self._ai_budget(len(unresolved))
@@ -424,6 +456,7 @@ class HybridMediaResolver:
             stock_enabled=self.stock_enabled and not narrative_mode,
             narrative_mode=narrative_mode,
             hard_ai_cap=self.max_ai_images,
+            graphics_videos=graphics_count,
         )
         return HybridMediaResult(
             paths=resolved,
@@ -431,4 +464,5 @@ class HybridMediaResolver:
             ai_images=len(ai_indices),
             stock_videos=len(stock_assets),
             reused_scenes=reused,
+            graphics_videos=graphics_count,
         )
