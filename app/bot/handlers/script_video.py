@@ -406,6 +406,7 @@ async def handle_idea(message: Message, bot=None) -> bool:
             job_id=job_id,
             ai_images=media.ai_images if media else 0,
             stock_videos=media.stock_videos if media else 0,
+            graphics_videos=media.graphics_videos if media else 0,
             reused_scenes=media.reused_scenes if media else 0,
             actual_cost_usd=tracker.actual_cost_usd,
             actual_cost_breakdown=tracker.actual_costs,

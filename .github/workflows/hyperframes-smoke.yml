@@ -1,0 +1,129 @@
+name: HyperFrames isolated Linux smoke
+
+on:
+  pull_request:
+    paths:
+      - "app/services/script_video/hyperframes_graphics.py"
+      - "app/services/script_video/hybrid_media.py"
+      - "tests/test_script_video_hyperframes.py"
+      - "Dockerfile.hyperframes"
+      - ".github/workflows/hyperframes-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HYPERFRAMES_NO_UPDATE_CHECK: "1"
+      HYPERFRAMES_NO_TELEMETRY: "1"
+      DO_NOT_TRACK: "1"
+      TELEGRAM_BOT_TOKEN: "123456:fake-test-token"
+      OPENROUTER_API_KEY: "not-an-api-key"
+      DATABASE_URL: "postgresql+asyncpg://fake:fake@localhost:5432/unused"
+      PRODUCER_LOW_MEMORY_MODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up local renderer and browser
+        run: |
+          npm install --no-audit --no-fund -g hyperframes@0.8.174
+          python -m pip install structlog pydantic pydantic-settings python-dotenv
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          command -v hyperframes
+          CHROME="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true)"
+          if [ -z "$CHROME" ]; then
+            sudo apt-get install -y -qq chromium
+            CHROME="$(command -v chromium)"
+          fi
+          "$CHROME" --version
+          echo "PUPPETEER_EXECUTABLE_PATH=$CHROME" >> "$GITHUB_ENV"
+      - name: Generate fixed safe ReCut HTML
+        run: |
+          mkdir -p /tmp/hf-recut-smoke
+          python - <<'PY'
+          from pathlib import Path
+          import importlib.util
+          spec = importlib.util.spec_from_file_location(
+              "hf_pilot", "app/services/script_video/hyperframes_graphics.py"
+          )
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          Path("/tmp/hf-recut-smoke/index.html").write_text(
+              mod.HyperframesGraphicRenderer.composition_html(
+                  title="Причины прокрастинации",
+                  narration="Почему мы откладываем даже важные дела и как это изменить?",
+                  duration=2.4,
+              ),
+              encoding="utf-8",
+          )
+          PY
+      - name: Render real HyperFrames clip
+        run: |
+          hyperframes render /tmp/hf-recut-smoke -c index.html             --output /tmp/hf-recut-smoke/test.mp4 --fps 24             --workers 1 --low-memory-mode --no-browser-gpu             --no-best-effort --quality standard --quiet
+          ffprobe -v error -show_entries stream=width,height:format=duration             -of json /tmp/hf-recut-smoke/test.mp4
+      - name: Render through the actual ReCut Python adapter
+        run: |
+          python - <<'PY'
+          import asyncio, importlib.util
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location(
+              "hf_pilot", "app/services/script_video/hyperframes_graphics.py"
+          )
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          async def run():
+              renderer = module.HyperframesGraphicRenderer(enabled=True)
+              assert renderer.available
+              output = await renderer.render_scene(
+                  title="Решение за три шага",
+                  narration="Начните с небольшого дела, затем переходите к следующему.",
+                  duration=2.4,
+                  workdir=Path("/tmp/hf-recut-smoke"),
+                  index=8,
+              )
+              assert output is not None and output.stat().st_size > 1024
+              print("Adapter rendered:", output, output.stat().st_size)
+          asyncio.run(run())
+          PY
+      - name: Assert valid vertical MP4 with animated frames
+        run: |
+          python - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          f = Path("/tmp/hf-recut-smoke/test.mp4")
+          assert f.is_file() and f.stat().st_size > 1024
+          data = json.loads(subprocess.check_output([
+              "ffprobe", "-v", "error", "-show_entries",
+              "stream=width,height:format=duration", "-of", "json", str(f)
+          ]))
+          stream = data["streams"][0]
+          assert int(stream["width"]) == 540
+          assert int(stream["height"]) == 960
+          assert 2.1 <= float(data["format"]["duration"]) <= 2.7
+          shots = []
+          for at in ["0.10", "1.90"]:
+              shots.append(subprocess.check_output([
+                  "ffmpeg", "-v", "error", "-ss", at, "-i", str(f),
+                  "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"
+              ]))
+          assert shots[0] != shots[1], "Motion graphic rendered static frames"
+          PY
+      - name: Retain private short video for visual review
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: recut-hyperframes-local-smoke
+          path: |
+            /tmp/hf-recut-smoke/test.mp4
+            /tmp/hf-recut-smoke/hyperframes-08.mp4
+          retention-days: 3
