@@ -460,3 +460,93 @@ def test_reused_still_shares_one_zoom_trajectory():
     assert "(on+0)/60" not in second
     assert "pan_right" not in second
     assert windows[2][0] == 0
+
+
+def test_visual_relevance_rejects_unrelated_found_footage():
+    from app.services.script_video.visual_policy import (
+        stock_title_matches_query,
+        is_narrative_request,
+    )
+    assert is_narrative_request("Придумай трогательную историю о старом фотоаппарате")
+    assert is_narrative_request("A short mystery story about a lost film camera")
+    assert not is_narrative_request("Почему люди откладывают важные дела")
+    assert stock_title_matches_query(
+        "old film camera", "Old film camera in vintage flea market"
+    )
+    assert stock_title_matches_query(
+        "hands cooking pasta", "Close-up of hands cooking pasta"
+    )
+    assert not stock_title_matches_query(
+        "old film camera", "ISS Mission Manager speaks about rocket launch"
+    )
+    assert not stock_title_matches_query(
+        "family birthday party", "Cake TV advertising commercial with logo"
+    )
+    assert not stock_title_matches_query("family birthday party", "")
+    assert not stock_title_matches_query("house", "Unrelated television documentary")
+
+
+def test_stock_provider_descriptions_and_story_safety():
+    from app.services.script_video.stock_video import PexelsStockVideoProvider
+    from app.services.script_video.visual_policy import (
+        narrative_plan_requires_visual_continuity,
+    )
+    assert PexelsStockVideoProvider._description({
+        "url": "https://www.pexels.com/video/hands-developing-old-film-1234567/"
+    }) == "hands developing old film"
+    assert PexelsStockVideoProvider._description({
+        "url": "https://www.pexels.com/video/1234567/"
+    }) == ""
+    plot = SimpleNamespace(scenes=[
+        SimpleNamespace(reference_scene_id="s1"),
+        SimpleNamespace(reference_scene_id="s1"),
+    ])
+    assert narrative_plan_requires_visual_continuity("Про камеру", plot)
+    assert narrative_plan_requires_visual_continuity("Сочини мистическую историю", SimpleNamespace(scenes=[]))
+    assert not narrative_plan_requires_visual_continuity(
+        "Как научиться готовить", SimpleNamespace(scenes=[])
+    )
+
+
+@pytest.mark.asyncio
+async def test_fictional_story_never_searches_stock_even_if_planner_prefers_it(
+    tmp_path, monkeypatch
+):
+    """No unrelated news/cooking footage may enter a continuity-critical story."""
+    import base64
+    from app.services.script_video.image_generator import ImageGenerator
+    from app.services.script_video.models import Scene, VideoPlan
+
+    class ForbiddenStock:
+        async def fetch(self, **kwargs):
+            raise AssertionError("A fictional story must never search public stock")
+
+    async def fake_images(self, prompts, **kwargs):
+        return ["data:image/png;base64," + base64.b64encode(b"test-frame").decode()] * len(prompts)
+
+    monkeypatch.setattr(ImageGenerator, "generate", fake_images)
+    scenes = tuple(Scene(
+        id=f"s{i}", narration=f"Сцена {i}.", visual_prompt="Cinematic film camera",
+        stock_query="old film camera", prefer_stock=True, duration_hint=4,
+        importance=3, motion_type="zoom_in", transition="cut"
+    ) for i in range(8))
+    plan = VideoPlan(
+        title="Камера с секретом", language="ru", target_duration=40,
+        narration=" ".join(s.narration for s in scenes), visual_style="Cinematic",
+        scenes=scenes,
+    )
+    resolver = object.__new__(HybridMediaResolver)
+    resolver.stock = ForbiddenStock()
+    resolver.stock_enabled = True
+    resolver.image_model = "recraft/recraft-v4.1-flash"
+    resolver.fallback_image_model = ""
+    resolver.max_ai_images = 4
+    resolver.cost_tracker = None
+    resolver.image_concurrency = 1
+    result = await resolver.resolve(
+        plan, tmp_path, user_idea="Сделай мистическую историю про старую камеру"
+    )
+    assert result.stock_videos == 0
+    assert result.ai_images == 4
+    assert len(result.paths) == 8
+    assert result.reused_scenes == 4
