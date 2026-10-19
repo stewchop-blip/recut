@@ -340,7 +340,12 @@ class HybridMediaResolver:
             )
 
         ai_budget = self._ai_budget(len(unresolved))
-        ai_indices = self._select_ai_indices(plan, unresolved, ai_budget)
+        # With only one affordable image, begin at the start of a story.
+        # Using the most important *ending* frame would spoil the reveal.
+        if narrative_mode and ai_budget == 1:
+            ai_indices = [unresolved[0]]
+        else:
+            ai_indices = self._select_ai_indices(plan, unresolved, ai_budget)
         logger.info(
             "script_ai_keyframe_selection",
             unresolved=unresolved,
@@ -348,7 +353,23 @@ class HybridMediaResolver:
             budget=ai_budget,
         )
 
-        prompts = [plan.scenes[index].visual_prompt for index in ai_indices]
+        if narrative_mode:
+            # All paid anchor images must share one small, explicit style bible.
+            # They are generated independently, so never assume image-to-image
+            # identity preservation or quietly buy extra reference frames.
+            style = plan.visual_style.strip()[:260]
+            prompts = [
+                (
+                    f"9:16 still from one coherent short film. "
+                    f"Shared visual language: {style}. "
+                    f"Maintain recurring props, period and character appearance. "
+                    f"Do not include headlines, lettering, TV overlays or logos. "
+                    f"Scene: {plan.scenes[index].visual_prompt}"
+                )
+                for index in ai_indices
+            ]
+        else:
+            prompts = [plan.scenes[index].visual_prompt for index in ai_indices]
         if prompts:
             generated = await ImageGenerator(
                 model=self.image_model,
