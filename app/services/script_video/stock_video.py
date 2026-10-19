@@ -312,6 +312,8 @@ class PexelsStockVideoProvider:
         # Pexels generally has no video title. Use its public URL slug,
         # and reject opaque numeric slugs.
         slug = Path(urlparse(str(video.get("url") or "")).path).name
+        if not slug or slug.isdigit():
+            return ""
         return re.sub(r"-[0-9]+$", "", slug).replace("-", " ").strip()
 
     def __init__(
