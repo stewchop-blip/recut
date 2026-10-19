@@ -267,7 +267,6 @@ class HybridMediaResolver:
             "script_media_policy",
             narrative_mode=narrative_mode,
             stock_enabled=self.stock_enabled and not narrative_mode,
-            narrative_mode=narrative_mode,
             hard_ai_cap=self.max_ai_images,
         )
 
@@ -380,7 +379,8 @@ class HybridMediaResolver:
             stock_videos=len(stock_assets),
             ai_images=len(ai_indices),
             reused_scenes=reused,
-            stock_enabled=self.stock_enabled,
+            stock_enabled=self.stock_enabled and not narrative_mode,
+            narrative_mode=narrative_mode,
             hard_ai_cap=self.max_ai_images,
         )
         return HybridMediaResult(
