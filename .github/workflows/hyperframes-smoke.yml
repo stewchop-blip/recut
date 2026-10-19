@@ -31,7 +31,7 @@ jobs:
       - name: Set up local renderer and browser
         run: |
           npm install --no-audit --no-fund -g hyperframes@0.8.174
-          python -m pip install structlog
+          python -m pip install structlog pydantic pydantic-settings python-dotenv
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg
           command -v hyperframes
