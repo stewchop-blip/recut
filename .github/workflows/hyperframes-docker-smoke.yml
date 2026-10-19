@@ -1,0 +1,79 @@
+name: HyperFrames Docker resource smoke
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile.hyperframes"
+      - "app/services/script_video/hyperframes_graphics.py"
+      - ".github/workflows/hyperframes-docker-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  container-render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the exact optional ReCut pilot image
+        run: docker build --pull -f Dockerfile.hyperframes -t recut-hyperframes-smoke .
+      - name: Record image size
+        run: |
+          docker image inspect recut-hyperframes-smoke \
+            --format 'image_bytes={{.Size}} image_id={{.Id}}'
+      - name: Render in restricted offline container with live RAM measurements
+        run: |
+          docker run --rm -i --network none --memory 1024m --cpus 2 \
+            --pids-limit 160 --shm-size 256m \
+            -e TELEGRAM_BOT_TOKEN='123456:fake-test-token' \
+            -e OPENROUTER_API_KEY='not-an-api-key' \
+            -e DATABASE_URL='postgresql+asyncpg://fake:fake@localhost:5432/unused' \
+            -e SCRIPT_VIDEO_HYPERFRAMES_ENABLED='true' \
+            -e HYPERFRAMES_NO_TELEMETRY=1 -e DO_NOT_TRACK=1 \
+            --entrypoint python recut-hyperframes-smoke - <<'PY'
+          import asyncio
+          import json
+          import time
+          from pathlib import Path
+          import psutil
+          from app.services.script_video.hyperframes_graphics import HyperframesGraphicRenderer
+          from app.services.script_video.assembly import ScriptVideoAssembler
+
+          async def run():
+              workdir = Path('/tmp/recut-hyperframes-container-smoke')
+              workdir.mkdir(parents=True, exist_ok=True)
+              renderer = HyperframesGraphicRenderer(enabled=True)
+              assert renderer.available, 'CLI unavailable in optional Docker image'
+              parent = psutil.Process()
+              started = time.monotonic()
+              job = asyncio.create_task(renderer.render_scene(
+                  title='Почему откладываем дела',
+                  narration='Мы откладываем важные задачи, когда кажется, что начать слишком трудно.',
+                  duration=2.4, workdir=workdir, index=0,
+              ))
+              peak_rss = 0
+              while not job.done():
+                  try:
+                      related = [parent] + parent.children(recursive=True)
+                      rss = sum(p.memory_info().rss for p in related if p.is_running())
+                      peak_rss = max(rss, rss)
+                  except psutil.Error:
+                      pass
+                  await asyncio.sleep(0.2)
+              result = await job
+              if result is None:
+                  raise RuntimeError('Real HyperFrames adapter returned fallback in pilot image')
+              duration = await ScriptVideoAssembler.audio_duration(result)
+              elapsed = time.monotonic() - started
+              assert 2.0 < duration < 2.9, duration
+              assert result.stat().st_size > 1024
+              print(json.dumps({
+                  'render_elapsed_seconds': round(elapsed, 2),
+                  'approx_process_tree_peak_rss_mb': round(peak_rss / 1048576, 1),
+                  'render_bytes': result.stat().st_size,
+                  'video_duration': round(duration, 3),
+              }))
+          asyncio.run(run())
+          PY
