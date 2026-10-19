@@ -19,6 +19,9 @@ jobs:
     timeout-minutes: 20
     env:
       HYPERFRAMES_NO_UPDATE_CHECK: "1"
+      TELEGRAM_BOT_TOKEN: "123456:fake-test-token"
+      OPENROUTER_API_KEY: "not-an-api-key"
+      DATABASE_URL: "postgresql+asyncpg://fake:fake@localhost:5432/unused"
       PRODUCER_LOW_MEMORY_MODE: "1"
     steps:
       - uses: actions/checkout@v4
