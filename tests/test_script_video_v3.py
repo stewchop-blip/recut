@@ -550,3 +550,118 @@ async def test_fictional_story_never_searches_stock_even_if_planner_prefers_it(
     assert result.ai_images == 4
     assert len(result.paths) == 8
     assert result.reused_scenes == 4
+
+
+def test_story_reuse_never_previews_future_keyframes(tmp_path):
+    """A frame illustrating a later reveal must not appear before its narration."""
+    from pathlib import Path
+
+    path0 = tmp_path / "market-camera.png"
+    path2 = tmp_path / "found-film.png"
+    path5 = tmp_path / "final-house-reveal.png"
+    paths = [path0, None, path2, None, None, path5, None]
+    assert HybridMediaResolver._chronological_path(paths, 1) == path0
+    assert HybridMediaResolver._chronological_path(paths, 3) == path2
+    assert HybridMediaResolver._chronological_path(paths, 4) == path2
+    assert HybridMediaResolver._nearest_path(paths, 4) == path5
+    assert HybridMediaResolver._chronological_path([None, None, path2], 0) == path2
+
+
+@pytest.mark.asyncio
+async def test_narrative_asset_mapping_preserves_reveal_timing(tmp_path, monkeypatch):
+    """Four paid frames cover a story in order without misleading free stock."""
+    import base64
+    from app.services.script_video.image_generator import ImageGenerator
+    from app.services.script_video.models import Scene, VideoPlan
+
+    prompts_seen = []
+
+    async def fake_images(self, prompts, **kwargs):
+        prompts_seen.extend(prompts)
+        return [
+            "data:image/png;base64," + base64.b64encode(
+                ("image" + str(i)).encode()
+            ).decode()
+            for i in range(len(prompts))
+        ]
+
+    monkeypatch.setattr(ImageGenerator, "generate", fake_images)
+    scenes = tuple(
+        Scene(
+            id=f"s{i}", narration=f"Этап {i} истории.",
+            visual_prompt=f"Cinematic beat {i} old camera story",
+            stock_query="old camera", prefer_stock=False,
+            duration_hint=4, importance=3, motion_type="zoom_in",
+            transition="cut"
+        )
+        for i in range(8)
+    )
+    plan = VideoPlan(
+        title="История старой камеры", language="ru", target_duration=40,
+        narration=" ".join(s.narration for s in scenes),
+        visual_style="Warm 1970s film-grain color, same protagonist and old camera",
+        scenes=scenes,
+    )
+    resolver = object.__new__(HybridMediaResolver)
+    resolver.stock_enabled = False
+    resolver.image_model = "recraft/recraft-v4.1-flash"
+    resolver.fallback_image_model = ""
+    resolver.max_ai_images = 4
+    resolver.cost_tracker = None
+    resolver.image_concurrency = 1
+
+    result = await resolver.resolve(
+        plan, tmp_path, user_idea="Создай мистическую историю с находкой на пленке"
+    )
+    assert result.ai_images == 4
+    assert result.reused_scenes == 4
+    assert len(result.paths) == 8
+    # Selection anchors at scenes 0, 2, 5 and 7. Scene 4 must show
+    # the previously generated event, never the not-yet-told house reveal.
+    assert result.paths[4] == result.paths[2]
+    assert result.paths[4] != result.paths[5]
+    assert result.paths[1] == result.paths[0]
+    assert len(prompts_seen) == 4
+    assert all("Shared visual language: Warm 1970s" in x for x in prompts_seen)
+    assert all("Do not include headlines" in x for x in prompts_seen)
+
+
+@pytest.mark.asyncio
+async def test_one_image_narrative_budget_starts_from_first_scene(tmp_path, monkeypatch):
+    import base64
+    from app.services.script_video.image_generator import ImageGenerator
+    from app.services.script_video.models import Scene, VideoPlan
+
+    seen = []
+
+    async def fake_images(self, prompts, **kwargs):
+        seen.extend(prompts)
+        return ["data:image/png;base64," + base64.b64encode(b"one").decode()]
+
+    monkeypatch.setattr(ImageGenerator, "generate", fake_images)
+    scenes = tuple(
+        Scene(
+            id=f"s{i}", narration="Короткая фраза.", visual_prompt=f"story event {i}",
+            stock_query="", prefer_stock=False, duration_hint=3,
+            importance=5 if i == 5 else 1, motion_type="static",
+            transition="cut",
+        )
+        for i in range(6)
+    )
+    plan = VideoPlan(
+        title="История", language="ru", target_duration=25,
+        narration=" ".join(x.narration for x in scenes),
+        visual_style="Cinematic, naturalistic", scenes=scenes,
+    )
+    resolver = object.__new__(HybridMediaResolver)
+    resolver.stock_enabled = False
+    resolver.image_model = "recraft/recraft-v4.1-flash"
+    resolver.fallback_image_model = ""
+    resolver.max_ai_images = 1
+    resolver.cost_tracker = None
+    resolver.image_concurrency = 1
+    out = await resolver.resolve(plan, tmp_path, user_idea="Трогательная история")
+    assert out.ai_images == 1
+    assert all(path == out.paths[0] for path in out.paths)
+    assert "story event 0" in seen[0]
+    assert "story event 5" not in seen[0]
