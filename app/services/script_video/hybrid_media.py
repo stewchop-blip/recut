@@ -213,6 +213,23 @@ class HybridMediaResolver:
         return paths[nearest]
 
     @staticmethod
+    def _chronological_path(paths: list[Path | None], index: int) -> Path | None:
+        """Never show a future story reveal before the corresponding narration.
+
+        On narrative timelines, an unresolved scene inherits the most recent
+        earlier storyboard frame. The nearest absolute frame could be an image
+        depicting a future reveal and turn the story into a visual spoiler.
+        A future frame is only a last resort if the story has no earlier asset.
+        """
+        for candidate in range(index - 1, -1, -1):
+            if paths[candidate] is not None:
+                return paths[candidate]
+        for candidate in range(index + 1, len(paths)):
+            if paths[candidate] is not None:
+                return paths[candidate]
+        return None
+
+    @staticmethod
     async def _validate_stock_video(path: Path) -> bool:
         ffmpeg = Path(_find_ffmpeg_bin())
         ffprobe = shutil.which("ffprobe") or str(ffmpeg.with_name("ffprobe"))
@@ -358,16 +375,20 @@ class HybridMediaResolver:
         for index, path in enumerate(paths):
             if path is not None:
                 continue
-            nearest = self._nearest_path(paths, index)
-            if nearest is None:
+            fallback = (
+                self._chronological_path(paths, index)
+                if narrative_mode else self._nearest_path(paths, index)
+            )
+            if fallback is None:
                 raise RuntimeError("hybrid media resolver produced no fallback asset")
-            paths[index] = nearest
+            paths[index] = fallback
             reused += 1
             logger.warning(
                 "script_media_reused_cost_guard",
                 scene_index=index,
-                source=nearest.name,
+                source=fallback.name,
                 max_ai_images=self.max_ai_images,
+                narrative_mode=narrative_mode,
             )
 
         resolved = tuple(path for path in paths if path is not None)
