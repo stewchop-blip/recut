@@ -71,6 +71,30 @@ jobs:
         run: |
           hyperframes render /tmp/hf-recut-smoke -c index.html             --output /tmp/hf-recut-smoke/test.mp4 --fps 24             --workers 1 --low-memory-mode --no-browser-gpu             --no-best-effort --quality standard --quiet
           ffprobe -v error -show_entries stream=width,height:format=duration             -of json /tmp/hf-recut-smoke/test.mp4
+      - name: Render through the actual ReCut Python adapter
+        run: |
+          python - <<'PY'
+          import asyncio, importlib.util
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location(
+              "hf_pilot", "app/services/script_video/hyperframes_graphics.py"
+          )
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          async def run():
+              renderer = module.HyperframesGraphicRenderer(enabled=True)
+              assert renderer.available
+              output = await renderer.render_scene(
+                  title="Решение за три шага",
+                  narration="Начните с небольшого дела, затем переходите к следующему.",
+                  duration=2.4,
+                  workdir=Path("/tmp/hf-recut-smoke"),
+                  index=8,
+              )
+              assert output is not None and output.stat().st_size > 1024
+              print("Adapter rendered:", output, output.stat().st_size)
+          asyncio.run(run())
+          PY
       - name: Assert valid vertical MP4 with animated frames
         run: |
           python - <<'PY'
@@ -99,5 +123,7 @@ jobs:
         if: success()
         with:
           name: recut-hyperframes-local-smoke
-          path: /tmp/hf-recut-smoke/test.mp4
+          path: |
+            /tmp/hf-recut-smoke/test.mp4
+            /tmp/hf-recut-smoke/hyperframes-08.mp4
           retention-days: 3
