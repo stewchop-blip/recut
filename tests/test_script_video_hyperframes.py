@@ -60,9 +60,11 @@ def test_hyperframes_text_is_html_escaped_and_no_external_script():
         duration=3.8,
     )
     assert '<script>alert' not in rendered
-    assert "onerror=" not in rendered.replace("&lt;", "")
+    assert "<img" not in rendered
+    assert "&lt;img" in rendered
     assert "&lt;script&gt;" in rendered
     assert "data-composition-id=" in rendered
+    assert "data-no-timeline" in rendered
     assert "data-duration=\"3.800\"" in rendered
     assert "https://" not in rendered
 
