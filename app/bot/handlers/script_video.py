@@ -338,7 +338,7 @@ async def handle_idea(message: Message, bot=None) -> bool:
                     cost_tracker=tracker,
                     max_ai_images=ai_budget,
                     max_stock_download_mb=max_stock_mb,
-                ).resolve(plan, workdir)
+                ).resolve(plan, workdir, user_idea=idea)
                 tracker.images_generated = media.ai_images
 
                 audio_path = workdir / "narration.mp3"
