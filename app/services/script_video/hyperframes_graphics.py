@@ -166,6 +166,8 @@ class HyperframesGraphicRenderer:
             "HOME": str(workdir),
             "LANG": "C.UTF-8",
             "HYPERFRAMES_NO_UPDATE_CHECK": "1",
+            "HYPERFRAMES_NO_TELEMETRY": "1",
+            "DO_NOT_TRACK": "1",
             "PRODUCER_LOW_MEMORY_MODE": "1",
             "NO_COLOR": "1",
             # Use a system-installed Chromium from the optional image rather
