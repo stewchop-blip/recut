@@ -172,8 +172,19 @@ class HyperframesGraphicRenderer:
             "NO_COLOR": "1",
             # Use a system-installed Chromium from the optional image rather
             # than a browser cache under a temporary HOME.
+            "HYPERFRAMES_NO_CAPTURE_DOTENV": "1",
+            # HyperFrames CLI has its own browser override and does not
+            # consistently honor Puppeteer's executable setting.
+            "HYPERFRAMES_BROWSER_PATH": (
+                os.getenv("HYPERFRAMES_BROWSER_PATH")
+                or os.getenv("PUPPETEER_EXECUTABLE_PATH")
+                or shutil.which("chromium")
+                or shutil.which("chromium-browser")
+                or ""
+            ),
             "PUPPETEER_EXECUTABLE_PATH": (
-                os.getenv("PUPPETEER_EXECUTABLE_PATH")
+                os.getenv("HYPERFRAMES_BROWSER_PATH")
+                or os.getenv("PUPPETEER_EXECUTABLE_PATH")
                 or shutil.which("chromium")
                 or shutil.which("chromium-browser")
                 or ""
