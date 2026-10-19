@@ -185,7 +185,7 @@ class ScriptPlanner:
                     f"Language: {language}\n"
                     f"Target voiceover length: about {target_words} spoken words.\n"
                     f"Use exactly {target_scenes} distinct scenes/shots.\n"
-                    (
+                    + (
                         "This is a connected fictional story: keep every scene's prefer_stock=false. "
                         "Reuse the same story world; write self-contained, consistent visuals."
                         if narrative_mode else
