@@ -9,6 +9,9 @@ import html
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
+
+from app.services.script_video.visual_policy import stock_title_matches_query
 from typing import Iterable, Protocol
 
 import httpx
@@ -26,6 +29,7 @@ class StockVideoAsset:
     creator_name: str
     creator_url: str
     asset_id: str
+    title: str = ""
 
     @property
     def unique_id(self) -> str:
@@ -238,6 +242,10 @@ class WikimediaCommonsStockVideoProvider:
                     video for video in videos
                     if f"wikimedia:{video.get('id')}" not in excluded
                 ]
+                candidates = [
+                    video for video in candidates
+                    if stock_title_matches_query(query, str(video.get("title") or ""))
+                ]
                 candidates.sort(key=lambda v: self._rank_video(v, target_seconds), reverse=True)
                 for video in candidates[:5]:
                     asset_id = str(video.get("id") or "")
@@ -260,6 +268,7 @@ class WikimediaCommonsStockVideoProvider:
                             creator_name=str(video.get("creator") or "Wikimedia Commons"),
                             creator_url="https://commons.wikimedia.org",
                             asset_id=asset_id,
+                            title=str(video.get("title") or ""),
                         )
                         logger.info(
                             "script_stock_video_ready",
@@ -297,6 +306,13 @@ class WikimediaCommonsStockVideoProvider:
 
 class PexelsStockVideoProvider:
     SEARCH_URL = "https://api.pexels.com/v1/videos/search"
+
+    @staticmethod
+    def _description(video: dict) -> str:
+        # Pexels generally has no video title. Use its public URL slug,
+        # and reject opaque numeric slugs.
+        slug = Path(urlparse(str(video.get("url") or "")).path).name
+        return re.sub(r"-[0-9]+$", "", slug).replace("-", " ").strip()
 
     def __init__(
         self,
@@ -384,6 +400,10 @@ class PexelsStockVideoProvider:
                     v for v in videos
                     if f"pexels:{v.get('id')}" not in excluded
                 ]
+                candidates = [
+                    video for video in candidates
+                    if stock_title_matches_query(query, self._description(video))
+                ]
                 candidates.sort(key=lambda v: self._rank_video(v, target_seconds), reverse=True)
                 for video in candidates[:4]:
                     asset_id = str(video.get("id") or "")
@@ -406,6 +426,7 @@ class PexelsStockVideoProvider:
                             creator_name=str(user.get("name") or "Pexels creator"),
                             creator_url=str(user.get("url") or "https://www.pexels.com"),
                             asset_id=asset_id,
+                            title=self._description(video),
                         )
                         logger.info(
                             "script_stock_video_ready",
@@ -517,6 +538,12 @@ class CoverrStockVideoProvider:
                     v for v in videos
                     if f"coverr:{v.get('id')}" not in excluded
                 ]
+                candidates = [
+                    video for video in candidates
+                    if stock_title_matches_query(
+                        query, str(video.get("title") or video.get("description") or "")
+                    )
+                ]
                 candidates.sort(key=lambda v: self._rank_video(v, target_seconds), reverse=True)
                 for video in candidates[:4]:
                     asset_id = str(video.get("id") or "")
@@ -539,6 +566,7 @@ class CoverrStockVideoProvider:
                             creator_name="Coverr",
                             creator_url="https://coverr.co",
                             asset_id=asset_id,
+                            title=str(video.get("title") or video.get("description") or ""),
                         )
                         logger.info(
                             "script_stock_video_ready",
