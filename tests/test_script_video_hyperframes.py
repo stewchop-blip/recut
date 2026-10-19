@@ -209,3 +209,13 @@ async def test_narratives_never_spawn_graphics(tmp_path, monkeypatch):
     assert media.graphics_videos == 0
     assert media.ai_images == 4
     assert len(media.paths) == 8
+
+
+def test_graphic_headline_split_preserves_words_and_readable_phrases():
+    narration = "Почему мы откладываем даже важные дела и как это изменить?"
+    lead, tail = HyperframesGraphicRenderer._headline_parts(narration)
+    assert lead == "Почему мы откладываем даже важные дела"
+    assert tail == "и как это изменить?"
+    assert lead + " " + tail == narration
+    assert not lead.endswith(" и")
+    assert HyperframesGraphicRenderer._headline_parts("Один два") == ("Один два", "")
