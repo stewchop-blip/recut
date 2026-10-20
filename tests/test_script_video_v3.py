@@ -1,6 +1,7 @@
 """Focused tests for Script Video Quality V3 hybrid media."""
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
 from types import SimpleNamespace
@@ -142,6 +143,105 @@ async def test_stock_probe_accepts_real_video(tmp_path):
         timeout=30,
     )
     assert await HybridMediaResolver._validate_stock_video(stock) is True
+
+
+@pytest.mark.asyncio
+async def test_failed_image_batch_reuses_an_already_resolved_stock_visual(tmp_path, monkeypatch):
+    from app.services.script_video.image_generator import ImageGenerator
+    from app.services.script_video.models import Scene, VideoPlan
+
+    stock_path = tmp_path / "stock.mp4"
+    stock_path.write_bytes(b"fixture")
+    stock_asset = StockVideoAsset(
+        path=stock_path,
+        provider="pexels",
+        source_url="https://www.pexels.com/video/1",
+        creator_name="Creator",
+        creator_url="https://www.pexels.com/@creator",
+        asset_id="1",
+        title="old camera",
+    )
+
+    async def fetch(*, slot, **kwargs):
+        return stock_asset if slot == 1 else None
+
+    async def fail_images(self, prompts, **kwargs):
+        raise RuntimeError("fixture provider failure")
+
+    monkeypatch.setattr(ImageGenerator, "generate", fail_images)
+    monkeypatch.setattr(
+        HybridMediaResolver,
+        "_validate_stock_video",
+        staticmethod(lambda path: asyncio.sleep(0, result=True)),
+    )
+    scenes = tuple(
+        Scene(
+            id=f"s{i}", narration=f"Сцена {i}.", visual_prompt="Old camera footage",
+            stock_query="old camera", prefer_stock=True, duration_hint=3,
+            importance=3, motion_type="static", transition="cut",
+        )
+        for i in range(3)
+    )
+    plan = VideoPlan(
+        title="Объяснение камеры", language="ru", target_duration=9,
+        narration="Сцена 0. Сцена 1. Сцена 2.", visual_style="Neutral documentary",
+        scenes=scenes,
+    )
+    resolver = object.__new__(HybridMediaResolver)
+    resolver.stock_enabled = True
+    resolver.stock = SimpleNamespace(fetch=fetch)
+    resolver.max_ai_images = 2
+    resolver.image_model = "test-model"
+    resolver.fallback_image_model = ""
+    resolver.cost_tracker = None
+    resolver.image_concurrency = 1
+
+    result = await resolver.resolve(plan, tmp_path)
+    assert result.paths == (stock_path, stock_path, stock_path)
+    assert result.stock_videos == 1
+    assert result.ai_images == 0
+    assert result.reused_scenes == 2
+
+
+@pytest.mark.asyncio
+async def test_invalid_generated_image_does_not_discard_other_visuals(tmp_path, monkeypatch):
+    import base64
+    from app.services.script_video.image_generator import ImageGenerator
+    from app.services.script_video.models import Scene, VideoPlan
+
+    async def generate(self, prompts, **kwargs):
+        return [
+            "data:image/png;base64,%%%invalid%%%",
+            "data:image/png;base64," + base64.b64encode(b"valid fixture").decode(),
+        ]
+
+    monkeypatch.setattr(ImageGenerator, "generate", generate)
+    scenes = tuple(
+        Scene(
+            id=f"s{i}", narration=f"Эпизод {i}.", visual_prompt=f"Visual {i}",
+            stock_query="", prefer_stock=False, duration_hint=3,
+            importance=3, motion_type="static", transition="cut",
+        )
+        for i in range(3)
+    )
+    plan = VideoPlan(
+        title="Пояснение", language="ru", target_duration=9,
+        narration="Эпизод 0. Эпизод 1. Эпизод 2.", visual_style="Clean",
+        scenes=scenes,
+    )
+    resolver = object.__new__(HybridMediaResolver)
+    resolver.stock_enabled = False
+    resolver.max_ai_images = 2
+    resolver.image_model = "test-model"
+    resolver.fallback_image_model = ""
+    resolver.cost_tracker = None
+    resolver.image_concurrency = 1
+
+    result = await resolver.resolve(plan, tmp_path)
+    assert len(result.paths) == 3
+    assert result.ai_images == 1
+    assert result.reused_scenes == 2
+    assert result.paths[0] == result.paths[1] == result.paths[2]
 
 
 def test_word_aligned_subtitles_use_real_timestamps_and_safe_margin(tmp_path, monkeypatch):
