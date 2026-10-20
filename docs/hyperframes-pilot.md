@@ -42,6 +42,42 @@ not a guarantee of total host/cgroup memory, and simultaneous media tasks,
 Cloud CPU pricing, image storage and Railway limits may change operational
 cost. Do not change the existing plan or production Dockerfile automatically.
 
+## Restricted end-to-end pilot (2026-10-20)
+
+This experimental branch is **not enabled on the live Railway service**.
+The default production Dockerfile still has no HyperFrames/Chromium.
+The pilot adds an explicit per-request gate inside the existing Script Video
+resolver: only users in `settings.internal_user_ids` can reach the browser
+renderer. Public users receive the unchanged FFmpeg pipeline even when the
+global feature flag is true. Internal IDs comprise the configured
+`ALLOWED_TELEGRAM_USER_IDS`, `ADMIN_TELEGRAM_IDS`,
+`TESTER_TELEGRAM_IDS`, and `UNLIMITED_TELEGRAM_IDS`.
+
+To run a Railway pilot after reviewing its available memory and CPU:
+
+1. Deploy the reviewed pilot revision. Point the Railway build to
+   `Dockerfile.hyperframes` (instead of `Dockerfile`).
+   This installs Chromium and the pinned CLI without runtime downloads.
+2. Configure Railway variable `SCRIPT_VIDEO_HYPERFRAMES_ENABLED=true`.
+   Keep `MAX_CONCURRENT_JOBS=1`; do not add public users to the internal list.
+3. Confirm `HYPERFRAMES_BROWSER_PATH=/usr/bin/chromium` inside that image.
+   No new Telegram buttons or user-visible switches are needed.
+4. Submit the *same nonfiction explainer* from one internal tester twice,
+   first with the feature flag false (baseline), then true (pilot).
+   Real stock footage and AI keyframes may vary between runs: compare
+   on-screen quality but interpret wall-time comparisons accordingly.
+5. Compare Railway CPU and RAM charts, full generation `elapsed_seconds`,
+   per-graphic `elapsed_seconds`, `peak_process_tree_rss_mb`,
+   `sampled_cpu_seconds`, and the final `graphics_videos` count.
+   The process samples are approximate and exclude other service processes.
+6. If `graphics_videos=0`, do **not** label the result a HyperFrames test:
+   inspect pilot selection and renderer fallback events. Revert immediately
+   on OOM, instability, queue delays, or excessively slow render.
+
+Rollback: set `SCRIPT_VIDEO_HYPERFRAMES_ENABLED=false`; later restore the
+standard production Dockerfile. The flag is the immediate runtime kill switch
+for the already-running pilot image.
+
 ## Isolated smoke test
 
 Do not change the live Railway project's Dockerfile until RAM, CPU, image
