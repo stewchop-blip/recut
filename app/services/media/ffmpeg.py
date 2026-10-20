@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 from app.core.logging import get_logger
+from app.services.media.audio import ENCODE_SAMPLE_RATE
 from app.services.media.process import communicate
 
 
@@ -1066,6 +1067,7 @@ class MediaService:
         measure_cmd = [
             self._ffmpeg_path, "-v", "info",
             "-i", str(video_path),
+            "-vn", "-sn", "-dn",
             "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11:print_format=json",
             "-f", "null", "-",
         ]
@@ -1152,6 +1154,7 @@ class MediaService:
             "-c:v", "copy",
             "-c:a", "aac",
             "-b:a", "128k",
+            "-ar", str(ENCODE_SAMPLE_RATE),
             "-map_metadata", "-1",     # strip ALL metadata
             "-map_chapters", "-1",    # strip chapter info
             "-metadata", "comment=",  # clear comment
@@ -1197,7 +1200,9 @@ class MediaService:
     ) -> Path:
         """Fallback: re-mux while stripping every piece of metadata."""
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        audio_args = ["-c:a", "copy"] if copy_audio else ["-c:a", "aac", "-b:a", "128k"]
+        audio_args = ["-c:a", "copy"] if copy_audio else [
+            "-c:a", "aac", "-b:a", "128k", "-ar", str(ENCODE_SAMPLE_RATE),
+        ]
         cmd = [
             self._ffmpeg_path, "-y", "-v", "error",
             "-i", str(video_path),
