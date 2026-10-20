@@ -11,7 +11,7 @@ from typing import Optional
 from app.core.logging import get_logger
 from app.services.media.audio import AudioConfig, AudioProcessor
 from app.services.media.ffmpeg import _find_ffmpeg_bin
-from app.services.media.probe import get_probe_service
+from app.services.media.probe import ProbeError, get_probe_service
 from app.services.script_video.models import VideoPlan
 from app.services.script_video.timeline import TimelineCompiler, VisualBeat
 
@@ -484,6 +484,21 @@ class ScriptVideoAssembler:
                     raise ScriptVideoAssemblyError("FFmpeg failed to assemble video")
             if not output_path.is_file() or output_path.stat().st_size == 0:
                 raise ScriptVideoAssemblyError("FFmpeg produced an empty video")
+            try:
+                result = await get_probe_service().probe(output_path)
+            except ProbeError as exc:
+                raise ScriptVideoAssemblyError("Rendered video failed ffprobe validation") from exc
+            if not (
+                (result.width, result.height) == (self.width, self.height)
+                and result.video_codec == "h264"
+                and result.audio_codec == "aac"
+                and result.has_audio
+                and result.rotation == 0
+                and abs(result.sample_aspect_ratio - 1.0) <= 0.01
+                and abs(result.fps - self.fps) <= 0.1
+                and abs(result.duration_seconds - audio_duration) <= 0.5
+            ):
+                raise ScriptVideoAssemblyError("Rendered video has unexpected media properties")
             logger.info(
                 "script_video_assembly_complete",
                 asset_count=len(asset_paths),
