@@ -107,8 +107,8 @@ class ScriptVideoAssembler:
         # Easing is continuous at every beat boundary and slows at the ends.
         eased = f"({progress})*({progress})*(3-2*({progress}))"
         motion = continuous_motion or beat.motion
-        motion_amount = min(0.075, max(0.045, 0.006 * run_frames / ScriptVideoAssembler.fps))
-        pan_span = min(0.68, max(0.44, 0.055 * run_frames / ScriptVideoAssembler.fps))
+        motion_amount = min(0.055, max(0.045, 0.0052 * run_frames / ScriptVideoAssembler.fps))
+        pan_span = 0.44
         if motion == "static":
             zoom = "1"
         elif motion == "zoom_out":
