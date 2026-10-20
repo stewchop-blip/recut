@@ -117,7 +117,8 @@ async def test_render_failure_falls_back_to_existing_ai_and_stock(tmp_path, monk
     resolver.image_concurrency = 1
 
     media = await resolver.resolve(
-        make_plan(), tmp_path, user_idea="Почему мы откладываем дела"
+        make_plan(), tmp_path, user_idea="Почему мы откладываем дела",
+        test_hyperframes=True,
     )
     assert media.graphics_videos == 0
     assert media.ai_images == 4
@@ -164,7 +165,8 @@ async def test_successful_graphics_replace_before_paid_ai_calls(tmp_path, monkey
     resolver.cost_tracker = None
     resolver.image_concurrency = 1
     media = await resolver.resolve(
-        make_plan(), tmp_path, user_idea="Почему люди откладывают важные дела"
+        make_plan(), tmp_path, user_idea="Почему люди откладывают важные дела",
+        test_hyperframes=True,
     )
     assert media.graphics_videos == 2
     assert media.ai_images <= 4
@@ -173,6 +175,41 @@ async def test_successful_graphics_replace_before_paid_ai_calls(tmp_path, monkey
     assert media.paths[2].suffix == ".mp4"
     assert media.paths[5].suffix == ".mp4"
     assert len(generated_prompts) == media.ai_images
+
+
+@pytest.mark.asyncio
+async def test_public_explainer_never_spawns_graphics(tmp_path, monkeypatch):
+    """An enabled global flag must not opt regular users into Chromium."""
+    from app.services.script_video.image_generator import ImageGenerator
+
+    class Forbidden:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Public requests must not call HyperFrames")
+
+    async def fake_generate(self, prompts, **kwargs):
+        return [
+            "data:image/png;base64," + base64.b64encode(b"AI").decode()
+            for _ in prompts
+        ]
+
+    monkeypatch.setenv("SCRIPT_VIDEO_HYPERFRAMES_ENABLED", "true")
+    monkeypatch.setattr(
+        "app.services.script_video.hybrid_media.HyperframesGraphicRenderer",
+        Forbidden,
+    )
+    monkeypatch.setattr(ImageGenerator, "generate", fake_generate)
+    resolver = object.__new__(HybridMediaResolver)
+    resolver.stock_enabled = False
+    resolver.image_model = "recraft/recraft-v4.1-flash"
+    resolver.fallback_image_model = ""
+    resolver.max_ai_images = 4
+    resolver.cost_tracker = None
+    resolver.image_concurrency = 1
+    media = await resolver.resolve(
+        make_plan(), tmp_path, user_idea="Почему люди откладывают дела"
+    )
+    assert media.graphics_videos == 0
+    assert all(p.suffix in {".png", ".jpg"} for p in media.paths)
 
 
 @pytest.mark.asyncio
