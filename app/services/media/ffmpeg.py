@@ -1,4 +1,4 @@
-Warning: truncated output (original token count: 14734)
+Warning: truncated output (original token count: 14740)
 Total output lines: 1439
 
 """Media service for FFmpeg operations (future video support)."""
@@ -555,8 +555,7 @@ class MediaService:
                     # decoration = next. No hardcoded indexes.
                     input_idx = extra_inputs.count("-i") + 1
                     dec_kind = (dec.kind or "").lower()
-         …2734 tokens truncated…y",
-            "-movflags", "+faststart",
+         …2740 tokens truncated…ags", "+faststart",
             str(output_path),
         ]
         proc = await asyncio.create_subprocess_exec(
@@ -846,7 +845,7 @@ class MediaService:
                 format_name = str(media_info.get("format", {}).get("format_name", ""))
                 if (
                     audio_streams
-                    and audio_streams[0].get("codec_name") == "aac"
+                    and all(stream.get("codec_name") == "aac" for stream in audio_streams)
                     and "mp4" in format_name
                 ):
                     logger.info(
