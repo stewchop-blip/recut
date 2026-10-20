@@ -568,6 +568,32 @@ def test_reused_still_shares_one_zoom_trajectory():
     assert windows[2][0] == 0
 
 
+def test_adjacent_reused_still_is_one_camera_clip_without_self_transition(tmp_path):
+    from app.services.script_video.timeline import VisualBeat
+
+    still = tmp_path / "same-frame.png"
+    next_still = tmp_path / "next-frame.png"
+    beats = [
+        VisualBeat("s1", 0, 2.0, "zoom_in", "cut"),
+        VisualBeat("s2", 1, 2.0, "pan_right", "slide_left"),
+        VisualBeat("s3", 2, 2.0, "zoom_out", "fade"),
+    ]
+
+    merged = ScriptVideoAssembler._merge_contiguous_beats(
+        beats, [still, still, next_still]
+    )
+
+    assert merged == [
+        VisualBeat("s1", 0, 3.78, "zoom_in", "cut"),
+        VisualBeat("s3", 2, 2.0, "zoom_out", "fade"),
+    ]
+    graph = ScriptVideoAssembler()._filter_graph(merged, [3.78, 2.0])
+    assert graph.count("xfade=") == 1
+    assert sum(beat.duration for beat in merged) - 0.22 == pytest.approx(
+        sum(beat.duration for beat in beats) - 2 * 0.22
+    )
+
+
 def test_visual_relevance_rejects_unrelated_found_footage():
     from app.services.script_video.visual_policy import (
         stock_title_matches_query,
