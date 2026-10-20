@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.script_video import CostTracker, ScriptPlanner, VideoPlanSchema, from_schema
-from app.services.script_video.assembly import ScriptVideoAssembler
+from app.services.script_video.assembly import ScriptVideoAssembler, ScriptVideoAssemblyError
 from app.services.script_video.image_generator import ImageCreditsExhaustedError, ImageGenerator
 from app.services.script_video.models import Scene, VideoPlan
 from app.services.script_video.timeline import TimelineCompiler
@@ -346,6 +346,7 @@ async def test_assembler_renders_vertical_mp4_with_audio_and_valid_probe(tmp_pat
     assert video["codec_name"] == "h264"
     assert video["pix_fmt"] == "yuv420p"
     assert audio["codec_name"] == "aac"
+    assert int(audio["sample_rate"]) == 48000
     assert abs(float(metadata["format"]["duration"]) - 8.0) < 0.5
     levels = subprocess.run(
         [
@@ -360,3 +361,34 @@ async def test_assembler_renders_vertical_mp4_with_audio_and_valid_probe(tmp_pat
         if "mean_volume:" in line
     ))
     assert -17.0 < mean_volume < -11.0
+
+
+@pytest.mark.asyncio
+async def test_assembler_rejects_nonempty_invalid_mp4_after_encoder_success(tmp_path, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from app.services.script_video import assembly
+
+    if not shutil.which("ffprobe"):
+        pytest.skip("ffprobe is required for the output validation check")
+    image_path = tmp_path / "image.png"
+    image_path.write_bytes(b"fixture")
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"fixture")
+    output_path = tmp_path / "output.mp4"
+    assembler = ScriptVideoAssembler()
+    monkeypatch.setattr(assembler, "audio_duration", AsyncMock(return_value=2.0))
+    monkeypatch.setattr(assembler, "_render_beat", AsyncMock())
+    create_process = asyncio.create_subprocess_exec
+
+    async def fake_encode(*command, **kwargs):
+        if "ffprobe" in str(command[0]):
+            return await create_process(*command, **kwargs)
+        output_path.write_bytes(b"nonempty but not a valid MP4")
+        return SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(b"", b"")))
+
+    monkeypatch.setattr(assembly.asyncio, "create_subprocess_exec", fake_encode)
+    with pytest.raises(ScriptVideoAssemblyError, match="ffprobe validation"):
+        await assembler.assemble(
+            _sample_plan(), [str(image_path)], audio_path=audio_path, output_path=output_path,
+        )
