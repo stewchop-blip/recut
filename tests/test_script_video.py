@@ -347,3 +347,16 @@ async def test_assembler_renders_vertical_mp4_with_audio_and_valid_probe(tmp_pat
     assert video["pix_fmt"] == "yuv420p"
     assert audio["codec_name"] == "aac"
     assert abs(float(metadata["format"]["duration"]) - 8.0) < 0.5
+    levels = subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-i", str(result), "-vn",
+            "-af", "volumedetect", "-f", "null", "-",
+        ],
+        check=True, capture_output=True, text=True, timeout=30,
+    ).stderr
+    mean_volume = float(next(
+        line.rsplit(":", 1)[1].split()[0]
+        for line in levels.splitlines()
+        if "mean_volume:" in line
+    ))
+    assert -17.0 < mean_volume < -11.0
