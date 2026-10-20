@@ -171,7 +171,10 @@ def test_word_aligned_subtitles_use_real_timestamps_and_safe_margin(tmp_path, mo
 
 
 @pytest.mark.asyncio
-async def test_assembler_renders_stock_video_beat_to_vertical_mp4(tmp_path):
+@pytest.mark.parametrize("source_seconds,beat_index", [(0.5, 2), (2.0, 0)])
+async def test_assembler_renders_stock_video_beat_to_vertical_mp4(
+    tmp_path, source_seconds, beat_index,
+):
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
@@ -187,7 +190,7 @@ async def test_assembler_renders_stock_video_beat_to_vertical_mp4(tmp_path):
             "-f",
             "lavfi",
             "-i",
-            "testsrc2=size=640x360:rate=30:duration=2",
+            f"testsrc2=size=640x360:rate=30:duration={source_seconds}",
             "-c:v",
             "libx264",
             "-pix_fmt",
@@ -203,7 +206,7 @@ async def test_assembler_renders_stock_video_beat_to_vertical_mp4(tmp_path):
         stock,
         duration=1.5,
         output_path=output,
-        beat_index=0,
+        beat_index=beat_index,
     )
     probe = subprocess.run(
         [
@@ -213,7 +216,7 @@ async def test_assembler_renders_stock_video_beat_to_vertical_mp4(tmp_path):
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height,codec_name,pix_fmt",
+            "stream=width,height,codec_name,pix_fmt:format=duration",
             "-of",
             "default=noprint_wrappers=1",
             str(output),
@@ -227,6 +230,9 @@ async def test_assembler_renders_stock_video_beat_to_vertical_mp4(tmp_path):
     assert "height=1920" in probe
     assert "codec_name=h264" in probe
     assert "pix_fmt=yuv420p" in probe
+    duration = float(next(line.split("=", 1)[1] for line in probe.splitlines()
+                          if line.startswith("duration=")))
+    assert abs(duration - 1.5) < 0.08
 
 
 def test_pyav_version_is_compatible_with_released_faster_whisper():
