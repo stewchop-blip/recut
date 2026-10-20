@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -46,7 +47,7 @@ def test_profile_stable_across_processes(tmp_path):
     code = ('from pathlib import Path; from app.services.auto_edit_planner import MaximumTransformProfile; '
             'import sys; print(MaximumTransformProfile.for_source(Path(sys.argv[1])).name)')
     for seed in ('1', '123'):
-        result = subprocess.run(['python', '-c', code, str(path)],
+        result = subprocess.run([sys.executable, '-c', code, str(path)],
             env={**os.environ, 'PYTHONHASHSEED': seed}, capture_output=True, check=True, text=True)
         assert result.stdout.strip().endswith(expected)
 
@@ -144,6 +145,7 @@ async def test_callback_passes_mode_to_pipeline(tmp_path, monkeypatch, action, e
     monkeypatch.setattr(video, 'QuickPrepPipeline', lambda: pipeline)
     monkeypatch.setattr(video, '_edit_status', AsyncMock())
     monkeypatch.setattr(video, '_fail_job', AsyncMock())
+    monkeypatch.setattr(video, '_subscription_gate_blocked', AsyncMock(return_value=False))
     monkeypatch.setattr(video, 'get_temp_manager', lambda: SimpleNamespace(cleanup_job=Mock(), _job_dir=lambda name: tmp_path/name))
     (tmp_path / 'source.mp4').write_bytes(b'source')
     user_id = 987655
@@ -153,7 +155,7 @@ async def test_callback_passes_mode_to_pipeline(tmp_path, monkeypatch, action, e
     # No in-memory mode: upload already consumed it. Callback must suffice.
     video._mode_state.pop(user_id, None)
     call = SimpleNamespace(from_user=SimpleNamespace(id=user_id), data=action,
-        message=object(), answer=AsyncMock())
+        bot=SimpleNamespace(), message=SimpleNamespace(answer=AsyncMock()), answer=AsyncMock())
     await video.on_quick_prep(call)
     assert pipeline.run.await_count == 1
     assert pipeline.run.call_args.kwargs['maximum_transform'] is enabled
