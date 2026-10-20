@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.services.script_video.assembly import ScriptVideoAssembler
+from app.services.script_video.timeline import VisualBeat
 from app.services.script_video.hyperframes_graphics import (
     HyperframesGraphicRenderer,
     MAX_SCENES,
@@ -257,3 +259,39 @@ def test_graphic_headline_split_preserves_words_and_readable_phrases():
     assert lead + " " + tail == narration
     assert not lead.endswith(" и")
     assert HyperframesGraphicRenderer._headline_parts("Один два") == ("Один два", "")
+
+def test_hyperframes_reuse_never_loops_into_missing_explainer_scene(tmp_path):
+    """A completed graphic may appear once, not be replayed as a filler clip."""
+    still = tmp_path / "scene-00-ai.png"
+    graphic = tmp_path / "hyperframes-02.mp4"
+    still.write_bytes(b"still")
+    graphic.write_bytes(b"graphic")
+    assets = [still, None, graphic, None, None]
+    assert HybridMediaResolver._nearest_without_graphics(assets, 3) == still
+    assert HybridMediaResolver._nearest_without_graphics(assets, 4) == still
+    assert HybridMediaResolver._nearest_without_graphics(assets, 1) == still
+    # Ordinary still image reuse is unchanged.
+    assert HybridMediaResolver._nearest_path(assets, 3) == graphic
+
+
+def test_hyperframes_editor_keeps_one_continuous_graphic_beat(tmp_path):
+    graphic = tmp_path / "hyperframes-02.mp4"
+    still = tmp_path / "scene-00-ai.png"
+    stock = tmp_path / "stock.mp4"
+    assets = [still, graphic, stock]
+    beats = [
+        VisualBeat("s0", 0, 1.0, "zoom_in", "cut"),
+        VisualBeat("s1", 1, 1.9, "static", "fade"),
+        VisualBeat("s1", 1, 1.9, "zoom_in", "cut"),
+        VisualBeat("s2", 2, 2.0, "static", "cut"),
+        VisualBeat("s2", 2, 2.0, "static", "cut"),
+        VisualBeat("s3", 1, 1.2, "static", "cut"),
+    ]
+    merged = ScriptVideoAssembler._merge_hyperframes_beats(beats, assets)
+    assert len(merged) == 5
+    assert merged[1] == VisualBeat("s1", 1, 3.8, "static", "fade")
+    assert merged[2:4] == beats[3:5]  # Stock-video handling unchanged.
+    assert merged[4] == beats[5]  # A separate scene does not get merged.
+    assert ScriptVideoAssembler._merge_hyperframes_beats(
+        beats[:1], assets
+    ) == beats[:1]

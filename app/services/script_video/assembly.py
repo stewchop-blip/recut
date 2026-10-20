@@ -162,6 +162,43 @@ class ScriptVideoAssembler:
         return windows
 
     @classmethod
+    def _merge_hyperframes_beats(
+        cls, beats: list[VisualBeat], assets: list[Path]
+    ) -> list[VisualBeat]:
+        """Keep a motion-graphic scene continuous, not split into restart clips.
+
+        The general short-beat editor deliberately divides longer visuals into
+        multiple beats. That is fine for photos, but rendering the same 3-5s
+        HyperFrames clip repeatedly resets its CSS motion and causes a stutter.
+        Merge only adjacent beats of the *same scene* using the same graphic.
+        All other assets and editorial beats keep their original treatment.
+        """
+        merged: list[VisualBeat] = []
+        for beat in beats:
+            asset = assets[beat.image_index]
+            is_graphic = (
+                asset.suffix.lower() == ".mp4"
+                and asset.name.startswith("hyperframes-")
+            )
+            if (
+                is_graphic
+                and merged
+                and merged[-1].scene_id == beat.scene_id
+                and merged[-1].image_index == beat.image_index
+            ):
+                previous = merged[-1]
+                merged[-1] = VisualBeat(
+                    scene_id=previous.scene_id,
+                    image_index=previous.image_index,
+                    duration=previous.duration + beat.duration,
+                    motion=previous.motion,
+                    transition=previous.transition,
+                )
+            else:
+                merged.append(beat)
+        return merged
+
+    @classmethod
     def _video_filter(cls, duration: float) -> str:
         return (
             f"[0:v]split=2[bg][fg];"
@@ -273,7 +310,10 @@ class ScriptVideoAssembler:
     ) -> None:
         graph_path = output_path.with_suffix(".filter.txt")
         graph_path.write_text(self._video_filter(duration), encoding="utf-8")
-        seek_seconds = (beat_index % 3) * 0.35
+        seek_seconds = (
+            0.0 if video_path.name.startswith("hyperframes-")
+            else (beat_index % 3) * 0.35
+        )
         command = [
             _find_ffmpeg_bin(), "-y", "-v", "error", "-stream_loop", "-1",
             "-ss", f"{seek_seconds:.2f}", "-i", str(video_path),
@@ -332,6 +372,7 @@ class ScriptVideoAssembler:
         try:
             audio_duration = await self.audio_duration(Path(audio_path))
             beats = TimelineCompiler().compile(plan, len(asset_paths), audio_duration)
+            beats = self._merge_hyperframes_beats(beats, asset_paths)
             beat_durations = [beat.duration for beat in beats]
             # Image indices may differ while resolving to the same shared file.
             # A single camera path across that run removes zoom jumps at cuts.

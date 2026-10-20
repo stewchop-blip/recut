@@ -215,6 +215,25 @@ class HybridMediaResolver:
         return paths[nearest]
 
     @staticmethod
+    def _nearest_without_graphics(paths: list[Path | None], index: int) -> Path | None:
+        """Never recycle a completed HyperFrames clip as another scene.
+
+        Reusing the graphic MP4 resets its timeline at every new scene/beat,
+        creating distracting flashes and animation jumps. Prefer any other
+        already-resolved visual, even a still, rather than replaying it.
+        """
+        candidates = [
+            i for i, path in enumerate(paths)
+            if path is not None and not (
+                path.suffix.lower() == ".mp4" and path.name.startswith("hyperframes-")
+            )
+        ]
+        if not candidates:
+            return HybridMediaResolver._nearest_path(paths, index)
+        nearest = min(candidates, key=lambda candidate: (abs(candidate - index), candidate))
+        return paths[nearest]
+
+    @staticmethod
     def _chronological_path(paths: list[Path | None], index: int) -> Path | None:
         """Never show a future story reveal before the corresponding narration.
 
@@ -438,7 +457,7 @@ class HybridMediaResolver:
                 continue
             fallback = (
                 self._chronological_path(paths, index)
-                if narrative_mode else self._nearest_path(paths, index)
+                if narrative_mode else self._nearest_without_graphics(paths, index)
             )
             if fallback is None:
                 raise RuntimeError("hybrid media resolver produced no fallback asset")
