@@ -269,7 +269,8 @@ class HybridMediaResolver:
         return duration > 0.15 and width > 0 and height > 0
 
     async def resolve(
-        self, plan: VideoPlan, workdir: Path, *, user_idea: str = ""
+        self, plan: VideoPlan, workdir: Path, *, user_idea: str = "",
+        test_hyperframes: bool = False,
     ) -> HybridMediaResult:
         scene_count = len(plan.scenes)
         if scene_count < 1:
@@ -294,8 +295,15 @@ class HybridMediaResolver:
         # replace assets that would otherwise consume AI budget. Narrative
         # scenes are never passed to the graphic renderer.
         graphics_count = 0
-        if not narrative_mode:
+        # Browser rendering is pilot-only. Production callers must explicitly
+        # opt in on behalf of a trusted internal tester, not public users.
+        if test_hyperframes and not narrative_mode:
             graphics = HyperframesGraphicRenderer()
+            logger.info(
+                "script_hyperframes_pilot_selection",
+                available=graphics.available,
+                eligible_scenes=len(graphics.selected_indices(plan.scenes)),
+            )
             if graphics.available:
                 for index in graphics.selected_indices(plan.scenes):
                     scene = plan.scenes[index]
