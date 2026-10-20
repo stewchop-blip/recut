@@ -19,6 +19,8 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+ENCODE_SAMPLE_RATE = 48_000
+
 # loudnorm targets (EBU R128-ish, social platforms)
 _LN = "loudnorm=I=-14:TP=-1.5:LRA=11"
 # mild presence EQ: small highs lift, tiny low cut
@@ -118,6 +120,7 @@ class AudioProcessor:
             args += ["-filter_complex", plan.filter_chain, "-map", "[aout]"]
         else:
             args += ["-af", plan.filter_chain.removeprefix("[0:a]").removesuffix("[aout]")]
+        args += ["-ar", str(ENCODE_SAMPLE_RATE)]
         return (args, "[aout]" if ";" in plan.filter_chain else "0:a?")
 
     async def process(self, input_path: Path, output_path: Path,
