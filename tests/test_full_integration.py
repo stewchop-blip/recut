@@ -3,8 +3,9 @@ import pytest
 
 from app.services.script_video import (
     ScriptPlanner, ImageGenerator, ScriptVideoAssembler,
-    ScriptTTSAdapter, SceneSubtitleBuilder, VideoPlanSchema, from_schema, get_cost_tracker
+    ScriptTTSAdapter, VideoPlanSchema, from_schema, get_cost_tracker
 )
+from app.services.subtitles.scene_adapter import SceneSubtitleBuilder
 
 
 @pytest.mark.asyncio

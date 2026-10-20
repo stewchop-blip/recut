@@ -114,8 +114,13 @@ async def test_instagram_subprocess_error_never_exposes_signed_url(source, monke
         warning=lambda *args, **kwargs: events.append(kwargs)))
     class Process:
         returncode = 1
-        async def communicate(self):
-            return b'', b'ERROR: HTTP Error 403 https://video.fbcdn.net/video.mp4?token=SECRET'
+        class Stream:
+            def __init__(self, value): self.value = value
+            async def read(self, _size):
+                value, self.value = self.value, b''
+                return value
+        stdout = Stream(b'')
+        stderr = Stream(b'ERROR: HTTP Error 403 https://video.fbcdn.net/video.mp4?token=SECRET')
     async def create(*args, **kwargs): return Process()
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', create)
     with pytest.raises(StructuredDownloadError) as error:

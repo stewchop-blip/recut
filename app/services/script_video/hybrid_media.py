@@ -429,27 +429,45 @@ class HybridMediaResolver:
             ]
         else:
             prompts = [plan.scenes[index].visual_prompt for index in ai_indices]
+        ai_images_generated = 0
         if prompts:
-            generated = await ImageGenerator(
-                model=self.image_model,
-                fallback_model=self.fallback_image_model,
-                concurrency=self.image_concurrency,
-                max_retries=1,
-                cost_tracker=self.cost_tracker,
-            ).generate(
-                prompts,
-                aspect_ratio="9:16",
-                max_images=len(prompts),
-            )
-            if not generated:
-                raise RuntimeError("image generation returned no images")
-
-            for position, scene_index in enumerate(ai_indices):
-                source = generated[min(position, len(generated) - 1)]
-                paths[scene_index] = await self._save_generated_image(
-                    source,
-                    workdir / f"scene-{scene_index:02d}-ai",
+            try:
+                generated = await ImageGenerator(
+                    model=self.image_model,
+                    fallback_model=self.fallback_image_model,
+                    concurrency=self.image_concurrency,
+                    max_retries=1,
+                    cost_tracker=self.cost_tracker,
+                ).generate(
+                    prompts,
+                    aspect_ratio="9:16",
+                    max_images=len(prompts),
                 )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                generated = []
+                logger.warning(
+                    "script_image_batch_failed_using_resolved_visuals",
+                    error_type=type(exc).__name__,
+                    resolved_stock=len(stock_assets),
+                )
+
+            for scene_index, source in zip(ai_indices, generated[:len(ai_indices)]):
+                try:
+                    paths[scene_index] = await self._save_generated_image(
+                        source,
+                        workdir / f"scene-{scene_index:02d}-ai",
+                    )
+                    ai_images_generated += 1
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "script_image_asset_failed_using_resolved_visuals",
+                        scene_index=scene_index,
+                        error_type=type(exc).__name__,
+                    )
 
         reused = 0
         for index, path in enumerate(paths):
@@ -478,7 +496,7 @@ class HybridMediaResolver:
             "script_hybrid_media_ready",
             scenes=scene_count,
             stock_videos=len(stock_assets),
-            ai_images=len(ai_indices),
+            ai_images=ai_images_generated,
             reused_scenes=reused,
             stock_enabled=self.stock_enabled and not narrative_mode,
             narrative_mode=narrative_mode,
@@ -488,7 +506,7 @@ class HybridMediaResolver:
         return HybridMediaResult(
             paths=resolved,
             stock_assets=tuple(stock_assets),
-            ai_images=len(ai_indices),
+            ai_images=ai_images_generated,
             stock_videos=len(stock_assets),
             reused_scenes=reused,
             graphics_videos=graphics_count,

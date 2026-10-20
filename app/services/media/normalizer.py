@@ -43,8 +43,8 @@ class SourceNormalizer:
         self._ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
         self._ffprobe = shutil.which("ffprobe") or "ffprobe"
 
-    async def _probe(self, path: Path) -> tuple[int, int, float, int]:
-        """(width, height, sar, rotation) of the video stream."""
+    async def _probe(self, path: Path) -> tuple[int, int, float, int, str, str | None]:
+        """(width, height, SAR, rotation, video codec, audio codec)."""
         from app.services.media.probe import _parse_rotation
         proc = await asyncio.create_subprocess_exec(
             self._ffprobe, "-v", "error", "-print_format", "json",
@@ -65,8 +65,15 @@ class SourceNormalizer:
             sar = float(a) / float(b) if float(b) else 1.0
         except (ValueError, ZeroDivisionError):
             sar = 1.0
-        return (int(v.get("width") or 0), int(v.get("height") or 0),
-                round(sar, 3), _parse_rotation(v))
+        audio = next(
+            (s for s in data.get("streams", []) if s.get("codec_type") == "audio"),
+            None,
+        )
+        return (
+            int(v.get("width") or 0), int(v.get("height") or 0),
+            round(sar, 3), _parse_rotation(v), str(v.get("codec_name") or ""),
+            str(audio.get("codec_name")) if audio else None,
+        )
 
     async def normalize(self, input_path: Path, output_path: Path, *,
                         timeout_seconds: float = 900.0) -> NormalizationResult:
@@ -76,7 +83,37 @@ class SourceNormalizer:
         base = output_path.with_name(output_path.stem + "_base.mp4")
 
         # ---------- PASS A: rotation bake + SAR normalize ----------
-        w, h, sar, rotation = await self._probe(input_path)
+        w, h, sar, rotation, video_codec, audio_codec = await self._probe(input_path)
+
+        # Re-mux common, already normalized MP4s instead of decoding and
+        # encoding every frame. Keep the existing transcode path for all
+        # other formats/codecs and whenever stable black bars need cropping.
+        can_remux = (
+            input_path.suffix.lower() in {".mp4", ".m4v"}
+            and video_codec == "h264"
+            and audio_codec in {None, "aac"}
+            and rotation == 0
+            and abs(sar - 1.0) <= 0.01
+        )
+        if can_remux and await self._detect_bars(input_path) is None:
+            cmd = [
+                self._ffmpeg, "-y", "-v", "error", "-i", str(input_path),
+                "-map", "0:v:0", "-map", "0:a?", "-c", "copy",
+                "-map_metadata", "-1", "-movflags", "+faststart", str(output_path),
+            ]
+            await self._run(cmd, timeout_seconds)
+            bw, bh, bsar, brot, _, _ = await self._probe(output_path)
+            if brot or abs(bsar - 1.0) > 0.02:
+                raise NormalizationError(f"Remux failed: rot={brot} sar={bsar}")
+            logger.info(
+                "source_normalization_stream_copy",
+                input=str(input_path), codec=video_codec, audio_codec=audio_codec,
+            )
+            return NormalizationResult(
+                source=output_path, base=output_path, rotation_before=rotation,
+                sar_before=sar, coded_before=(w, h), base_dims=(bw, bh),
+                crop_applied=False,
+            )
         vf: list[str] = []
         if rotation == 90:
             vf.append("transpose=1")
@@ -96,7 +133,7 @@ class SourceNormalizer:
                 "-c:a", "copy", "-map_metadata", "-1", "-movflags", "+faststart",
                 str(base)]
         await self._run(cmd, timeout_seconds)
-        bw, bh, bsar, brot = await self._probe(base)
+        bw, bh, bsar, brot, _, _ = await self._probe(base)
         if brot or abs(bsar - 1.0) > 0.02:
             raise NormalizationError(f"PASS A failed: rot={brot} sar={bsar}")
 
@@ -115,7 +152,7 @@ class SourceNormalizer:
         else:
             shutil.move(base, output_path)
 
-        fw, fh, fsar, frot = await self._probe(output_path)
+        fw, fh, fsar, frot, _, _ = await self._probe(output_path)
         if frot or abs(fsar - 1.0) > 0.02:
             raise NormalizationError(f"PASS B failed: rot={frot} sar={fsar}")
 

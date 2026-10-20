@@ -1,13 +1,14 @@
 """Media service for FFmpeg operations (future video support)."""
 
 import asyncio
-from app.services.media.process import communicate
+import math
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
 from app.core.logging import get_logger
+from app.services.media.process import communicate
 
 
 if TYPE_CHECKING:
@@ -1093,7 +1094,48 @@ class MediaService:
         if brace_start == -1 or brace_end == -1:
             logger.warning("loudnorm_parse_failed_fallback_strip")
             return await self._strip_only(video_path, output_path)
-        measured = json.loads(stderr_text[brace_start:brace_end + 1])
+        try:
+            measured = json.loads(stderr_text[brace_start:brace_end + 1])
+        except (TypeError, ValueError):
+            logger.warning("loudnorm_parse_failed_fallback_strip")
+            return await self._strip_only(video_path, output_path)
+
+        # If AAC audio in an MP4 is already close to the delivery target and
+        # safely below true-peak clipping, preserve its encoded packets. This
+        # avoids an unnecessary AAC generation loss for clean narration.
+        try:
+            input_lufs = float(measured.get("input_i"))
+            input_peak = float(measured.get("input_tp"))
+        except (TypeError, ValueError):
+            input_lufs = input_peak = math.nan
+        if (
+            math.isfinite(input_lufs)
+            and math.isfinite(input_peak)
+            and abs(input_lufs - target_lufs) <= 1.0
+            and input_peak <= -1.5
+            and output_path.suffix.lower() == ".mp4"
+        ):
+            try:
+                media_info = await self.probe(video_path)
+            except Exception as exc:
+                logger.warning("loudnorm_source_probe_failed", error_type=type(exc).__name__)
+            else:
+                audio_streams = [
+                    stream for stream in media_info.get("streams", [])
+                    if stream.get("codec_type") == "audio"
+                ]
+                format_name = str(media_info.get("format", {}).get("format_name", ""))
+                if (
+                    audio_streams
+                    and all(stream.get("codec_name") == "aac" for stream in audio_streams)
+                    and "mp4" in format_name
+                ):
+                    logger.info(
+                        "loudnorm_skipped_audio_already_compliant",
+                        input_lufs=round(input_lufs, 2),
+                        input_true_peak=round(input_peak, 2),
+                    )
+                    return await self._strip_only(video_path, output_path, copy_audio=True)
 
         # Pass 2: apply loudnorm + strip metadata.
         apply_cmd = [
@@ -1150,14 +1192,16 @@ class MediaService:
         video_path: Path,
         output_path: Path,
         *,
+        copy_audio: bool = False,
         timeout_seconds: float = 60.0,
     ) -> Path:
         """Fallback: re-mux while stripping every piece of metadata."""
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_args = ["-c:a", "copy"] if copy_audio else ["-c:a", "aac", "-b:a", "128k"]
         cmd = [
             self._ffmpeg_path, "-y", "-v", "error",
             "-i", str(video_path),
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+            "-c:v", "copy", *audio_args,
             "-map_metadata", "-1",
             "-map_chapters", "-1",
             "-metadata", "comment=",

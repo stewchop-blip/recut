@@ -136,7 +136,7 @@ async def test_single_action_applies_saved_settings(database,tmp_path,monkeypatc
     source.write_bytes(b'source')
     video._pending_jobs[10]=video._PendingJob(0,10,str(source),str(tmp_path),1)
     call=SimpleNamespace(from_user=SimpleNamespace(id=10),data='action:quick_prep',answer=AsyncMock(),
-        bot=SimpleNamespace(),message=SimpleNamespace(edit_text=AsyncMock()))
+        bot=SimpleNamespace(),message=SimpleNamespace(edit_text=AsyncMock(),answer=AsyncMock()))
     output=tmp_path/'final.mp4';output.write_bytes(b'output')
     result=QuickPrepResult(output,6,720,720,1,False,True)
     run=AsyncMock(return_value=result)
@@ -193,7 +193,8 @@ async def test_original_failure_preserves_source_without_processing(database,tmp
     video._pending_jobs[user_id]=video._PendingJob(0,user_id,str(source),str(tmp_path),1)
     pipeline=AsyncMock()
     monkeypatch.setattr(video.QuickPrepPipeline,'run',pipeline)
-    call=SimpleNamespace(from_user=SimpleNamespace(id=user_id),answer=AsyncMock(),message=SimpleNamespace(
+    call=SimpleNamespace(from_user=SimpleNamespace(id=user_id),bot=SimpleNamespace(),answer=AsyncMock(),message=SimpleNamespace(
+        answer=AsyncMock(),
         answer_video=AsyncMock(side_effect=RuntimeError('upload failed')),
         answer_document=AsyncMock(side_effect=RuntimeError('upload failed')), edit_text=AsyncMock()))
     try:

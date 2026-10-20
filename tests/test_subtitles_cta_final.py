@@ -203,3 +203,37 @@ def test_finalize_strips_metadata(tiny_video: Path, tmp_path: Path):
     assert "comment" not in fmt or fmt["comment"] == ""
     # Output is non-empty MP4
     assert out.stat().st_size > 0
+
+
+@pytestmark_ffmpeg
+def test_finalize_preserves_compliant_aac_packets(tmp_path: Path):
+    """Already compliant AAC is remuxed without another lossy encode."""
+    import subprocess
+    from app.services.media import get_media_service
+
+    source = tmp_path / "compliant.mp4"
+    out = tmp_path / "preserved.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            "-f", "lavfi", "-i", "sine=frequency=1000:duration=2",
+            "-f", "lavfi", "-i", "color=c=red:s=320x240:d=2",
+            "-shortest", "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-c:v", "libx264", "-c:a", "aac", "-pix_fmt", "yuv420p", str(source),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+    def audio_hash(path: Path) -> str:
+        result = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:a:0",
+             "-c", "copy", "-f", "hash", "-hash", "sha256", "-"],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        return result.stdout.strip()
+
+    before = audio_hash(source)
+    asyncio.run(get_media_service().finalize_export(source, out))
+    assert audio_hash(out) == before
