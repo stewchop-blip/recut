@@ -254,6 +254,7 @@ async def test_cancel_reaps_real_ffmpeg(tmp_path):
 async def test_youtube_intake_never_calls_normal_downloader(monkeypatch):
     from app.bot.handlers import video, youtube_highlights as yh
     monkeypatch.setattr(video,'_mode_state',{912:'moments'})
+    monkeypatch.setattr(video,'_subscription_gate_blocked',AsyncMock(return_value=False))
     monkeypatch.setattr(yh,'accept_url',AsyncMock())
     monkeypatch.setattr(video.DownloaderService,'download',AsyncMock(side_effect=AssertionError('full download')))
     message=SimpleNamespace(from_user=SimpleNamespace(id=912),text=URL,answer=AsyncMock())
@@ -273,10 +274,11 @@ async def test_failed_job_cleanup_and_status(monkeypatch,tmp_path):
     monkeypatch.setattr(yh.db_manager,'session',session)
     monkeypatch.setattr(yh,'JobRepository',lambda _:repo)
     monkeypatch.setattr(yh,'get_temp_manager',lambda:SimpleNamespace(_job_dir=lambda _:tmp_path/'job'))
+    monkeypatch.setattr('app.bot.handlers.video._subscription_gate_blocked',AsyncMock(return_value=False))
     monkeypatch.setattr(yh.YouTubeSource,'prepare',AsyncMock(side_effect=h.HighlightsError('CAPTIONS_UNAVAILABLE')))
     yh._pending[11]=yh.Pending(URL,22,33,__import__('time').monotonic())
     call=SimpleNamespace(from_user=SimpleNamespace(id=11),answer=AsyncMock(),bot=None,
-        message=SimpleNamespace(message_id=22,chat=SimpleNamespace(id=33),edit_text=AsyncMock()))
+        message=SimpleNamespace(message_id=22,chat=SimpleNamespace(id=33),answer=AsyncMock(),edit_text=AsyncMock()))
     await yh.run(call)
     repo.mark_failed.assert_awaited_once()
     repo.mark_completed.assert_not_called()
@@ -288,7 +290,7 @@ async def test_stale_button_rejected(monkeypatch):
     from app.bot.handlers import youtube_highlights as yh
     yh._pending[12]=yh.Pending(URL,99,33,__import__('time').monotonic())
     call=SimpleNamespace(from_user=SimpleNamespace(id=12),answer=AsyncMock(),
-        message=SimpleNamespace(message_id=22,chat=SimpleNamespace(id=33)))
+        bot=None,message=SimpleNamespace(message_id=22,chat=SimpleNamespace(id=33),answer=AsyncMock()))
     await yh.run(call)
     assert yh._pending[12].status_id==99
     call.answer.assert_awaited_once()
