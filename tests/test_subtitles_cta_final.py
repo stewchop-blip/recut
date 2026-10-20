@@ -190,7 +190,7 @@ def test_finalize_strips_metadata(tiny_video: Path, tmp_path: Path):
     import subprocess
     cmd = [
         "ffprobe", "-v", "error",
-        "-show_entries", "format_tags=title,comment:stream_tags",
+        "-show_entries", "format_tags=title,comment:stream=codec_type,sample_rate:stream_tags",
         "-of", "json", str(out),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -201,6 +201,8 @@ def test_finalize_strips_metadata(tiny_video: Path, tmp_path: Path):
     # Title/comment cleared.
     assert "title" not in fmt or fmt["title"] == ""
     assert "comment" not in fmt or fmt["comment"] == ""
+    audio = next(stream for stream in data["streams"] if stream["codec_type"] == "audio")
+    assert int(audio["sample_rate"]) == 48000
     # Output is non-empty MP4
     assert out.stat().st_size > 0
 
