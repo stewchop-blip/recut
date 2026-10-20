@@ -107,18 +107,18 @@ class ScriptVideoAssembler:
         # Easing is continuous at every beat boundary and slows at the ends.
         eased = f"({progress})*({progress})*(3-2*({progress}))"
         motion = continuous_motion or beat.motion
+        motion_amount = min(0.055, max(0.045, 0.0052 * run_frames / ScriptVideoAssembler.fps))
+        pan_span = 0.44
         if motion == "static":
             zoom = "1"
         elif motion == "zoom_out":
-            zoom = f"max(1.045-0.045*({eased}),1)"
-        elif motion in {"pan_left", "pan_right"}:
-            zoom = "1.045"
+            zoom = f"max(1+{motion_amount:.5f}-{motion_amount:.5f}*({eased}),1)"
         else:
-            zoom = f"min(1+0.045*({eased}),1.045)"
+            zoom = f"min(1+{motion_amount:.5f}*({eased}),1+{motion_amount:.5f})"
         if motion == "pan_left":
-            x = f"(iw-iw/zoom)*(0.72-0.44*({eased}))"
+            x = f"(iw-iw/zoom)*(0.5+{pan_span / 2:.5f}-{pan_span:.5f}*({eased}))"
         elif motion == "pan_right":
-            x = f"(iw-iw/zoom)*(0.28+0.44*({eased}))"
+            x = f"(iw-iw/zoom)*(0.5-{pan_span / 2:.5f}+{pan_span:.5f}*({eased}))"
         else:
             x = "iw/2-(iw/zoom/2)"
         y = "ih/2-(ih/zoom/2)"
@@ -166,16 +166,15 @@ class ScriptVideoAssembler:
         return windows
 
     @classmethod
-    def _merge_hyperframes_beats(
+    def _merge_contiguous_beats(
         cls, beats: list[VisualBeat], assets: list[Path]
     ) -> list[VisualBeat]:
-        """Keep a motion-graphic scene continuous, not split into restart clips.
+        """Keep repeated stills and motion-graphic scenes on one continuous clip.
 
-        The general short-beat editor deliberately divides longer visuals into
-        multiple beats. That is fine for photos, but rendering the same 3-5s
-        HyperFrames clip repeatedly resets its CSS motion and causes a stutter.
-        Merge only adjacent beats of the *same scene* using the same graphic.
-        All other assets and editorial beats keep their original treatment.
+        Splitting one still into short clips creates hard edit points in one
+        camera move; a planned crossfade can then blend the image with itself.
+        Merge the still run and preserve only the transition into its first
+        frame. Motion graphics still merge only within their original scene.
         """
         merged: list[VisualBeat] = []
         for beat in beats:
@@ -184,17 +183,26 @@ class ScriptVideoAssembler:
                 asset.suffix.lower() == ".mp4"
                 and asset.name.startswith("hyperframes-")
             )
-            if (
+            same_still = (
+                not cls._is_video_asset(asset)
+                and bool(merged)
+                and assets[merged[-1].image_index] == asset
+            )
+            same_graphic_scene = (
                 is_graphic
-                and merged
+                and bool(merged)
                 and merged[-1].scene_id == beat.scene_id
                 and merged[-1].image_index == beat.image_index
-            ):
+            )
+            if same_still or same_graphic_scene:
                 previous = merged[-1]
+                removed_overlap = (
+                    cls.crossfade_seconds if same_still and beat.transition != "cut" else 0.0
+                )
                 merged[-1] = VisualBeat(
                     scene_id=previous.scene_id,
                     image_index=previous.image_index,
-                    duration=previous.duration + beat.duration,
+                    duration=previous.duration + beat.duration - removed_overlap,
                     motion=previous.motion,
                     transition=previous.transition,
                 )
@@ -386,7 +394,7 @@ class ScriptVideoAssembler:
         try:
             audio_duration = await self.audio_duration(Path(audio_path))
             beats = TimelineCompiler().compile(plan, len(asset_paths), audio_duration)
-            beats = self._merge_hyperframes_beats(beats, asset_paths)
+            beats = self._merge_contiguous_beats(beats, asset_paths)
             beat_durations = [beat.duration for beat in beats]
             # Image indices may differ while resolving to the same shared file.
             # A single camera path across that run removes zoom jumps at cuts.
