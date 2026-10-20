@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Optional
 
 from app.core.logging import get_logger
+from app.services.media.audio import AudioConfig, AudioProcessor
 from app.services.media.ffmpeg import _find_ffmpeg_bin
+from app.services.media.probe import get_probe_service
 from app.services.script_video.models import VideoPlan
 from app.services.script_video.timeline import TimelineCompiler, VisualBeat
 
@@ -24,6 +26,8 @@ class ScriptVideoAssembler:
     width = 1080
     height = 1920
     fps = 30
+    intermediate_crf = 18
+    final_crf = 23
     crossfade_seconds = TimelineCompiler.transition_seconds
     video_suffixes = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
@@ -206,6 +210,7 @@ class ScriptVideoAssembler:
             f"crop={cls.width}:{cls.height},gblur=sigma=28[bg2];"
             f"[fg]scale={cls.width}:{cls.height}:force_original_aspect_ratio=decrease[fg2];"
             f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2,"
+            f"tpad=stop_mode=clone:stop_duration={duration:.4f},"
             f"trim=duration={duration:.4f},fps={cls.fps},settb=1/{cls.fps},"
             f"setpts=N,setsar=1,format=yuv420p[v0]"
         )
@@ -292,7 +297,8 @@ class ScriptVideoAssembler:
             _find_ffmpeg_bin(), "-y", "-v", "error", "-loop", "1", "-framerate",
             str(self.fps), "-t", f"{duration:.4f}", "-i", str(image_path),
             "-filter_complex_script", str(graph_path), "-map", "[v0]", "-an",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-r",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf",
+            str(self.intermediate_crf), "-r",
             str(self.fps), "-pix_fmt", "yuv420p", "-t", f"{duration:.4f}",
             "-movflags", "+faststart", str(output_path),
         ]
@@ -307,18 +313,22 @@ class ScriptVideoAssembler:
         duration: float,
         output_path: Path,
         beat_index: int,
+        source_duration: float | None = None,
     ) -> None:
         graph_path = output_path.with_suffix(".filter.txt")
         graph_path.write_text(self._video_filter(duration), encoding="utf-8")
+        if source_duration is None:
+            source_duration = (await get_probe_service().probe(video_path)).duration_seconds
         seek_seconds = (
             0.0 if video_path.name.startswith("hyperframes-")
-            else (beat_index % 3) * 0.35
+            else min((beat_index % 3) * 0.35, max(0.0, source_duration - 0.1))
         )
         command = [
-            _find_ffmpeg_bin(), "-y", "-v", "error", "-stream_loop", "-1",
-            "-ss", f"{seek_seconds:.2f}", "-i", str(video_path),
+            _find_ffmpeg_bin(), "-y", "-v", "error", "-ss", f"{seek_seconds:.2f}",
+            "-i", str(video_path),
             "-filter_complex_script", str(graph_path), "-map", "[v0]", "-an",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-r",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf",
+            str(self.intermediate_crf), "-r",
             str(self.fps), "-pix_fmt", "yuv420p", "-t", f"{duration:.4f}",
             "-movflags", "+faststart", str(output_path),
         ]
@@ -336,9 +346,13 @@ class ScriptVideoAssembler:
         beat_index: int,
         *,
         still_window: tuple[int, int, str] | None = None,
+        source_duration: float | None = None,
     ) -> None:
         if self._is_video_asset(asset_path):
-            await self._render_video_beat(asset_path, duration, output_path, beat_index)
+            await self._render_video_beat(
+                asset_path, duration, output_path, beat_index,
+                source_duration=source_duration,
+            )
         else:
             frame, frames, motion = still_window or (
                 0, max(2, round(duration * self.fps)), beat.motion
@@ -377,6 +391,12 @@ class ScriptVideoAssembler:
             # Image indices may differ while resolving to the same shared file.
             # A single camera path across that run removes zoom jumps at cuts.
             still_windows = self._still_motion_windows(beats, asset_paths, beat_durations)
+            video_durations = {}
+            for asset_path in dict.fromkeys(asset_paths):
+                if self._is_video_asset(asset_path):
+                    video_durations[asset_path] = (
+                        await get_probe_service().probe(asset_path)
+                    ).duration_seconds
             clip_paths: list[Path] = []
             for index, beat in enumerate(beats):
                 clip_path = temp_dir / f"beat-{index:03d}.mp4"
@@ -387,6 +407,7 @@ class ScriptVideoAssembler:
                     clip_path,
                     index,
                     still_window=still_windows[index],
+                    source_duration=video_durations.get(asset_paths[beat.image_index]),
                 )
                 clip_paths.append(clip_path)
             filter_graph = self._filter_graph(beats, beat_durations)
@@ -406,11 +427,14 @@ class ScriptVideoAssembler:
             for clip_path in clip_paths:
                 command.extend(["-i", str(clip_path)])
             command.extend(["-i", str(Path(audio_path).resolve())])
+            audio_args, _ = AudioProcessor().audio_args(AudioConfig(preset="original"))
             video_label = "vfinal" if subtitle_filter else "vout"
             command.extend([
                 "-filter_complex_script", str(graph_path), "-map", f"[{video_label}]",
-                "-map", f"{len(beats)}:a:0", "-c:v", "libx264", "-preset", "fast",
-                "-crf", "23", "-r", str(self.fps), "-pix_fmt", "yuv420p", "-c:a", "aac",
+                "-map", f"{len(beats)}:a:0", *audio_args,
+                "-c:v", "libx264", "-preset", "fast",
+                "-crf", str(self.final_crf), "-r", str(self.fps), "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
                 "-b:a", "128k", "-shortest", "-movflags", "+faststart", str(output_path),
             ])
             proc = await asyncio.create_subprocess_exec(
