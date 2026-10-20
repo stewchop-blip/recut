@@ -242,6 +242,7 @@ async def test_narratives_never_spawn_graphics(tmp_path, monkeypatch):
     media = await resolver.resolve(
         make_plan(story=True), tmp_path,
         user_idea="Придумай мистическую историю про плёночную камеру",
+        test_hyperframes=True,
     )
     assert media.graphics_videos == 0
     assert media.ai_images == 4
