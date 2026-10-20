@@ -7,11 +7,18 @@ Disabled by default and ALWAYS falls back to the existing video pipeline.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import html
 import os
 import shutil
 import signal
+import time
 from pathlib import Path
+
+try:
+    import psutil
+except ImportError:  # Some isolated CI smoke jobs install only renderer dependencies.
+    psutil = None
 
 from app.core.logging import get_logger
 
@@ -219,24 +226,64 @@ class HyperframesGraphicRenderer:
             "--low-memory-mode", "--no-best-effort", "--quiet",
             "--quality", "standard",
         ]
+        started = time.monotonic()
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, cwd=str(workdir), env=safe_env, start_new_session=True,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
+            peak_tree_rss_bytes = 0
+            cpu_by_pid: dict[int, float] = {}
+
+            async def sample_resources() -> None:
+                nonlocal peak_tree_rss_bytes
+                if psutil is None:
+                    return
+                try:
+                    root = psutil.Process(proc.pid)
+                    while proc.returncode is None:
+                        tree_rss = 0
+                        try:
+                            processes = [root, *root.children(recursive=True)]
+                        except psutil.Error:
+                            processes = [root]
+                        for process in processes:
+                            try:
+                                tree_rss += process.memory_info().rss
+                                cpu = process.cpu_times()
+                                cpu_by_pid[process.pid] = max(
+                                    cpu_by_pid.get(process.pid, 0.0),
+                                    cpu.user + cpu.system,
+                                )
+                            except psutil.Error:
+                                continue
+                        peak_tree_rss_bytes = max(peak_tree_rss_bytes, tree_rss)
+                        await asyncio.sleep(0.15)
+                except psutil.Error:
+                    return
+
+            sampler = asyncio.create_task(sample_resources())
             try:
-                _, err = await asyncio.wait_for(
-                    proc.communicate(), timeout=self.timeout_seconds
-                )
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                await self._kill_process_group(proc)
-                raise
+                try:
+                    _, err = await asyncio.wait_for(
+                        proc.communicate(), timeout=self.timeout_seconds
+                    )
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    await self._kill_process_group(proc)
+                    raise
+            finally:
+                sampler.cancel()
+                with suppress(asyncio.CancelledError):
+                    await sampler
+            wall_seconds = round(time.monotonic() - started, 3)
             if proc.returncode != 0:
                 logger.warning(
                     "script_hyperframes_render_failed",
                     returncode=proc.returncode,
                     error_type="HyperframesExit",
+                    elapsed_seconds=wall_seconds,
+                    peak_process_tree_rss_mb=round(peak_tree_rss_bytes / 1048576, 1),
                     detail=(err or b"")[-350:].decode(errors="replace"),
                 )
                 return None
@@ -251,6 +298,9 @@ class HyperframesGraphicRenderer:
                 "script_hyperframes_scene_ready",
                 index=index, duration=duration,
                 output_bytes=output_path.stat().st_size,
+                elapsed_seconds=wall_seconds,
+                peak_process_tree_rss_mb=round(peak_tree_rss_bytes / 1048576, 1),
+                sampled_cpu_seconds=round(sum(cpu_by_pid.values()), 2),
             )
             return output_path
         except asyncio.CancelledError:
@@ -259,6 +309,7 @@ class HyperframesGraphicRenderer:
             logger.warning(
                 "script_hyperframes_unavailable",
                 index=index, error_type=type(exc).__name__,
+                elapsed_seconds=round(time.monotonic() - started, 3),
             )
             return None
         finally:

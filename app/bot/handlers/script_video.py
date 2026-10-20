@@ -5,6 +5,7 @@ import asyncio
 import gc
 import os
 import tempfile
+import time
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -292,6 +293,7 @@ async def handle_idea(message: Message, bot=None) -> bool:
                 return True
 
     _script_requests.add(user_id)
+    job_started = time.monotonic()
     current_task = asyncio.current_task()
     if current_task is not None:
         _script_tasks[user_id] = current_task
@@ -359,7 +361,12 @@ async def handle_idea(message: Message, bot=None) -> bool:
                     cost_tracker=tracker,
                     max_ai_images=ai_budget,
                     max_stock_download_mb=max_stock_mb,
-                ).resolve(plan, workdir, user_idea=idea)
+                ).resolve(
+                    plan,
+                    workdir,
+                    user_idea=idea,
+                    test_hyperframes=user_id in settings.internal_user_ids,
+                )
                 tracker.images_generated = media.ai_images
 
                 audio_path = workdir / "narration.mp3"
@@ -404,6 +411,7 @@ async def handle_idea(message: Message, bot=None) -> bool:
             "script_video_completed",
             user_id=user_id,
             job_id=job_id,
+            elapsed_seconds=round(time.monotonic() - job_started, 3),
             ai_images=media.ai_images if media else 0,
             stock_videos=media.stock_videos if media else 0,
             graphics_videos=media.graphics_videos if media else 0,
@@ -431,6 +439,7 @@ async def handle_idea(message: Message, bot=None) -> bool:
             "script_video_cancelled",
             user_id=user_id,
             job_id=job_id,
+            elapsed_seconds=round(time.monotonic() - job_started, 3),
             actual_cost_usd=tracker.actual_cost_usd,
             actual_cost_breakdown=tracker.actual_costs,
         )
@@ -446,6 +455,7 @@ async def handle_idea(message: Message, bot=None) -> bool:
             "script_video_failed",
             user_id=user_id,
             job_id=job_id,
+            elapsed_seconds=round(time.monotonic() - job_started, 3),
             error_type=type(exc).__name__,
             actual_cost_usd=tracker.actual_cost_usd,
             actual_cost_breakdown=tracker.actual_costs,
