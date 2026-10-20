@@ -15,7 +15,10 @@ import signal
 import time
 from pathlib import Path
 
-import psutil
+try:
+    import psutil
+except ImportError:  # Some isolated CI smoke jobs install only renderer dependencies.
+    psutil = None
 
 from app.core.logging import get_logger
 
@@ -235,6 +238,8 @@ class HyperframesGraphicRenderer:
 
             async def sample_resources() -> None:
                 nonlocal peak_tree_rss_bytes
+                if psutil is None:
+                    return
                 try:
                     root = psutil.Process(proc.pid)
                     while proc.returncode is None:
