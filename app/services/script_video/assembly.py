@@ -447,7 +447,7 @@ class ScriptVideoAssembler:
 
         output_path = Path(output_path) if output_path else Path("/tmp") / f"script_{uuid.uuid4().hex}.mp4"
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_dir = Path(tempfile.mkdtemp(prefix="recut_assembly_", dir=str(output_path.parent)))
+        temp_dir = Path(tempfile.mkdtemp(prefix="recut_assembly_"))
         try:
             audio_duration = await self.audio_duration(Path(audio_path))
             beats = TimelineCompiler().compile(

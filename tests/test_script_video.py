@@ -3,6 +3,7 @@ import json
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -367,6 +368,16 @@ async def test_assembler_rejects_nonempty_invalid_mp4_after_encoder_success(tmp_
     from unittest.mock import AsyncMock
     from app.services.script_video import assembly
 
+    working_dirs = []
+    mkdtemp = assembly.tempfile.mkdtemp
+
+    def make_working_dir(*args, **kwargs):
+        path = mkdtemp(*args, **kwargs)
+        working_dirs.append(Path(path))
+        return path
+
+    monkeypatch.setattr(assembly.tempfile, "mkdtemp", make_working_dir)
+
     if not shutil.which("ffprobe"):
         pytest.skip("ffprobe is required for the output validation check")
     image_path = tmp_path / "image.png"
@@ -390,3 +401,6 @@ async def test_assembler_rejects_nonempty_invalid_mp4_after_encoder_success(tmp_
         await assembler.assemble(
             _sample_plan(), [str(image_path)], audio_path=audio_path, output_path=output_path,
         )
+    assert working_dirs and all(not path.exists() for path in working_dirs)
+    assert image_path.read_bytes() == b"fixture"
+    assert audio_path.read_bytes() == b"fixture"
