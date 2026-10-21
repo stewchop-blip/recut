@@ -3,6 +3,7 @@ import json
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -288,11 +289,11 @@ def _sample_plan():
     )
 
 
-def test_timeline_creates_short_moving_beats_and_respects_scene_assets():
+def test_timeline_preserves_planned_events_without_arbitrary_subcuts():
     plan = _sample_plan()
     beats = TimelineCompiler().compile(plan, image_count=2, audio_duration=40)
-    assert 12 <= len(beats) <= 20
-    assert max(beat.duration for beat in beats) <= 3.1
+    assert len(beats) == len(plan.scenes)
+    assert max(beat.duration for beat in beats) > 3.1
     assert {beat.image_index for beat in beats} == {0, 1}
     assert len({beat.motion for beat in beats}) > 1
 
@@ -311,8 +312,6 @@ async def test_assembler_renders_vertical_mp4_with_audio_and_valid_probe(tmp_pat
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
         pytest.skip("FFmpeg and ffprobe are required for the integration test")
-
-    monkeypatch.setattr(TimelineCompiler, "beat_target_seconds", 0.5)
 
     image_paths = []
     for index, color in enumerate(("red", "blue", "green")):
@@ -369,6 +368,16 @@ async def test_assembler_rejects_nonempty_invalid_mp4_after_encoder_success(tmp_
     from unittest.mock import AsyncMock
     from app.services.script_video import assembly
 
+    working_dirs = []
+    mkdtemp = assembly.tempfile.mkdtemp
+
+    def make_working_dir(*args, **kwargs):
+        path = mkdtemp(*args, **kwargs)
+        working_dirs.append(Path(path))
+        return path
+
+    monkeypatch.setattr(assembly.tempfile, "mkdtemp", make_working_dir)
+
     if not shutil.which("ffprobe"):
         pytest.skip("ffprobe is required for the output validation check")
     image_path = tmp_path / "image.png"
@@ -392,3 +401,6 @@ async def test_assembler_rejects_nonempty_invalid_mp4_after_encoder_success(tmp_
         await assembler.assemble(
             _sample_plan(), [str(image_path)], audio_path=audio_path, output_path=output_path,
         )
+    assert working_dirs and all(not path.exists() for path in working_dirs)
+    assert image_path.read_bytes() == b"fixture"
+    assert audio_path.read_bytes() == b"fixture"

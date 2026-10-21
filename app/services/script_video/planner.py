@@ -28,7 +28,7 @@ OUTPUT CONTRACT:
 TOKEN BUDGET IS IMPORTANT:
 - Keep the whole JSON compact.
 - Set top-level narration to an empty string. ReCut derives it from scenes[].narration.
-- visual_style: maximum 35 words.
+- visual_style: maximum 35 words. For stories, use these words for fixed character appearance, clothing, key prop colours and lighting. Repeat these identities consistently; do not change them between scenes.
 - Every scene narration: maximum 14 words.
 - Every visual_prompt: maximum 28 English words.
 - Every stock_query: 2-5 simple English words.
@@ -56,7 +56,10 @@ HYBRID VISUAL rules:
 EDITING rules:
 - Think in shots, not slides. Each scene is one distinct visual beat.
 - Use cuts for energetic changes, with a few deliberate fades/slides.
-- Vary shot scale and angle across adjacent scenes.
+- Vary shot scale and angle only when a story event warrants it. Establish the setting, then show the important object, then the reveal. A final phone message needs a phone shot, not an unrelated earlier reflection.
+- Use importance 4-5 for the hook and key reveals. Their visual_prompt must show that event clearly; spend no scenes on arbitrary background details.
+- A reference_scene_id preserves subject identity, not a frozen pose or an instruction to repeat the same scene. Keep recurring clothes/props consistent with visual_style.
+- Set static for deliberate pauses. For tension, use one slow push; avoid consecutive opposite pans into the same scene. Leave generous margins around faces and key objects; do not imply object coordinates.
 
 QUALITY BAR:
 - The result must feel like edited short-form content, not an AI slideshow.

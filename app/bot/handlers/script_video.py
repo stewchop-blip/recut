@@ -395,6 +395,7 @@ async def handle_idea(message: Message, bot=None) -> bool:
                     subtitle_path=str(subtitle_path) if subtitle_path else None,
                     audio_path=audio_path,
                     output_path=output,
+                    phrases=subtitles.phrases,
                 )
                 if not output.is_file() or output.stat().st_size == 0:
                     raise RuntimeError("video output is empty")

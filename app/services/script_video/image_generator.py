@@ -85,11 +85,13 @@ class ImageGenerator:
         max_images: Optional[int] = None,
         aspect_ratio: str | None = None,
         resolution: str | None = None,
+        preserve_slots: bool = False,
     ) -> list[str]:
         """Generate images for multiple prompts concurrently.
 
         Returns a flat list of image URLs / base64 strings. A compatible image
-        model receives a native vertical aspect ratio by default.
+        model receives a native vertical aspect ratio by default. preserve_slots
+        leaves failed anchors empty for the chronological story fallback.
         """
         s = get_settings()
         image_limit = max_images if max_images is not None else s.script_video_max_images_pro
@@ -195,7 +197,7 @@ class ImageGenerator:
             raise ImageCreditsExhaustedError(
                 "OpenRouter image generation credits are exhausted"
             )
-        if successful:
+        if successful and not preserve_slots:
             for index, result in enumerate(results):
                 if result:
                     continue
@@ -211,4 +213,6 @@ class ImageGenerator:
         for result in results:
             if result:
                 flat.extend(result)
+            elif preserve_slots:
+                flat.append("")
         return flat
