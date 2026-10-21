@@ -137,8 +137,8 @@ class HybridMediaResolver:
 
         Four keyframes across ten unresolved scenes should land roughly around
         0/3/6/9 rather than all clustering on story-specific ending shots. For
-        each evenly spaced timeline target, prefer the closest unresolved scene;
-        scene specificity/importance only breaks near ties.
+        each interior target, a nearby important event can replace a weak shot.
+        Keep opening/payoff coverage, rather than buying more keyframes.
         """
         candidates = sorted(set(unresolved))
         if budget <= 0 or not candidates:
@@ -156,13 +156,17 @@ class HybridMediaResolver:
         ]
         selected: list[int] = []
         remaining = set(candidates)
-        for target in targets:
+        for slot, target in enumerate(targets):
             if not remaining:
                 break
+            local = [idx for idx in remaining if abs(idx - target) <= 1]
             chosen = min(
-                remaining,
+                local or remaining,
                 key=lambda idx: (
-                    abs(idx - target),
+                    abs(idx - target) - (
+                        0.6 * (plan.scenes[idx].importance - 3)
+                        if 0 < slot < len(targets) - 1 else 0
+                    ),
                     -cls._ai_priority(plan, idx)[0],
                     -cls._ai_priority(plan, idx)[1],
                     idx,
@@ -416,14 +420,19 @@ class HybridMediaResolver:
             # All paid anchor images must share one small, explicit style bible.
             # They are generated independently, so never assume image-to-image
             # identity preservation or quietly buy extra reference frames.
-            style = plan.visual_style.strip()[:260]
+            style = plan.visual_style.strip()[:200]
+            scene_by_id = {scene.id: (i, scene) for i, scene in enumerate(plan.scenes)}
             prompts = [
                 (
-                    f"9:16 still from one coherent short film. "
-                    f"Shared visual language: {style}. "
-                    f"Maintain recurring props, period and character appearance. "
-                    f"Do not include headlines, lettering, TV overlays or logos. "
-                    f"Scene: {plan.scenes[index].visual_prompt}"
+                    f"9:16 frame of one film. Shared visual language: {style}. "
+                    f"Do not include headlines, lettering or logos. Current shot/action: {plan.scenes[index].visual_prompt}. "
+                    + (
+                        "Identity reference only, not action/framing: "
+                        + scene_by_id[plan.scenes[index].reference_scene_id][1].visual_prompt[:140]
+                        if plan.scenes[index].reference_scene_id in scene_by_id
+                        and scene_by_id[plan.scenes[index].reference_scene_id][0] < index
+                        else ""
+                    )
                 )
                 for index in ai_indices
             ]
@@ -442,6 +451,7 @@ class HybridMediaResolver:
                     prompts,
                     aspect_ratio="9:16",
                     max_images=len(prompts),
+                    preserve_slots=True,
                 )
             except asyncio.CancelledError:
                 raise
@@ -454,6 +464,8 @@ class HybridMediaResolver:
                 )
 
             for scene_index, source in zip(ai_indices, generated[:len(ai_indices)]):
+                if not source:
+                    continue
                 try:
                     paths[scene_index] = await self._save_generated_image(
                         source,

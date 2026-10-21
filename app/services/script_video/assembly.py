@@ -5,8 +5,11 @@ import asyncio
 import shutil
 import tempfile
 import uuid
+from dataclasses import replace
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
+
+from PIL import Image, ImageChops
 
 from app.core.logging import get_logger
 from app.services.media.audio import AudioConfig, AudioProcessor
@@ -107,14 +110,19 @@ class ScriptVideoAssembler:
         # Easing is continuous at every beat boundary and slows at the ends.
         eased = f"({progress})*({progress})*(3-2*({progress}))"
         motion = continuous_motion or beat.motion
+        # Limit travel per second and maximum magnification. A short reaction
+        # gets a hold, while a long important reveal has room for a slow push.
+        amount = min(0.055, max(0.018, run_frames / ScriptVideoAssembler.fps * 0.004))
+        if beat.importance >= 4:
+            amount = min(0.06, amount * 1.1)
         if motion == "static":
             zoom = "1"
         elif motion == "zoom_out":
-            zoom = f"max(1.045-0.045*({eased}),1)"
+            zoom = f"max(1+{amount:.5f}-{amount:.5f}*({eased}),1)"
         elif motion in {"pan_left", "pan_right"}:
-            zoom = "1.045"
+            zoom = f"{1 + amount:.5f}"
         else:
-            zoom = f"min(1+0.045*({eased}),1.045)"
+            zoom = f"min(1+{amount:.5f}*({eased}),1+{amount:.5f})"
         if motion == "pan_left":
             x = f"(iw-iw/zoom)*(0.72-0.44*({eased}))"
         elif motion == "pan_right":
@@ -130,6 +138,44 @@ class ScriptVideoAssembler:
             f"trim=duration={duration:.4f},fps={ScriptVideoAssembler.fps},"
             f"settb=1/{ScriptVideoAssembler.fps},setpts=N,setsar=1,format=yuv420p[v{index}]"
         )
+
+    @classmethod
+    def _safe_framing(cls, beats: list[VisualBeat], assets: list[Path]) -> list[VisualBeat]:
+        """Only reframe when exact flat borders prove no foreground is removed.
+
+        This locates empty padding, not faces/objects. Natural photographs
+        generally fail this conservative gate and keep their original framing.
+        """
+        scales: dict[Path, float] = {}
+        result: list[VisualBeat] = []
+        for beat in beats:
+            asset = assets[beat.image_index]
+            if result and assets[result[-1].image_index] == asset and beat.importance >= 4:
+                if asset not in scales:
+                    scales[asset] = 1.0
+                    if not cls._is_video_asset(asset):
+                        try:
+                            with Image.open(asset) as source:
+                                w, h = source.size
+                                if (w >= 720 and h >= 1280 and w * h <= 8_000_000
+                                        and abs(w / h - cls.width / cls.height) < .01):
+                                    rgb = source.convert("RGB")
+                                    box = ImageChops.difference(
+                                        rgb, Image.new("RGB", rgb.size, rgb.getpixel((0, 0)))
+                                    ).getbbox()
+                                    if box:
+                                        margin = min(box[0] / w, box[1] / h,
+                                                     1 - box[2] / w, 1 - box[3] / h)
+                                        if margin >= 0.09:
+                                            scales[asset] = min(1.08, 1 / (1 - 2 * (margin - .06)))
+                        except (OSError, ValueError, Image.DecompressionBombError):
+                            pass
+                # Do not pull out again on an arbitrary following beat.
+                beat = replace(beat, framing_scale=max(result[-1].framing_scale, scales[asset]))
+            elif result and assets[result[-1].image_index] == asset:
+                beat = replace(beat, framing_scale=result[-1].framing_scale)
+            result.append(beat)
+        return result
 
     @classmethod
     def _still_motion_windows(
@@ -153,6 +199,7 @@ class ScriptVideoAssembler:
             while (
                 stop < len(beats)
                 and assets[beats[stop].image_index] == asset
+                and beats[stop].framing_scale == beats[cursor].framing_scale
             ):
                 stop += 1
             lengths = [max(2, round(durations[i] * cls.fps)) for i in range(cursor, stop)]
@@ -166,16 +213,14 @@ class ScriptVideoAssembler:
         return windows
 
     @classmethod
-    def _merge_hyperframes_beats(
+    def _merge_contiguous_beats(
         cls, beats: list[VisualBeat], assets: list[Path]
     ) -> list[VisualBeat]:
-        """Keep a motion-graphic scene continuous, not split into restart clips.
+        """Render reused stills once; preserve the entry transition and story clock.
 
-        The general short-beat editor deliberately divides longer visuals into
-        multiple beats. That is fine for photos, but rendering the same 3-5s
-        HyperFrames clip repeatedly resets its CSS motion and causes a stutter.
-        Merge only adjacent beats of the *same scene* using the same graphic.
-        All other assets and editorial beats keep their original treatment.
+        Separate encodes/crossfades of the same photo add no distinct shot and
+        can restart motion or blend an image against its own different scale.
+        Graphic clips merge only within the original scene.
         """
         merged: list[VisualBeat] = []
         for beat in beats:
@@ -185,18 +230,23 @@ class ScriptVideoAssembler:
                 and asset.name.startswith("hyperframes-")
             )
             if (
-                is_graphic
-                and merged
-                and merged[-1].scene_id == beat.scene_id
-                and merged[-1].image_index == beat.image_index
+                merged
+                and assets[merged[-1].image_index] == asset
+                and merged[-1].framing_scale == beat.framing_scale
+                and (not cls._is_video_asset(asset)
+                     or (is_graphic and merged[-1].scene_id == beat.scene_id))
             ):
                 previous = merged[-1]
                 merged[-1] = VisualBeat(
                     scene_id=previous.scene_id,
                     image_index=previous.image_index,
-                    duration=previous.duration + beat.duration,
-                    motion=previous.motion,
+                    duration=previous.duration + beat.duration - (
+                        cls.crossfade_seconds if beat.transition != "cut" else 0.0
+                    ),
+                    motion=(beat.motion if beat.importance > previous.importance else previous.motion),
                     transition=previous.transition,
+                    importance=max(previous.importance, beat.importance),
+                    framing_scale=previous.framing_scale,
                 )
             else:
                 merged.append(beat)
@@ -256,21 +306,29 @@ class ScriptVideoAssembler:
         return ";".join(graph)
 
     async def _run_beat_command(self, command: list[str], output_path: Path) -> None:
-        proc = await asyncio.create_subprocess_exec(
-            *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await self._communicate(
-            proc,
-            timeout=90,
-            timeout_message="FFmpeg timed out rendering a visual beat",
-        )
-        if proc.returncode or not output_path.is_file() or output_path.stat().st_size == 0:
-            logger.error(
-                "script_video_beat_render_failed",
-                exit_code=proc.returncode,
-                stderr=stderr.decode(errors="replace")[-500:],
+        for attempt in range(2):
+            proc = await asyncio.create_subprocess_exec(
+                *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
             )
-            raise ScriptVideoAssemblyError("FFmpeg failed to render a visual beat")
+            _, stderr = await self._communicate(
+                proc, timeout=90, timeout_message="FFmpeg timed out rendering a visual beat",
+            )
+            if proc.returncode or not output_path.is_file() or output_path.stat().st_size == 0:
+                logger.error(
+                    "script_video_beat_render_failed", exit_code=proc.returncode,
+                    stderr=stderr.decode(errors="replace")[-500:],
+                )
+                raise ScriptVideoAssemblyError("FFmpeg failed to render a visual beat")
+            try:
+                await get_probe_service().probe(output_path)
+                return
+            except ProbeError as exc:
+                # A nonempty file and exit 0 were observed with an unfinished
+                # MP4. Retry only that local encode, never provider generation.
+                output_path.unlink(missing_ok=True)
+                if attempt:
+                    raise ScriptVideoAssemblyError("Rendered beat failed validation") from exc
+                logger.warning("script_video_beat_retry", reason="invalid_mp4")
 
     async def _render_image_beat(
         self,
@@ -284,13 +342,19 @@ class ScriptVideoAssembler:
         continuous_motion: str | None = None,
     ) -> None:
         graph_path = output_path.with_suffix(".filter.txt")
+        # A framing change is allowed only after the flat-border safety gate.
+        framing = (
+            f"crop=trunc(iw/{beat.framing_scale:.5f}/2)*2:"
+            f"trunc(ih/{beat.framing_scale:.5f}/2)*2,"
+            if beat.framing_scale > 1 else ""
+        )
         graph_path.write_text(
             self._motion_filter(
                 beat, 0, duration,
                 start_frame=start_frame,
                 total_frames=total_frames,
                 continuous_motion=continuous_motion,
-            ),
+            ).replace("[0:v]scale=", f"[0:v]{framing}scale=", 1),
             encoding="utf-8",
         )
         command = [
@@ -371,6 +435,7 @@ class ScriptVideoAssembler:
         subtitle_path: Optional[str] = None,
         audio_path: Optional[Path] = None,
         output_path: Optional[Path] = None,
+        phrases: Sequence[object] = (),
     ) -> Path:
         if not images:
             raise ScriptVideoAssemblyError("No visual assets provided for assembly")
@@ -385,8 +450,11 @@ class ScriptVideoAssembler:
         temp_dir = Path(tempfile.mkdtemp(prefix="recut_assembly_", dir=str(output_path.parent)))
         try:
             audio_duration = await self.audio_duration(Path(audio_path))
-            beats = TimelineCompiler().compile(plan, len(asset_paths), audio_duration)
-            beats = self._merge_hyperframes_beats(beats, asset_paths)
+            beats = TimelineCompiler().compile(
+                plan, len(asset_paths), audio_duration, phrases=phrases, assets=asset_paths,
+            )
+            beats = self._safe_framing(beats, asset_paths)
+            beats = self._merge_contiguous_beats(beats, asset_paths)
             beat_durations = [beat.duration for beat in beats]
             # Image indices may differ while resolving to the same shared file.
             # A single camera path across that run removes zoom jumps at cuts.

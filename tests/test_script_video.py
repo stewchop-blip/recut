@@ -288,11 +288,11 @@ def _sample_plan():
     )
 
 
-def test_timeline_creates_short_moving_beats_and_respects_scene_assets():
+def test_timeline_preserves_planned_events_without_arbitrary_subcuts():
     plan = _sample_plan()
     beats = TimelineCompiler().compile(plan, image_count=2, audio_duration=40)
-    assert 12 <= len(beats) <= 20
-    assert max(beat.duration for beat in beats) <= 3.1
+    assert len(beats) == len(plan.scenes)
+    assert max(beat.duration for beat in beats) > 3.1
     assert {beat.image_index for beat in beats} == {0, 1}
     assert len({beat.motion for beat in beats}) > 1
 
@@ -311,8 +311,6 @@ async def test_assembler_renders_vertical_mp4_with_audio_and_valid_probe(tmp_pat
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
         pytest.skip("FFmpeg and ffprobe are required for the integration test")
-
-    monkeypatch.setattr(TimelineCompiler, "beat_target_seconds", 0.5)
 
     image_paths = []
     for index, color in enumerate(("red", "blue", "green")):

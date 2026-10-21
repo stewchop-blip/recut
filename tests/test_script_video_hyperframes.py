@@ -287,11 +287,11 @@ def test_hyperframes_editor_keeps_one_continuous_graphic_beat(tmp_path):
         VisualBeat("s2", 2, 2.0, "static", "cut"),
         VisualBeat("s3", 1, 1.2, "static", "cut"),
     ]
-    merged = ScriptVideoAssembler._merge_hyperframes_beats(beats, assets)
+    merged = ScriptVideoAssembler._merge_contiguous_beats(beats, assets)
     assert len(merged) == 5
     assert merged[1] == VisualBeat("s1", 1, 3.8, "static", "fade")
     assert merged[2:4] == beats[3:5]  # Stock-video handling unchanged.
     assert merged[4] == beats[5]  # A separate scene does not get merged.
-    assert ScriptVideoAssembler._merge_hyperframes_beats(
+    assert ScriptVideoAssembler._merge_contiguous_beats(
         beats[:1], assets
     ) == beats[:1]

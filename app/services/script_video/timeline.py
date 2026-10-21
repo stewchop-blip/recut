@@ -1,8 +1,10 @@
-"""Compile a script plan into short, audio-length visual beats."""
+"""Compile planned story events against the existing narration clock."""
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
+from typing import Sequence
 
 from app.services.script_video.models import VideoPlan
 
@@ -14,70 +16,81 @@ class VisualBeat:
     duration: float
     motion: str
     transition: str
+    importance: int = 3
+    framing_scale: float = 1.0
 
 
 class TimelineCompiler:
-    """Compile planned scenes into visual beats without needless visual reuse.
+    """Use actual scene events, not arbitrary cuts into the same composition.
 
-    Quality V3 keeps provider spend bounded, so the editor must squeeze more
-    perceived shots out of each paid keyframe. Long still-image scenes are split
-    into short editorial beats with alternating crop/motion while stock clips
-    keep their native movement. This raises pacing without another API call.
+    An unlocated story object is not permission to crop. The existing planner
+    already supplies distinct shots; repeated stills retain one camera path.
     """
 
-    # Around 3 seconds is a better ceiling for Shorts/Reels than the old 4.2s.
-    # A ~4.4s planned scene will now become two distinct editorial beats rather
-    # than one long hold, while very short scenes remain a single beat.
-    beat_target_seconds = 3.0
     transition_seconds = 0.22
 
     @staticmethod
-    def _second_motion(motion: str) -> str:
-        return {
-            "zoom_in": "pan_left",
-            "zoom_out": "pan_right",
-            "pan_left": "zoom_in",
-            "pan_right": "zoom_out",
-            "static": "zoom_in",
-        }.get(motion, "zoom_in")
-
-    def compile(self, plan: VideoPlan, image_count: int, audio_duration: float) -> list[VisualBeat]:
-        if image_count < 1:
-            raise ValueError("Timeline requires at least one image")
-        if not plan.scenes:
-            raise ValueError("Timeline requires at least one scene")
-
-        duration = max(1.0, float(audio_duration or plan.target_duration))
+    def _scene_durations(plan: VideoPlan, duration: float, phrases: Sequence[object]) -> list[float]:
         weights = [max(1.0, float(scene.duration_hint)) for scene in plan.scenes]
-        weight_total = sum(weights)
-        scene_seconds = [duration * weight / weight_total for weight in weights]
-        beat_target = self.beat_target_seconds if len(plan.scenes) >= 8 else min(self.beat_target_seconds, 2.8)
-        beat_counts = [max(1, math.ceil(seconds / beat_target)) for seconds in scene_seconds]
+        fallback = [duration * weight / sum(weights) for weight in weights]
+        script = [re.findall(r"\w+", scene.narration.casefold()) for scene in plan.scenes]
+        # Subtitle text is already the TTS script, even when Whisper supplies
+        # timing. Require exact coverage rather than silently align other words.
+        tokens: list[str] = []
+        intervals: list[tuple[float, float]] = []
+        previous_end = 0.0
+        for phrase in phrases:
+            words = re.findall(r"\w+", str(getattr(phrase, "text", "")).casefold())
+            try:
+                start, end = float(phrase.start), float(phrase.end)
+            except (AttributeError, TypeError, ValueError):
+                return fallback
+            if not words or not all(map(math.isfinite, (start, end))):
+                return fallback
+            if start < previous_end - 0.05 or end <= start or start < 0 or end > duration + 0.1:
+                return fallback
+            step = (end - start) / len(words)
+            intervals.extend((start + i * step, start + (i + 1) * step) for i in range(len(words)))
+            tokens.extend(words)
+            previous_end = end
+        if not intervals or tokens != [word for words in script for word in words] or not all(script):
+            return fallback
+        boundaries = [0.0]
+        consumed = 0
+        for words in script[:-1]:
+            consumed += len(words)
+            boundaries.append((intervals[consumed - 1][1] + intervals[consumed][0]) / 2)
+        boundaries.append(duration)
+        result = [end - start for start, end in zip(boundaries, boundaries[1:])]
+        return result if min(result) >= 0.1 else fallback
 
-        # Only xfade/slide transitions shorten the concatenated visual timeline.
-        # Internal sub-beats are hard cuts, so compensating for them made the
-        # visual stream longer than narration and forced `-shortest` to chop the
-        # ending. Add overlap compensation only for actual cross-scene xfade.
-        overlaps = sum(
-            1
-            for scene_index, scene in enumerate(plan.scenes)
-            if scene_index > 0 and scene.transition != "cut"
-        )
-        visual_duration = duration + overlaps * self.transition_seconds
-        scene_seconds = [visual_duration * weight / weight_total for weight in weights]
-
+    def compile(
+        self, plan: VideoPlan, image_count: int, audio_duration: float,
+        *, phrases: Sequence[object] = (), assets: Sequence[object] = (),
+    ) -> list[VisualBeat]:
+        if image_count < 1 or not plan.scenes:
+            raise ValueError("Timeline requires scenes and at least one visual asset")
+        duration = float(audio_duration or plan.target_duration)
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError("Timeline requires a finite positive audio duration")
+        seconds = self._scene_durations(plan, duration, phrases)
+        indices = [round(i * (image_count - 1) / max(1, len(plan.scenes) - 1))
+                   for i in range(len(plan.scenes))]
         beats: list[VisualBeat] = []
-        for scene_index, (scene, seconds, count) in enumerate(zip(plan.scenes, scene_seconds, beat_counts)):
-            image_index = round(scene_index * (image_count - 1) / max(1, len(plan.scenes) - 1))
-            beat_duration = seconds / count
-            for beat_index in range(count):
-                transition = "cut" if not beats else (scene.transition if beat_index == 0 else "cut")
-                motion = scene.motion_type if beat_index % 2 == 0 else self._second_motion(scene.motion_type)
-                beats.append(VisualBeat(
-                    scene_id=scene.id,
-                    image_index=image_index,
-                    duration=beat_duration,
-                    motion=motion,
-                    transition=transition,
-                ))
+        for index, (scene, length, image_index) in enumerate(zip(plan.scenes, seconds, indices)):
+            same_source = index > 0 and (
+                assets[image_index] == assets[indices[index - 1]] if len(assets) == image_count
+                else image_index == indices[index - 1]
+            )
+            # Reveals need a legible cut. Never dissolve a picture into itself.
+            short_edge = index > 0 and min(seconds[index - 1], length) < 2 * self.transition_seconds
+            transition = (
+                "cut" if not beats or same_source or scene.importance >= 4 or short_edge
+                else scene.transition
+            )
+            overlap = self.transition_seconds if transition != "cut" else 0.0
+            beats.append(VisualBeat(
+                scene.id, image_index, length + overlap, scene.motion_type,
+                transition, scene.importance,
+            ))
         return beats
